@@ -1,6 +1,5 @@
 import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
 import fs from 'node:fs/promises';
-import path from 'node:path';
 import { randomUUID } from 'node:crypto';
 import type { McpServer } from '@modelcontextprotocol/server';
 import * as z from 'zod/v4';
@@ -42,8 +41,13 @@ function shellInvocation(kind: ShellKind, command: string): { executable: string
   if (kind === 'bash') return { executable: 'bash', args: ['-lc', command] };
   if (kind === 'sh') return { executable: 'sh', args: ['-lc', command] };
 
+  // PowerShell is the most predictable default for complex quoted commands on Windows.
+  // `cmd` remains available explicitly for callers that need cmd.exe syntax.
   if (process.platform === 'win32') {
-    return { executable: process.env.ComSpec || 'cmd.exe', args: ['/d', '/s', '/c', command] };
+    return {
+      executable: 'powershell.exe',
+      args: ['-NoLogo', '-NoProfile', '-NonInteractive', '-Command', command],
+    };
   }
   return { executable: '/bin/sh', args: ['-lc', command] };
 }
@@ -244,7 +248,7 @@ export function registerShellTools(server: McpServer): void {
     {
       title: 'Run local command',
       description:
-        'Execute an arbitrary local shell command as the OS user running ChatGPTX. This is intentionally powerful: filesystem root restrictions do NOT sandbox commands. Use background=true for long-running processes.',
+        'Execute an arbitrary local shell command as the OS user running ChatGPTX. This is intentionally powerful: filesystem root restrictions do NOT sandbox commands. Auto uses PowerShell on Windows and /bin/sh on Unix. Use background=true for long-running processes.',
       inputSchema: z.object({
         command: z.string().min(1),
         cwd: z.string().optional(),
