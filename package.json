@@ -13,7 +13,8 @@
     "build": "tsc -p tsconfig.json",
     "start": "node dist/index.js",
     "start:stdio": "node dist/index.js --stdio",
-    "check": "tsc -p tsconfig.json --noEmit"
+    "check": "tsc -p tsconfig.json --noEmit",
+    "test:smoke": "node scripts/smoke.mjs"
   },
   "dependencies": {
     "@modelcontextprotocol/node": "^2.0.0",
@@ -21,6 +22,7 @@
     "zod": "^4.3.6"
   },
   "devDependencies": {
+    "@modelcontextprotocol/client": "^2.0.0",
     "@types/node": "^24.0.0",
     "tsx": "^4.21.0",
     "typescript": "^6.0.0"
