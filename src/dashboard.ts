@@ -18,8 +18,9 @@ import { clearRuntimeKey, credentialStoreInfo, loadRuntimeKey, saveRuntimeKey } 
 import { SERVER_NAME, SERVER_VERSION } from './server.js';
 import { terminateAllManagedProcesses } from './tools/shell.js';
 import { DASHBOARD_HTML } from './dashboard-page.js';
+import { getInvocationLog } from './invocation-log.js';
 
-const PROFILE_NAME = 'chatgptx';
+const PROFILE_NAME = 'chatx';
 const MAX_BODY_BYTES = 32 * 1024;
 const MAX_LOG_LINES = 300;
 const DISCOVERY_CONTENT_TYPE_HEADER = 'Content-Type: application/json';
@@ -433,7 +434,7 @@ export class TunnelDashboard {
     const after = getRuntimeSettings();
     if (before.permissions.shell && !after.permissions.shell) {
       const terminated = await terminateAllManagedProcesses();
-      this.addLog('console', `Shell 已关闭；已请求终止 ${terminated} 个由 ChatGPTX 管理的后台进程。`);
+      this.addLog('console', `Shell 已关闭；已请求终止 ${terminated} 个由 ChatX 管理的后台进程。`);
     } else {
       this.addLog('console', '设置已更新，并立即对后续 MCP 工具调用生效。');
     }
@@ -514,6 +515,10 @@ export class TunnelDashboard {
     }
     if (req.method === 'GET' && pathname === '/api/diagnostics') {
       json(res, 200, { ok: true, checks: await this.diagnostics(), status: this.snapshot() });
+      return true;
+    }
+    if (req.method === 'GET' && pathname === '/api/invocations') {
+      json(res, 200, { ok: true, entries: getInvocationLog(500) });
       return true;
     }
 

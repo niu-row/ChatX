@@ -5,6 +5,8 @@ dist/
 .DS_Store
 Thumbs.db
 .chatgptx/
-src-tauri/target/
+src-tauri/target*/
+src-tauri/resources/
 src-tauri/gen/schemas/
 .tools/
+release/

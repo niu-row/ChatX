@@ -1,8 +1,8 @@
-# ChatGPTX
+# ChatX
 
-ChatGPTX is a local, full-capability MCP server intended to be reached from ChatGPT through a custom MCP app/connector and OpenAI Secure MCP Tunnel.
+ChatX is a local, full-capability MCP server intended to be reached from ChatGPT through a custom MCP app/connector and OpenAI Secure MCP Tunnel.
 
-It does **not** call the OpenAI API itself. ChatGPT remains the MCP client; ChatGPTX only exposes local tools.
+It does **not** call the OpenAI API itself. ChatGPT remains the MCP client; ChatX only exposes local tools.
 
 ```text
 ChatGPT
@@ -10,7 +10,7 @@ ChatGPT
   -> OpenAI Secure MCP Tunnel
   -> tunnel-client on your machine
   -> http://127.0.0.1:3210/mcp
-  -> ChatGPTX
+  -> ChatX
        -> filesystem
        -> shell / processes
        -> Git
@@ -103,13 +103,13 @@ http://127.0.0.1:3210/
 
 ### Tauri desktop console
 
-The preferred Windows UI is the Tauri desktop console. Double-click `启动-ChatGPTX-桌面版.cmd`, or run `npm run desktop:dev`.
+The preferred Windows UI is the installed Tauri desktop app. After installing the NSIS package, launch ChatX directly from the Start menu or its desktop shortcut. For development, use `npm run desktop:dev` from a terminal.
 
-The desktop app keeps the existing Node/MCP backend and adds a native desktop shell. It starts `dist/index.js` when no ChatGPTX backend is already running on port 3210, uses a native Windows folder picker for allowed roots, and proxies only the local management API paths it needs. If ChatGPTX was already running before the desktop app opened, the desktop app reuses it and does not own or stop that external process.
+The desktop app keeps the existing Node/MCP backend and adds a native desktop shell. It starts `dist/index.js` with no visible Windows console when no ChatX backend is already running on port 3210, uses a native Windows folder picker for allowed roots, and proxies only the local management API paths it needs. The normal minimize button minimizes to the Windows taskbar; closing the main window hides ChatX to the system tray, where left-click restores it and the tray menu provides an explicit Exit command. If ChatX was already running before the desktop app opened, the desktop app reuses it and does not own or stop that external process.
 
 The Tunnel ID is stored in `.chatgptx/settings.json`. The Runtime API Key can remain ephemeral or, when you opt in, be encrypted with Windows DPAPI (`CurrentUser`) and stored separately from `settings.json`; it is never returned in logs. The desktop UI also includes direct buttons for the OpenAI Tunnel ID and Runtime API Key management pages.
 
-The original browser console remains available as a fallback. Double-click `启动-ChatGPTX-Web.cmd`, or use the existing `npm run console` command. The default `启动-ChatGPTX.cmd` now launches the Tauri desktop console.
+The original browser console remains available as a development fallback through `npm run console`.
 
 Health check:
 
@@ -119,7 +119,7 @@ http://127.0.0.1:3210/healthz
 
 ## Windows: full local access
 
-By default, filesystem tools are restricted to the directory from which ChatGPTX is started. To intentionally give filesystem tools unrestricted access as the current Windows user:
+By default, filesystem tools are restricted to the directory from which ChatX is started. To intentionally give filesystem tools unrestricted access as the current Windows user:
 
 ```powershell
 $env:CHATGPTX_FULL_ACCESS = "true"
@@ -127,7 +127,7 @@ $env:CHATGPTX_ENABLE_SHELL = "true"
 npm run dev
 ```
 
-You normally should **not** run the MCP server as Administrator. The shell tool inherits the permissions of the account running ChatGPTX.
+You normally should **not** run the MCP server as Administrator. The shell tool inherits the permissions of the account running ChatX.
 
 To restrict filesystem tools to selected directories instead:
 
@@ -175,7 +175,7 @@ export CHATGPTX_ENABLE_SHELL=false
 
 ChatGPT cannot directly call a localhost MCP URL. OpenAI Secure MCP Tunnel runs an outbound-only tunnel client on the same machine/network and forwards MCP requests to the local server.
 
-Start ChatGPTX first and verify `/healthz`, then configure the official `tunnel-client` with these minimum values:
+Start ChatX first and verify `/healthz`, then configure the official `tunnel-client` with these minimum values:
 
 ```text
 CONTROL_PLANE_API_KEY
@@ -194,7 +194,7 @@ tunnel-client doctor --explain
 tunnel-client run --log.level=info --log.format=struct-text
 ```
 
-Then create/configure the custom MCP app in ChatGPT and select the tunnel connection. Keep both ChatGPTX and `tunnel-client` running while ChatGPT is using the connector.
+Then create/configure the custom MCP app in ChatGPT and select the tunnel connection. Keep both ChatX and `tunnel-client` running while ChatGPT is using the connector.
 
 When the local console manages `tunnel-client`, it explicitly adds `Content-Type: application/json` to MCP discovery/probe requests. This avoids newer MCP SDK v2 servers rejecting a probe POST with HTTP 415 when an intermediary/client omits the JSON media type. Tunnel startup is not considered successful until the tunnel client's own ephemeral health listener reports `/readyz` healthy via `--health.url-file`.
 
@@ -204,7 +204,7 @@ OpenAI Secure MCP Tunnel documentation: <https://developers.openai.com/api/docs/
 
 ## ChatGPT plan limitation vs MCP limitation
 
-ChatGPTX itself does not know or care which ChatGPT plan is calling it. The MCP server exposes the same tool set to any compatible MCP client.
+ChatX itself does not know or care which ChatGPT plan is calling it. The MCP server exposes the same tool set to any compatible MCP client.
 
 Any limitation on whether ChatGPT may invoke write/modify actions is enforced by the **ChatGPT product/workspace**, not by this MCP server. At the time this README was written, OpenAI documents full MCP write/modify support for Business and Enterprise/Edu, with more limited custom-MCP access on other plans.
 
@@ -212,7 +212,7 @@ That means the same server can expose `fs_write`, `fs_delete`, `run_command`, an
 
 ## Configuration
 
-Copy `.env.example` as a reference. ChatGPTX reads environment variables directly; it does not automatically load `.env` files.
+Copy `.env.example` as a reference. ChatX reads environment variables directly; it does not automatically load `.env` files.
 
 | Variable | Default | Meaning |
 | --- | --- | --- |
@@ -261,7 +261,7 @@ Or run the MCP Inspector against the development command:
 npx @modelcontextprotocol/inspector npx tsx src/index.ts --stdio
 ```
 
-Do not write normal logs to stdout in stdio mode because stdout is the MCP protocol channel. ChatGPTX writes its startup message to stderr.
+Do not write normal logs to stdout in stdio mode because stdout is the MCP protocol channel. ChatX writes its startup message to stderr.
 
 ## Safety model
 

@@ -9,8 +9,9 @@ import { registerFilesystemTools } from './tools/filesystem.js';
 import { registerGitTools } from './tools/git.js';
 import { registerShellTools } from './tools/shell.js';
 import { textResult } from './utils/results.js';
+import { recordInvocation } from './invocation-log.js';
 
-export const SERVER_NAME = 'chatgptx';
+export const SERVER_NAME = 'chatx';
 export const SERVER_VERSION = '0.1.0';
 
 export function buildServer(): McpServer {
@@ -19,10 +20,40 @@ export function buildServer(): McpServer {
     { capabilities: { tools: {} } },
   );
 
+  const registerable = server as unknown as { registerTool: (...args: unknown[]) => unknown };
+  const rawRegisterTool = registerable.registerTool.bind(server);
+  registerable.registerTool = (...args: unknown[]): unknown => {
+    const toolName = typeof args[0] === 'string' ? args[0] : 'unknown';
+    const handlerIndex = args.length - 1;
+    const handler = args[handlerIndex];
+    if (typeof handler !== 'function') return rawRegisterTool(...args);
+
+    args[handlerIndex] = async (...handlerArgs: unknown[]) => {
+      const started = Date.now();
+      let status: 'ok' | 'error' = 'ok';
+      try {
+        const result = await handler(...handlerArgs);
+        if (result && typeof result === 'object' && 'isError' in result && result.isError === true) status = 'error';
+        return result;
+      } catch (error) {
+        status = 'error';
+        throw error;
+      } finally {
+        recordInvocation({
+          startedAt: new Date(started).toISOString(),
+          tool: toolName,
+          status,
+          durationMs: Math.max(0, Date.now() - started),
+        });
+      }
+    };
+    return rawRegisterTool(...args);
+  };
+
   server.registerTool(
     'server_info',
     {
-      title: 'ChatGPTX server info',
+      title: 'ChatX server info',
       description: 'Return server, platform, capability, local path-policy, and runtime settings information.',
       inputSchema: z.object({}),
       annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
@@ -49,7 +80,7 @@ export function buildServer(): McpServer {
           saved: credentials.saved,
         },
         warning:
-          'run_command executes with the permissions of the OS account running ChatGPTX. Filesystem root policy does not sandbox shell commands. git_run additionally requires the Advanced Git permission.',
+          'run_command executes with the permissions of the OS account running ChatX. Filesystem root policy does not sandbox shell commands. git_run additionally requires the Advanced Git permission.',
       });
     },
   );

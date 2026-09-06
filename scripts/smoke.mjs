@@ -96,13 +96,13 @@ try {
   await waitForHealth();
 
   const dashboard = await fetch(`${baseUrl}/`);
-  if (!dashboard.ok || !(await dashboard.text()).includes('ChatGPTX 本地控制台')) {
+  if (!dashboard.ok || !(await dashboard.text()).includes('ChatX 本地控制台')) {
     throw new Error('Dashboard did not load.');
   }
 
   const tunnelStatusResponse = await fetch(`${baseUrl}/api/tunnel/status`);
   const tunnelStatus = await tunnelStatusResponse.json();
-  if (!tunnelStatusResponse.ok || tunnelStatus.status?.service?.name !== 'chatgptx') {
+  if (!tunnelStatusResponse.ok || tunnelStatus.status?.service?.name !== 'chatx') {
     throw new Error(`Unexpected dashboard status: ${JSON.stringify(tunnelStatus)}`);
   }
   if (tunnelStatus.status?.settings?.version !== 2) {
@@ -142,7 +142,7 @@ try {
     throw new Error(`Non-JSON MCP POST returned ${nonJson.status}, expected 415.`);
   }
   await new Promise((resolve) => setTimeout(resolve, 50));
-  if (serverLogs.includes('[chatgptx] MCP error: Error: Unsupported Media Type')) {
+  if (serverLogs.includes('[chatx] MCP error: Error: Unsupported Media Type')) {
     throw new Error(`Non-JSON probe reached the MCP SDK error logger.\n${serverLogs}`);
   }
 
@@ -185,7 +185,16 @@ try {
   if (missing.length > 0) throw new Error(`Missing tools: ${missing.join(', ')}`);
 
   const info = await call(client, 'server_info');
-  if (info.name !== 'chatgptx') throw new Error(`Unexpected server info: ${JSON.stringify(info)}`);
+  if (info.name !== 'chatx') throw new Error(`Unexpected server info: ${JSON.stringify(info)}`);
+
+  const invocationResponse = await fetch(`${baseUrl}/api/invocations`);
+  const invocationPayload = await invocationResponse.json();
+  if (!invocationResponse.ok || !invocationPayload.entries?.some((entry) => entry.tool === 'server_info' && entry.status === 'ok')) {
+    throw new Error(`Invocation log did not record server_info: ${JSON.stringify(invocationPayload)}`);
+  }
+  if (invocationPayload.entries?.some((entry) => 'arguments' in entry || 'input' in entry)) {
+    throw new Error('Invocation log must not record tool arguments.');
+  }
 
   await call(client, 'fs_write', { path: smokeFile, content: 'hello\nsecond line\n' });
   await call(client, 'fs_edit', { path: smokeFile, old_text: 'hello', new_text: 'world' });

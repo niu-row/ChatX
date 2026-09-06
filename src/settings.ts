@@ -168,7 +168,7 @@ function load(): { settings: RuntimeSettings; migrated: boolean } {
       migrated: version !== SETTINGS_VERSION || !filesystem || !('permissionPreset' in parsed),
     };
   } catch (error) {
-    console.error('[chatgptx] failed to load settings:', error);
+    console.error('[chatx] failed to load settings:', error);
     return { settings: structuredClone(defaults), migrated: false };
   }
 }
@@ -186,9 +186,9 @@ function save(): void {
 if (loaded.migrated) {
   try {
     save();
-    console.error(`[chatgptx] migrated settings to version ${SETTINGS_VERSION}: ${SETTINGS_FILE}`);
+    console.error(`[chatx] migrated settings to version ${SETTINGS_VERSION}: ${SETTINGS_FILE}`);
   } catch (error) {
-    console.error('[chatgptx] failed to persist migrated settings:', error);
+    console.error('[chatx] failed to persist migrated settings:', error);
   }
 }
 loaded = { settings: current, migrated: false };
@@ -228,7 +228,7 @@ export function updateAllowedRoots(roots: string[]): RuntimeSettings {
 
 export function requirePermission(permission: keyof PermissionSettings, label: string): void {
   if (!current.permissions[permission]) {
-    throw new Error(`${label} is disabled in the ChatGPTX local console.`);
+    throw new Error(`${label} is disabled in the ChatX local console.`);
   }
 }
 

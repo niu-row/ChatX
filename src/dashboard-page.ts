@@ -3,7 +3,7 @@ export const DASHBOARD_HTML = String.raw`<!doctype html>
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>ChatGPTX 本地控制台</title>
+  <title>ChatX 本地控制台</title>
   <style>
     :root{color-scheme:dark;--bg:#07100e;--panel:#0d1916;--line:#263b34;--text:#ecf6f1;--muted:#8ca49a;--green:#5cf2a5;--red:#ff8278;--amber:#ffc862}
     *{box-sizing:border-box} body{margin:0;background:linear-gradient(145deg,#060b0a,#091411 55%,#050807);color:var(--text);font:15px/1.5 Inter,"Segoe UI","Microsoft YaHei",sans-serif}
@@ -22,7 +22,7 @@ export const DASHBOARD_HTML = String.raw`<!doctype html>
 </head>
 <body>
 <div class="shell">
-  <header><div><h1>ChatGPTX 本地控制台</h1><div class="sub">MCP、Secure Tunnel、权限与诊断</div></div><div class="pill hide-sm"><span class="dot on"></span>仅限本机访问</div></header>
+  <header><div><h1>ChatX 本地控制台</h1><div class="sub">MCP、Secure Tunnel、权限与诊断</div></div><div class="pill hide-sm"><span class="dot on"></span>仅限本机访问</div></header>
   <div class="grid">
     <div class="stack">
       <section class="card"><div class="head"><div class="eyebrow">Connect</div><h2>OpenAI Secure MCP Tunnel</h2></div><div class="body">
@@ -56,7 +56,7 @@ export const DASHBOARD_HTML = String.raw`<!doctype html>
       <section class="card"><div class="head"><div class="eyebrow">Activity</div><h2>连接日志</h2></div><div class="body"><div class="log" id="log">尚无操作。</div></div></section>
     </div>
   </div>
-  <footer id="settingsFile">ChatGPTX</footer>
+  <footer id="settingsFile">ChatX</footer>
 </div>
 <script>
 const $ = (id) => document.getElementById(id);

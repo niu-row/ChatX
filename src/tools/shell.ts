@@ -253,7 +253,7 @@ export function registerShellTools(server: McpServer): void {
     {
       title: 'Run local command',
       description:
-        'Execute an arbitrary local shell command as the OS user running ChatGPTX. This is intentionally powerful: filesystem root restrictions do NOT sandbox commands. Auto uses PowerShell on Windows and /bin/sh on Unix. Use background=true for long-running processes.',
+        'Execute an arbitrary local shell command as the OS user running ChatX. This is intentionally powerful: filesystem root restrictions do NOT sandbox commands. Auto uses PowerShell on Windows and /bin/sh on Unix. Use background=true for long-running processes.',
       inputSchema: z.object({
         command: z.string().min(1),
         cwd: z.string().optional(),
@@ -330,7 +330,7 @@ export function registerShellTools(server: McpServer): void {
     'process_list',
     {
       title: 'List managed processes',
-      description: 'List background processes started through this ChatGPTX server instance.',
+      description: 'List background processes started through this ChatX server instance.',
       inputSchema: z.object({}),
       annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
     },

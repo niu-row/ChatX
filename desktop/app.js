@@ -11,7 +11,8 @@ const pageMeta = {
   connection: ['连接', '配置并启动 OpenAI Secure MCP Tunnel。'],
   access: ['权限', '设置访问模式和 ChatGPT 可访问的本地目录。'],
   diagnostics: ['诊断', '检查 MCP、Tunnel、Git 与本地环境。'],
-  guide: ['使用教程', '按步骤完成第一次 ChatGPTX 设置。'],
+  invocations: ['调用日志', '查看最近的 MCP 工具调用、结果与耗时。'],
+  guide: ['使用教程', '按步骤完成第一次 ChatX 设置。'],
 };
 
 const permissionMeta = [
@@ -46,6 +47,7 @@ function setPage(page) {
   }
   $('pageTitle').textContent = pageMeta[page][0];
   $('pageSubtitle').textContent = pageMeta[page][1];
+  if (page === 'invocations') void refreshInvocations();
   window.scrollTo({ top: 0, behavior: 'smooth' });
 }
 
@@ -175,7 +177,7 @@ function renderOverview(s, tunnel, running) {
   const hasRoots = Boolean(s.policy.fullAccess || s.policy.roots?.length);
   const permissions = s.policy.permissions || {};
 
-  $('heroTitle').textContent = running ? 'ChatGPTX 已连接' : 'ChatGPTX 本地服务已就绪';
+  $('heroTitle').textContent = running ? 'ChatX 已连接' : 'ChatX 本地服务已就绪';
   $('heroCopy').textContent = running
     ? 'Secure Tunnel 正在运行，ChatGPT 可以通过 MCP 调用已授权的本机能力。'
     : configuredTunnel
@@ -282,6 +284,58 @@ async function openExternal(url) {
   }
 }
 
+function formatInvocationTime(value) {
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return String(value || '-');
+  return date.toLocaleTimeString('zh-CN', { hour12: false });
+}
+
+async function refreshInvocations() {
+  const rows = $('invocationRows');
+  if (!rows) return;
+  const limit = Math.max(1, Number.parseInt($('invocationLimit').value, 10) || 50);
+  rows.innerHTML = '<tr><td colspan="4" class="empty-cell">正在读取调用日志…</td></tr>';
+  try {
+    const payload = await backend('GET', '/api/invocations');
+    const entries = Array.isArray(payload.entries) ? payload.entries.slice(0, limit) : [];
+    $('invocationCount').textContent = `${entries.length} 条调用`;
+    rows.innerHTML = '';
+    if (!entries.length) {
+      rows.innerHTML = '<tr><td colspan="4" class="empty-cell">尚无调用记录。开始在 ChatGPT 中使用 @chatx 后，这里会显示工具调用。</td></tr>';
+      return;
+    }
+    for (const entry of entries) {
+      const row = document.createElement('tr');
+      const time = document.createElement('td');
+      time.textContent = formatInvocationTime(entry.startedAt);
+      time.title = String(entry.startedAt || '');
+      const tool = document.createElement('td');
+      const toolCode = document.createElement('code');
+      toolCode.textContent = String(entry.tool || '-');
+      tool.append(toolCode);
+      const status = document.createElement('td');
+      const badge = document.createElement('span');
+      badge.className = `call-status ${entry.status === 'ok' ? 'ok' : 'bad'}`;
+      badge.textContent = entry.status === 'ok' ? '成功' : '失败';
+      status.append(badge);
+      const duration = document.createElement('td');
+      duration.textContent = `${Number(entry.durationMs) || 0} ms`;
+      row.append(time, tool, status, duration);
+      rows.append(row);
+    }
+  } catch (error) {
+    $('invocationCount').textContent = '读取失败';
+    rows.innerHTML = '';
+    const row = document.createElement('tr');
+    const cell = document.createElement('td');
+    cell.colSpan = 4;
+    cell.className = 'empty-cell bad';
+    cell.textContent = normalizeError(error);
+    row.append(cell);
+    rows.append(row);
+  }
+}
+
 async function runDiagnostics() {
   const host = $('diagnostics');
   host.innerHTML = '<div class="empty-state">正在诊断…</div>';
@@ -363,11 +417,15 @@ $('applyPreset').addEventListener('click', async () => {
 
 $('chooseFolders').addEventListener('click', chooseFolders);
 $('diagnose').addEventListener('click', runDiagnostics);
+$('refreshInvocations').addEventListener('click', refreshInvocations);
+$('invocationLimit').addEventListener('change', refreshInvocations);
 
 $('getTunnelId').addEventListener('click', () => openExternal('https://platform.openai.com/settings/organization/tunnels'));
 $('getRuntimeKey').addEventListener('click', () => openExternal('https://platform.openai.com/settings/organization/api-keys'));
 $('guideTunnelId').addEventListener('click', () => openExternal('https://platform.openai.com/settings/organization/tunnels'));
 $('guideRuntimeKey').addEventListener('click', () => openExternal('https://platform.openai.com/settings/organization/api-keys'));
+$('guideChatGPTPlugins').addEventListener('click', () => openExternal('https://chatgpt.com/plugins'));
+$('guideDeveloperModeDocs').addEventListener('click', () => openExternal('https://help.openai.com/en/articles/12584461-developer-mode-and-full-mcp-connectors-in-chatgpt-beta'));
 
 async function bootstrap() {
   bindNavigation();
@@ -381,10 +439,13 @@ async function bootstrap() {
   }
 
   try {
-    $('log').textContent = '正在检查 ChatGPTX 后端…';
+    $('log').textContent = '正在检查 ChatX 后端…';
     await invoke('ensure_backend');
     await refresh();
-    setInterval(refresh, 2500);
+    setInterval(async () => {
+      await refresh();
+      if (currentPage === 'invocations') await refreshInvocations();
+    }, 2500);
   } catch (error) {
     $('sidebarDot').className = 'status-dot bad';
     $('sidebarStatus').textContent = '启动失败';
