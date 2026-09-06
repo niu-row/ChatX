@@ -3,6 +3,7 @@ import path from 'node:path';
 import type { McpServer } from '@modelcontextprotocol/server';
 import * as z from 'zod/v4';
 import { config } from '../config.js';
+import { requirePermission } from '../settings.js';
 import { assertExistingPath, assertPathAllowed } from '../security/path-policy.js';
 import { errorResult, textResult } from '../utils/results.js';
 
@@ -144,6 +145,7 @@ export function registerFilesystemTools(server: McpServer): void {
     },
     async ({ path: inputPath, recursive, max_depth }) => {
       try {
+        requirePermission('filesystemRead', 'Filesystem read tools');
         const resolved = await assertExistingPath(inputPath);
         const stat = await fs.lstat(resolved);
         if (!stat.isDirectory()) throw new Error(`Not a directory: ${resolved}`);
@@ -165,6 +167,7 @@ export function registerFilesystemTools(server: McpServer): void {
     },
     async ({ path: inputPath }) => {
       try {
+        requirePermission('filesystemRead', 'Filesystem read tools');
         const resolved = await assertExistingPath(inputPath);
         const stat = await fs.lstat(resolved);
         let symlink_target: string | null = null;
@@ -203,6 +206,7 @@ export function registerFilesystemTools(server: McpServer): void {
     },
     async ({ path: inputPath, encoding, offset, length, start_line, end_line }) => {
       try {
+        requirePermission('filesystemRead', 'Filesystem read tools');
         const resolved = await assertExistingPath(inputPath);
         const stat = await fs.stat(resolved);
         if (!stat.isFile()) throw new Error(`Not a file: ${resolved}`);
@@ -262,6 +266,7 @@ export function registerFilesystemTools(server: McpServer): void {
     },
     async ({ path: inputPath, content, encoding, overwrite, create_parents }) => {
       try {
+        requirePermission('filesystemWrite', 'Filesystem write tools');
         const resolved = await assertPathAllowed(inputPath);
         if (create_parents) await fs.mkdir(path.dirname(resolved), { recursive: true });
         const data = encoding === 'base64' ? Buffer.from(content, 'base64') : content;
@@ -289,6 +294,7 @@ export function registerFilesystemTools(server: McpServer): void {
     },
     async ({ path: inputPath, content, encoding, create_parents }) => {
       try {
+        requirePermission('filesystemWrite', 'Filesystem write tools');
         const resolved = await assertPathAllowed(inputPath);
         if (create_parents) await fs.mkdir(path.dirname(resolved), { recursive: true });
         const data = encoding === 'base64' ? Buffer.from(content, 'base64') : content;
@@ -318,6 +324,7 @@ export function registerFilesystemTools(server: McpServer): void {
     },
     async ({ path: inputPath, old_text, new_text, replace_all, expected_replacements }) => {
       try {
+        requirePermission('filesystemWrite', 'Filesystem write tools');
         const resolved = await assertExistingPath(inputPath);
         const stat = await fs.stat(resolved);
         if (!stat.isFile()) throw new Error(`Not a file: ${resolved}`);
@@ -356,6 +363,7 @@ export function registerFilesystemTools(server: McpServer): void {
     },
     async ({ path: inputPath, recursive }) => {
       try {
+        requirePermission('filesystemWrite', 'Filesystem write tools');
         const resolved = await assertPathAllowed(inputPath);
         await fs.mkdir(resolved, { recursive });
         return textResult({ path: resolved, created: true });
@@ -379,6 +387,7 @@ export function registerFilesystemTools(server: McpServer): void {
     },
     async ({ path: inputPath, recursive, force }) => {
       try {
+        requirePermission('filesystemWrite', 'Filesystem write tools');
         const resolved = await assertPathAllowed(inputPath);
         await fs.rm(resolved, { recursive, force });
         return textResult({ path: resolved, deleted: true });
@@ -403,6 +412,7 @@ export function registerFilesystemTools(server: McpServer): void {
     },
     async ({ source, destination, overwrite, create_parents }) => {
       try {
+        requirePermission('filesystemWrite', 'Filesystem write tools');
         const src = await assertExistingPath(source);
         const dst = await assertPathAllowed(destination);
         if (create_parents) await fs.mkdir(path.dirname(dst), { recursive: true });
@@ -441,6 +451,7 @@ export function registerFilesystemTools(server: McpServer): void {
     },
     async ({ source, destination, recursive, overwrite, create_parents }) => {
       try {
+        requirePermission('filesystemWrite', 'Filesystem write tools');
         const src = await assertExistingPath(source);
         const dst = await assertPathAllowed(destination);
         if (create_parents) await fs.mkdir(path.dirname(dst), { recursive: true });
@@ -473,6 +484,7 @@ export function registerFilesystemTools(server: McpServer): void {
     },
     async ({ root, query, regex, case_sensitive, extensions, exclude_directories, max_results }) => {
       try {
+        requirePermission('filesystemRead', 'Filesystem read tools');
         const resolvedRoot = await assertExistingPath(root);
         const stat = await fs.stat(resolvedRoot);
         if (!stat.isDirectory()) throw new Error(`Not a directory: ${resolvedRoot}`);

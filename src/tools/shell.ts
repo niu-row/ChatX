@@ -4,6 +4,7 @@ import { randomUUID } from 'node:crypto';
 import type { McpServer } from '@modelcontextprotocol/server';
 import * as z from 'zod/v4';
 import { config } from '../config.js';
+import { requirePermission } from '../settings.js';
 import { assertExistingPath, assertPathAllowed } from '../security/path-policy.js';
 import { errorResult, textResult, truncateText } from '../utils/results.js';
 
@@ -109,6 +110,12 @@ async function killProcessTree(record: ManagedProcess): Promise<void> {
       record.child.kill('SIGTERM');
     }
   }
+}
+
+export async function terminateAllManagedProcesses(): Promise<number> {
+  const running = [...processes.values()].filter((record) => record.exitedAt === null);
+  await Promise.all(running.map((record) => killProcessTree(record)));
+  return running.length;
 }
 
 function pruneProcesses(): void {
@@ -237,9 +244,7 @@ function runBackground(
 }
 
 function requireShellEnabled(): void {
-  if (!config.enableShell) {
-    throw new Error('Shell tools are disabled. Set CHATGPTX_ENABLE_SHELL=true to enable them.');
-  }
+  requirePermission('shell', 'Shell tools');
 }
 
 export function registerShellTools(server: McpServer): void {

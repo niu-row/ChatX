@@ -2,8 +2,9 @@ import os from 'node:os';
 import process from 'node:process';
 import { McpServer } from '@modelcontextprotocol/server';
 import * as z from 'zod/v4';
-import { config } from './config.js';
+import { getRuntimeSettings } from './settings.js';
 import { describePathPolicy } from './security/path-policy.js';
+import { credentialStoreInfo } from './security/credential-store.js';
 import { registerFilesystemTools } from './tools/filesystem.js';
 import { registerGitTools } from './tools/git.js';
 import { registerShellTools } from './tools/shell.js';
@@ -22,12 +23,14 @@ export function buildServer(): McpServer {
     'server_info',
     {
       title: 'ChatGPTX server info',
-      description: 'Return server, platform, capability, and local path-policy information.',
+      description: 'Return server, platform, capability, local path-policy, and runtime settings information.',
       inputSchema: z.object({}),
       annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
     },
-    async () =>
-      textResult({
+    async () => {
+      const runtime = getRuntimeSettings();
+      const credentials = credentialStoreInfo();
+      return textResult({
         name: SERVER_NAME,
         version: SERVER_VERSION,
         platform: process.platform,
@@ -35,11 +38,20 @@ export function buildServer(): McpServer {
         hostname: os.hostname(),
         node_version: process.version,
         cwd: process.cwd(),
+        settings_version: runtime.version,
+        permission_preset: runtime.permissionPreset,
         filesystem: describePathPolicy(),
-        shell_enabled: config.enableShell,
+        shell_enabled: runtime.permissions.shell,
+        permissions: runtime.permissions,
+        runtime_key_store: {
+          supported: credentials.supported,
+          provider: credentials.provider,
+          saved: credentials.saved,
+        },
         warning:
-          'run_command executes with the permissions of the OS account running ChatGPTX. Filesystem root policy does not sandbox shell commands.',
-      }),
+          'run_command executes with the permissions of the OS account running ChatGPTX. Filesystem root policy does not sandbox shell commands. git_run additionally requires the Advanced Git permission.',
+      });
+    },
   );
 
   registerFilesystemTools(server);

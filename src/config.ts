@@ -28,6 +28,7 @@ export const config = Object.freeze({
   host: process.env.CHATGPTX_HOST?.trim() || '127.0.0.1',
   port: envInt('CHATGPTX_PORT', 3210, 1, 65535),
   roots: parseRoots(),
+  settingsDir: path.resolve(process.env.CHATGPTX_SETTINGS_DIR?.trim() || path.join(process.cwd(), '.chatgptx')),
   fullAccess: envBool('CHATGPTX_FULL_ACCESS', false),
   enableShell: envBool('CHATGPTX_ENABLE_SHELL', true),
   authToken: process.env.CHATGPTX_AUTH_TOKEN?.trim() || null,

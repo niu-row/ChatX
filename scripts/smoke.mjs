@@ -1,4 +1,4 @@
-import { spawn } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
@@ -7,7 +7,9 @@ import { Client, StreamableHTTPClientTransport } from '@modelcontextprotocol/cli
 const port = 33000 + Math.floor(Math.random() * 10000);
 const baseUrl = `http://127.0.0.1:${port}`;
 const tempRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'chatgptx-smoke-'));
+const settingsDir = path.join(tempRoot, '.settings');
 const smokeFile = path.join(tempRoot, 'smoke.txt');
+const gitRepo = path.join(tempRoot, 'repo');
 let serverLogs = '';
 
 const server = spawn(process.execPath, ['dist/index.js'], {
@@ -17,6 +19,7 @@ const server = spawn(process.execPath, ['dist/index.js'], {
     CHATGPTX_HOST: '127.0.0.1',
     CHATGPTX_PORT: String(port),
     CHATGPTX_ROOTS: [tempRoot, process.cwd()].join(path.delimiter),
+    CHATGPTX_SETTINGS_DIR: settingsDir,
     CHATGPTX_FULL_ACCESS: 'false',
     CHATGPTX_ENABLE_SHELL: 'true',
   },
@@ -38,7 +41,7 @@ async function waitForHealth() {
       const response = await fetch(`${baseUrl}/healthz`);
       if (response.ok) return;
     } catch {
-      // Server is still starting.
+      // still starting
     }
     await new Promise((resolve) => setTimeout(resolve, 100));
   }
@@ -62,14 +65,86 @@ function jsonOf(result, toolName) {
   }
 }
 
+async function callRaw(client, name, args = {}) {
+  return await client.callTool({ name, arguments: args });
+}
+
 async function call(client, name, args = {}) {
-  const result = await client.callTool({ name, arguments: args });
-  return jsonOf(result, name);
+  return jsonOf(await callRaw(client, name, args), name);
+}
+
+function runGit(args, cwd = gitRepo) {
+  const result = spawnSync('git', args, { cwd, encoding: 'utf8', windowsHide: true });
+  if (result.status !== 0) throw new Error(`git ${args.join(' ')} failed:\n${result.stderr || result.stdout}`);
+  return result.stdout.trim();
+}
+
+async function localPost(url, body) {
+  return await fetch(`${baseUrl}${url}`, {
+    method: 'POST',
+    headers: {
+      'content-type': 'application/json',
+      origin: baseUrl,
+      'sec-fetch-site': 'same-origin',
+    },
+    body: JSON.stringify(body ?? {}),
+  });
 }
 
 let client;
 try {
   await waitForHealth();
+
+  const dashboard = await fetch(`${baseUrl}/`);
+  if (!dashboard.ok || !(await dashboard.text()).includes('ChatGPTX 本地控制台')) {
+    throw new Error('Dashboard did not load.');
+  }
+
+  const tunnelStatusResponse = await fetch(`${baseUrl}/api/tunnel/status`);
+  const tunnelStatus = await tunnelStatusResponse.json();
+  if (!tunnelStatusResponse.ok || tunnelStatus.status?.service?.name !== 'chatgptx') {
+    throw new Error(`Unexpected dashboard status: ${JSON.stringify(tunnelStatus)}`);
+  }
+  if (tunnelStatus.status?.settings?.version !== 2) {
+    throw new Error(`Expected settings v2, got ${JSON.stringify(tunnelStatus.status?.settings)}`);
+  }
+
+  const diagnosticsResponse = await fetch(`${baseUrl}/api/diagnostics`);
+  const diagnostics = await diagnosticsResponse.json();
+  const localMcpCheck = diagnostics.checks?.find((check) => check.name === '本地 MCP');
+  if (!diagnosticsResponse.ok || localMcpCheck?.status !== 'ok') {
+    throw new Error(`Diagnostics failed: ${JSON.stringify(diagnostics)}`);
+  }
+
+  const crossSiteConnect = await fetch(`${baseUrl}/api/tunnel/connect`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ tunnelId: 'tunnel_12345678', apiKey: 'not-a-real-key' }),
+  });
+  if (crossSiteConnect.status !== 403) {
+    throw new Error(`Dashboard accepted a connect request without a local Origin: ${crossSiteConnect.status}`);
+  }
+
+  const invalidLocalConnect = await localPost('/api/tunnel/connect', {
+    tunnelId: 'bad',
+    apiKey: 'not-a-real-key',
+  });
+  if (invalidLocalConnect.status !== 400) {
+    throw new Error(`Dashboard local input validation returned ${invalidLocalConnect.status}, expected 400.`);
+  }
+
+  const nonJson = await fetch(`${baseUrl}/mcp`, {
+    method: 'POST',
+    headers: { accept: 'application/json, text/event-stream' },
+    body: '{}',
+  });
+  if (nonJson.status !== 415) {
+    throw new Error(`Non-JSON MCP POST returned ${nonJson.status}, expected 415.`);
+  }
+  await new Promise((resolve) => setTimeout(resolve, 50));
+  if (serverLogs.includes('[chatgptx] MCP error: Error: Unsupported Media Type')) {
+    throw new Error(`Non-JSON probe reached the MCP SDK error logger.\n${serverLogs}`);
+  }
 
   client = new Client(
     { name: 'chatgptx-smoke', version: '0.1.0' },
@@ -100,6 +175,10 @@ try {
     'git_status',
     'git_diff',
     'git_log',
+    'git_stage',
+    'git_unstage',
+    'git_create_branch',
+    'git_commit',
     'git_run',
   ];
   const missing = expected.filter((name) => !toolNames.has(name));
@@ -110,10 +189,8 @@ try {
 
   await call(client, 'fs_write', { path: smokeFile, content: 'hello\nsecond line\n' });
   await call(client, 'fs_edit', { path: smokeFile, old_text: 'hello', new_text: 'world' });
-
   const read = await call(client, 'fs_read', { path: smokeFile });
   if (!read.content.includes('world')) throw new Error(`fs_read did not return edited content: ${read.content}`);
-
   const search = await call(client, 'fs_search', { root: tempRoot, query: 'world' });
   if (search.result_count < 1) throw new Error('fs_search did not find the edited text.');
 
@@ -134,16 +211,54 @@ try {
   await call(client, 'process_output', { process_id: background.process_id });
   await call(client, 'process_terminate', { process_id: background.process_id });
 
-  const git = await call(client, 'git_status', { repo: process.cwd() });
-  if (git.exit_code !== 0) throw new Error(`git_status failed: ${JSON.stringify(git)}`);
+  await fs.mkdir(gitRepo, { recursive: true });
+  runGit(['init']);
+  runGit(['config', 'user.name', 'ChatGPTX Smoke']);
+  runGit(['config', 'user.email', 'smoke@example.invalid']);
+  const tracked = path.join(gitRepo, 'tracked.txt');
+  await fs.writeFile(tracked, 'one\n', 'utf8');
+
+  const staged = await call(client, 'git_stage', { repo: gitRepo, paths: ['tracked.txt'] });
+  if (staged.exit_code !== 0) throw new Error(`git_stage failed: ${JSON.stringify(staged)}`);
+  const committed = await call(client, 'git_commit', { repo: gitRepo, message: 'initial smoke commit' });
+  if (committed.exit_code !== 0) throw new Error(`git_commit failed: ${JSON.stringify(committed)}`);
+
+  const log = await call(client, 'git_log', { repo: gitRepo, max_count: 5 });
+  if (!log.stdout.includes('initial smoke commit')) throw new Error(`git_log missing commit: ${JSON.stringify(log)}`);
+
+  await fs.writeFile(tracked, 'two\n', 'utf8');
+  await call(client, 'git_stage', { repo: gitRepo, paths: ['tracked.txt'] });
+  const unstaged = await call(client, 'git_unstage', { repo: gitRepo, paths: ['tracked.txt'] });
+  if (unstaged.exit_code !== 0) throw new Error(`git_unstage failed: ${JSON.stringify(unstaged)}`);
+  const branch = await call(client, 'git_create_branch', { repo: gitRepo, name: 'smoke-branch' });
+  if (branch.exit_code !== 0) throw new Error(`git_create_branch failed: ${JSON.stringify(branch)}`);
+
+  const advanced = await callRaw(client, 'git_run', { repo: gitRepo, args: ['status'] });
+  if (!advanced.isError || !textOf(advanced).includes('Advanced Git command execution is disabled')) {
+    throw new Error(`git_run should be disabled by default: ${textOf(advanced)}`);
+  }
+
+  const presetResponse = await localPost('/api/settings', { preset: 'developer' });
+  const presetBody = await presetResponse.json();
+  if (!presetResponse.ok || presetBody.status?.policy?.permissionPreset !== 'developer') {
+    throw new Error(`Developer preset failed: ${JSON.stringify(presetBody)}`);
+  }
+  if (presetBody.status.policy.permissions.shell !== false || presetBody.status.policy.permissions.gitAdvanced !== false) {
+    throw new Error(`Developer preset permissions are unsafe: ${JSON.stringify(presetBody.status.policy.permissions)}`);
+  }
+
+  const rootsResponse = await localPost('/api/settings', { roots: [tempRoot, process.cwd()] });
+  const rootsBody = await rootsResponse.json();
+  if (!rootsResponse.ok || rootsBody.status?.policy?.roots?.length !== 2) {
+    throw new Error(`Dynamic roots update failed: ${JSON.stringify(rootsBody)}`);
+  }
 
   await call(client, 'fs_delete', { path: smokeFile });
-
   console.log(`smoke ok: ${toolNames.size} tools over MCP`);
 } finally {
   if (client) await client.close().catch(() => {});
   server.kill('SIGTERM');
-  await new Promise((resolve) => setTimeout(resolve, 250));
+  await new Promise((resolve) => setTimeout(resolve, 300));
   if (server.exitCode === null) server.kill('SIGKILL');
   await fs.rm(tempRoot, { recursive: true, force: true }).catch(() => {});
 }

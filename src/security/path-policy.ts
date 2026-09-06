@@ -1,6 +1,6 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
-import { config } from '../config.js';
+import { getRuntimeSettings } from '../settings.js';
 
 function comparable(value: string): string {
   const normalized = path.resolve(value);
@@ -37,11 +37,15 @@ async function nearestExistingAncestor(value: string): Promise<string> {
   }
 }
 
-async function allowedByRealPath(target: string): Promise<boolean> {
+function configuredRoots(): string[] {
+  return getRuntimeSettings().filesystem.roots;
+}
+
+async function allowedByRealPath(target: string, roots: string[]): Promise<boolean> {
   const ancestor = await nearestExistingAncestor(target);
   const realAncestor = await realpathOrResolved(ancestor);
 
-  for (const configuredRoot of config.roots) {
+  for (const configuredRoot of roots) {
     const realRoot = await realpathOrResolved(configuredRoot);
     if (isWithin(realRoot, realAncestor)) return true;
   }
@@ -54,13 +58,15 @@ export async function assertPathAllowed(inputPath: string): Promise<string> {
   }
 
   const resolved = path.resolve(inputPath);
-  if (config.fullAccess) return resolved;
+  const runtime = getRuntimeSettings();
+  if (runtime.permissions.fullAccess) return resolved;
 
-  const lexicallyAllowed = config.roots.some((root) => isWithin(root, resolved));
-  if (!lexicallyAllowed || !(await allowedByRealPath(resolved))) {
+  const roots = configuredRoots();
+  const lexicallyAllowed = roots.some((root) => isWithin(root, resolved));
+  if (!lexicallyAllowed || !(await allowedByRealPath(resolved, roots))) {
     throw new Error(
-      `Path is outside configured roots: ${resolved}. Allowed roots: ${config.roots.join(', ')}. ` +
-        'Set CHATGPTX_FULL_ACCESS=true only if you intentionally want unrestricted filesystem access.',
+      `Path is outside configured roots: ${resolved}. Allowed roots: ${roots.join(', ')}. ` +
+        'Enable full filesystem access only if you intentionally want unrestricted access.',
     );
   }
 
@@ -74,5 +80,6 @@ export async function assertExistingPath(inputPath: string): Promise<string> {
 }
 
 export function describePathPolicy(): { fullAccess: boolean; roots: string[] } {
-  return { fullAccess: config.fullAccess, roots: [...config.roots] };
+  const runtime = getRuntimeSettings();
+  return { fullAccess: runtime.permissions.fullAccess, roots: [...runtime.filesystem.roots] };
 }

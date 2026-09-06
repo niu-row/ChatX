@@ -47,7 +47,11 @@ ChatGPT
 - `git_status`
 - `git_diff`
 - `git_log`
-- `git_run` — arbitrary Git argument execution without a shell
+- `git_stage` — stage explicitly named paths
+- `git_unstage` — unstage paths without discarding working-tree content
+- `git_create_branch` — create a local branch without switching the working tree
+- `git_commit` — commit already-staged changes with hooks and GPG signing disabled for this tool
+- `git_run` — arbitrary Git argument escape hatch; requires the separate **Advanced Git** permission in addition to Git read/write
 
 ### Server
 
@@ -62,6 +66,7 @@ ChatGPT
 - Node.js 20 or newer. Node.js 24 is used in CI.
 - Windows, macOS, or Linux.
 - Git is required only for the Git tools.
+- The Tauri desktop console additionally requires Rust 1.77.2 or newer and the normal Tauri platform build prerequisites.
 - For ChatGPT access to a machine-local endpoint, use OpenAI Secure MCP Tunnel.
 
 ## Install
@@ -89,6 +94,22 @@ Default endpoint:
 ```text
 http://127.0.0.1:3210/mcp
 ```
+
+Local management console:
+
+```text
+http://127.0.0.1:3210/
+```
+
+### Tauri desktop console
+
+The preferred Windows UI is the Tauri desktop console. Double-click `启动-ChatGPTX-桌面版.cmd`, or run `npm run desktop:dev`.
+
+The desktop app keeps the existing Node/MCP backend and adds a native desktop shell. It starts `dist/index.js` when no ChatGPTX backend is already running on port 3210, uses a native Windows folder picker for allowed roots, and proxies only the local management API paths it needs. If ChatGPTX was already running before the desktop app opened, the desktop app reuses it and does not own or stop that external process.
+
+The Tunnel ID is stored in `.chatgptx/settings.json`. The Runtime API Key can remain ephemeral or, when you opt in, be encrypted with Windows DPAPI (`CurrentUser`) and stored separately from `settings.json`; it is never returned in logs. The desktop UI also includes direct buttons for the OpenAI Tunnel ID and Runtime API Key management pages.
+
+The original browser console remains available as a fallback. Double-click `启动-ChatGPTX-Web.cmd`, or use the existing `npm run console` command. The default `启动-ChatGPTX.cmd` now launches the Tauri desktop console.
 
 Health check:
 
@@ -122,6 +143,15 @@ On macOS/Linux, multiple roots use `:` instead of `;`:
 export CHATGPTX_ROOTS="/home/me/projects:/tmp/work"
 npm run dev
 ```
+
+The local console can change allowed roots at runtime. Runtime roots are persisted in settings v2 and take effect on subsequent filesystem/Git tool calls without restarting the server. `CHATGPTX_ROOTS` remains the default/fallback for a fresh settings file and for migration from older settings.
+
+Permission presets are available in the local console:
+
+- **Safe** — filesystem read + Git read; write, shell, advanced Git, and full-access are off.
+- **Developer** — filesystem/Git read-write; shell, advanced Git, and full-access are off.
+- **Unrestricted** — enables filesystem/Git read-write, arbitrary Git, shell, and full filesystem access.
+- Any manual toggle change produces a **Custom** preset.
 
 ## Important shell security behavior
 
@@ -166,6 +196,8 @@ tunnel-client run --log.level=info --log.format=struct-text
 
 Then create/configure the custom MCP app in ChatGPT and select the tunnel connection. Keep both ChatGPTX and `tunnel-client` running while ChatGPT is using the connector.
 
+When the local console manages `tunnel-client`, it explicitly adds `Content-Type: application/json` to MCP discovery/probe requests. This avoids newer MCP SDK v2 servers rejecting a probe POST with HTTP 415 when an intermediary/client omits the JSON media type. Tunnel startup is not considered successful until the tunnel client's own ephemeral health listener reports `/readyz` healthy via `--health.url-file`.
+
 Official tunnel client: <https://github.com/openai/tunnel-client>
 
 OpenAI Secure MCP Tunnel documentation: <https://developers.openai.com/api/docs/guides/secure-mcp-tunnels>
@@ -186,7 +218,8 @@ Copy `.env.example` as a reference. ChatGPTX reads environment variables directl
 | --- | --- | --- |
 | `CHATGPTX_HOST` | `127.0.0.1` | HTTP bind host |
 | `CHATGPTX_PORT` | `3210` | HTTP port |
-| `CHATGPTX_ROOTS` | current working directory | allowed filesystem roots |
+| `CHATGPTX_ROOTS` | current working directory | default allowed filesystem roots for fresh/migrated settings |
+| `CHATGPTX_SETTINGS_DIR` | `<cwd>/.chatgptx` | settings, DPAPI blob, disabled Git-hook directory, and tunnel health URL file |
 | `CHATGPTX_FULL_ACCESS` | `false` | bypass filesystem root checks |
 | `CHATGPTX_ENABLE_SHELL` | `true` | enable command/process tools |
 | `CHATGPTX_AUTH_TOKEN` | empty | optional static bearer token for direct/private HTTP deployment |
@@ -248,6 +281,9 @@ Recommended operating model:
 ```bash
 npm run check
 npm run build
+npm test
 ```
+
+`npm test` covers settings v1→v2 migration, permission presets, runtime root updates, Windows DPAPI persistence (when running on Windows), MCP tool smoke tests, the restricted `git_run` default, bounded Git write tools, dashboard diagnostics, and the non-JSON `/mcp` 415 guard.
 
 CI checks the project on both Ubuntu and Windows.
