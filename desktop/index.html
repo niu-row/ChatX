@@ -238,12 +238,27 @@
 
           <div class="guide-step">
             <div class="guide-number">1</div>
-            <div><h3>获取 Tunnel ID</h3><p>打开 OpenAI Platform 的 Tunnels 页面，创建或选择一个 Secure MCP Tunnel，然后复制以 <code>tunnel_</code> 开头的 Tunnel ID。这个 ID 可以保存在 ChatX 设置里。</p><button class="secondary" id="guideTunnelId" type="button">打开 Tunnels 页面 ↗</button></div>
+            <div>
+              <h3>获取并填写 Tunnel ID</h3>
+              <p>打开 OpenAI Platform 的 Tunnels 页面，创建或选择一个 Secure MCP Tunnel，然后把以 <code>tunnel_</code> 开头的 Tunnel ID 直接粘贴到下面。这里与“连接”页面完全同步，不需要来回切换。</p>
+              <div class="guide-credential-row">
+                <input id="guideTunnelIdInput" autocomplete="off" spellcheck="false" placeholder="tunnel_...">
+                <button class="secondary nowrap" id="guideOpenTunnelPage" type="button">打开 Tunnels 页面 ↗</button>
+              </div>
+            </div>
           </div>
 
           <div class="guide-step">
             <div class="guide-number">2</div>
-            <div><h3>获取 Runtime API Key</h3><p>创建一个给 Tunnel 使用的 Runtime API Key。建议使用受限 Key，只给 Tunnel 所需权限。若勾选“安全保存”，ChatX 会使用 Windows DPAPI CurrentUser 加密保存，明文不会写进 <code>settings.json</code>。</p><button class="secondary" id="guideRuntimeKey" type="button">打开 API Keys 页面 ↗</button></div>
+            <div>
+              <h3>获取并填写 Runtime API Key</h3>
+              <p>创建一个给 Tunnel 使用的 Runtime API Key，复制后直接粘贴到下面。建议使用受限 Key，只给 Tunnel 所需权限。这里输入的 Key 同样会同步到“连接”页面。</p>
+              <div class="guide-credential-row">
+                <input id="guideApiKeyInput" type="password" autocomplete="off" spellcheck="false" placeholder="输入 Runtime API Key">
+                <button class="secondary nowrap" id="guideOpenRuntimeKeyPage" type="button">打开 API Keys 页面 ↗</button>
+              </div>
+              <label class="guide-remember"><input id="guideRememberKey" type="checkbox"><span><strong>安全保存 Runtime Key</strong><small>使用 Windows DPAPI（CurrentUser）加密；不会写入 settings.json 或调用日志。</small></span></label>
+            </div>
           </div>
 
           <div class="guide-step">
@@ -258,7 +273,14 @@
 
           <div class="guide-step">
             <div class="guide-number">5</div>
-            <div><h3>连接并运行诊断</h3><p>进入“连接”页面填写 Tunnel ID 和 Runtime Key，点击“连接并启动”。Tunnel 显示 running 后，再运行一次诊断。MCP、Tunnel、允许目录和本地依赖都正常时即可开始使用。</p><div class="inline-actions"><button class="primary" data-go-page="connection" type="button">前往连接</button><button class="secondary" data-go-page="diagnostics" type="button">运行诊断</button></div></div>
+            <div>
+              <div class="guide-step-heading"><div><h3>连接并运行诊断</h3><p>上面的 Tunnel ID 和 Runtime API Key 填好后，可以直接在教程里启动。连接页仍然保留，两个页面显示和操作的是同一套连接配置。</p></div><span class="connection-badge" id="guideConnectionBadge">未连接</span></div>
+              <div class="inline-actions">
+                <button class="primary" id="guideConnect" type="button">连接并启动</button>
+                <button class="secondary" id="guideStop" type="button">停止 Tunnel</button>
+                <button class="secondary" data-go-page="diagnostics" type="button">查看诊断</button>
+              </div>
+            </div>
           </div>
         </section>
 

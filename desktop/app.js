@@ -5,6 +5,7 @@ const invoke = tauri?.core?.invoke;
 let state = null;
 let busy = false;
 let currentPage = 'overview';
+let credentialsDirty = false;
 
 const pageMeta = {
   overview: ['概览', '查看连接、权限和本地服务状态。'],
@@ -69,6 +70,29 @@ function bindNavigation() {
 async function backend(method, path, body) {
   if (!invoke) throw new Error('当前页面不是由 Tauri 启动，无法调用桌面后端。');
   return await invoke('backend_request', { method, path, body: body ?? null });
+}
+
+function bindCredentialMirrors() {
+  const textPairs = [
+    ['tunnelId', 'guideTunnelIdInput', true],
+    ['apiKey', 'guideApiKeyInput', false],
+  ];
+
+  for (const [leftId, rightId, marksDirty] of textPairs) {
+    const left = $(leftId);
+    const right = $(rightId);
+    const sync = (source, target) => {
+      target.value = source.value;
+      if (marksDirty) credentialsDirty = true;
+    };
+    left.addEventListener('input', () => sync(left, right));
+    right.addEventListener('input', () => sync(right, left));
+  }
+
+  const remember = $('rememberKey');
+  const guideRemember = $('guideRememberKey');
+  remember.addEventListener('change', () => { guideRemember.checked = remember.checked; });
+  guideRemember.addEventListener('change', () => { remember.checked = guideRemember.checked; });
 }
 
 async function refresh() {
@@ -218,10 +242,14 @@ function render(payload) {
   renderRoots(s.policy.roots || []);
   renderOverview(s, tunnel, running);
 
-  if (s.connection.tunnelId) $('tunnelId').value = s.connection.tunnelId;
+  if (!credentialsDirty && s.connection.tunnelId) {
+    $('tunnelId').value = s.connection.tunnelId;
+    $('guideTunnelIdInput').value = s.connection.tunnelId;
+  }
   $('settingsFile').textContent = `设置文件：${s.connection.settingsFile}`;
 
   $('rememberKey').disabled = !s.connection.runtimeKeySupported || busy;
+  $('guideRememberKey').disabled = !s.connection.runtimeKeySupported || busy;
   $('clearKey').disabled = !s.connection.runtimeKeySaved || busy;
   $('chooseFolders').disabled = busy || Boolean(s.policy.fullAccess);
   $('keyHelp').textContent = s.connection.runtimeKeySupported
@@ -230,17 +258,25 @@ function render(payload) {
       : '可选择用 Windows DPAPI（CurrentUser）加密保存，不写入 settings.json。')
     : '当前平台不支持安全持久化，Key 仅用于本次操作。';
 
-  if (s.connection.runtimeKeySaved && !$('apiKey').value) {
-    $('apiKey').placeholder = '已安全保存，可留空';
+  const keyPlaceholder = s.connection.runtimeKeySaved ? '已安全保存，可留空' : '输入 Runtime API Key';
+  $('apiKey').placeholder = keyPlaceholder;
+  $('guideApiKeyInput').placeholder = keyPlaceholder;
+
+  const connectDisabled = busy || running || connecting || !tunnel.installed;
+  const stopDisabled = busy || !running;
+  const connectText = connecting ? '正在连接…' : (running ? '已连接' : '连接并启动');
+  $('connect').disabled = connectDisabled;
+  $('guideConnect').disabled = connectDisabled;
+  $('stop').disabled = stopDisabled;
+  $('guideStop').disabled = stopDisabled;
+  $('connect').textContent = connectText;
+  $('guideConnect').textContent = connectText;
+
+  for (const id of ['connectionBadge', 'guideConnectionBadge']) {
+    const badge = $(id);
+    badge.textContent = running ? '已连接' : (connecting ? '连接中' : '未连接');
+    badge.className = `connection-badge${running ? ' running' : connecting ? ' connecting' : ''}`;
   }
-
-  $('connect').disabled = busy || running || connecting || !tunnel.installed;
-  $('stop').disabled = busy || !running;
-  $('connect').textContent = connecting ? '正在连接…' : (running ? '已连接' : '连接并启动');
-
-  const badge = $('connectionBadge');
-  badge.textContent = running ? '已连接' : (connecting ? '连接中' : '未连接');
-  badge.className = `connection-badge${running ? ' running' : connecting ? ' connecting' : ''}`;
 
   $('sidebarDot').className = `status-dot ${running ? 'ok' : 'warn'}`;
   $('sidebarStatus').textContent = running ? 'Tunnel 已连接' : '本地服务正常';
@@ -362,7 +398,7 @@ async function runDiagnostics() {
   }
 }
 
-$('connect').addEventListener('click', async () => {
+async function connectTunnel() {
   busy = true;
   showError('');
   try {
@@ -371,7 +407,9 @@ $('connect').addEventListener('click', async () => {
       apiKey: $('apiKey').value,
       rememberKey: $('rememberKey').checked,
     });
+    credentialsDirty = false;
     $('apiKey').value = '';
+    $('guideApiKeyInput').value = '';
     render(payload.status);
   } catch (error) {
     showError(normalizeError(error));
@@ -379,9 +417,9 @@ $('connect').addEventListener('click', async () => {
     busy = false;
     await refresh();
   }
-});
+}
 
-$('stop').addEventListener('click', async () => {
+async function stopTunnel() {
   busy = true;
   try {
     const payload = await backend('POST', '/api/tunnel/stop', {});
@@ -392,7 +430,12 @@ $('stop').addEventListener('click', async () => {
     busy = false;
     await refresh();
   }
-});
+}
+
+$('connect').addEventListener('click', connectTunnel);
+$('guideConnect').addEventListener('click', connectTunnel);
+$('stop').addEventListener('click', stopTunnel);
+$('guideStop').addEventListener('click', stopTunnel);
 
 $('clearKey').addEventListener('click', async () => {
   if (!window.confirm('清除本机安全保存的 Runtime Key？')) return;
@@ -422,13 +465,14 @@ $('invocationLimit').addEventListener('change', refreshInvocations);
 
 $('getTunnelId').addEventListener('click', () => openExternal('https://platform.openai.com/settings/organization/tunnels'));
 $('getRuntimeKey').addEventListener('click', () => openExternal('https://platform.openai.com/settings/organization/api-keys'));
-$('guideTunnelId').addEventListener('click', () => openExternal('https://platform.openai.com/settings/organization/tunnels'));
-$('guideRuntimeKey').addEventListener('click', () => openExternal('https://platform.openai.com/settings/organization/api-keys'));
+$('guideOpenTunnelPage').addEventListener('click', () => openExternal('https://platform.openai.com/settings/organization/tunnels'));
+$('guideOpenRuntimeKeyPage').addEventListener('click', () => openExternal('https://platform.openai.com/settings/organization/api-keys'));
 $('guideChatGPTPlugins').addEventListener('click', () => openExternal('https://chatgpt.com/plugins'));
 $('guideDeveloperModeDocs').addEventListener('click', () => openExternal('https://help.openai.com/en/articles/12584461-developer-mode-and-full-mcp-connectors-in-chatgpt-beta'));
 
 async function bootstrap() {
   bindNavigation();
+  bindCredentialMirrors();
   setPage(currentPage);
 
   if (!invoke) {
