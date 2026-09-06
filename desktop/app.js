@@ -6,6 +6,9 @@ let state = null;
 let busy = false;
 let currentPage = 'overview';
 let credentialsDirty = false;
+let presetDirty = false;
+let settingsRevision = 0;
+let settingsError = '';
 
 const pageMeta = {
   overview: ['概览', '查看连接、权限和本地服务状态。'],
@@ -96,8 +99,11 @@ function bindCredentialMirrors() {
 }
 
 async function refresh() {
+  if (busy) return;
+  const revision = settingsRevision;
   try {
     const payload = await backend('GET', '/api/tunnel/status');
+    if (busy || revision !== settingsRevision) return;
     render(payload);
   } catch (error) {
     $('sidebarDot').className = 'status-dot bad';
@@ -108,11 +114,16 @@ async function refresh() {
 
 async function updateSettings(patch) {
   busy = true;
+  settingsRevision += 1;
+  settingsError = '';
+  if (state) render(state);
   try {
     const payload = await backend('POST', '/api/settings', patch);
+    if (patch.preset) presetDirty = false;
     render(payload.status);
   } catch (error) {
-    showError(normalizeError(error));
+    settingsError = normalizeError(error);
+    showError(settingsError);
   } finally {
     busy = false;
     await refresh();
@@ -236,7 +247,9 @@ function render(payload) {
   $('rootsFact').textContent = s.policy.fullAccess ? '全部路径' : `${s.policy.roots.length} 个目录`;
   $('rootsFact').title = s.policy.roots.join('; ');
   $('settingsVersion').textContent = String(s.settings.version);
-  $('preset').value = s.policy.permissionPreset;
+  if (!presetDirty) $('preset').value = s.policy.permissionPreset;
+  $('preset').disabled = busy;
+  $('applyPreset').disabled = busy;
 
   renderPermissionRows(permissions);
   renderRoots(s.policy.roots || []);
@@ -251,7 +264,7 @@ function render(payload) {
   $('rememberKey').disabled = !s.connection.runtimeKeySupported || busy;
   $('guideRememberKey').disabled = !s.connection.runtimeKeySupported || busy;
   $('clearKey').disabled = !s.connection.runtimeKeySaved || busy;
-  $('chooseFolders').disabled = busy || Boolean(s.policy.fullAccess);
+  $('chooseFolders').disabled = busy;
   $('keyHelp').textContent = s.connection.runtimeKeySupported
     ? (s.connection.runtimeKeySaved
       ? '已使用 Windows DPAPI（CurrentUser）加密保存；API Key 可留空直接重连。'
@@ -283,7 +296,7 @@ function render(payload) {
 
   $('log').textContent = s.logs?.length ? s.logs.join('\n') : '尚无操作。';
   $('log').scrollTop = $('log').scrollHeight;
-  showError(tunnel.lastError || '');
+  showError(settingsError || tunnel.lastError || '');
 }
 
 async function chooseFolders() {
@@ -450,6 +463,8 @@ $('clearKey').addEventListener('click', async () => {
     await refresh();
   }
 });
+
+$('preset').addEventListener('change', () => { presetDirty = true; });
 
 $('applyPreset').addEventListener('click', async () => {
   const preset = $('preset').value;
