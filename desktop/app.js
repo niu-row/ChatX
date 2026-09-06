@@ -470,6 +470,30 @@ $('guideOpenRuntimeKeyPage').addEventListener('click', () => openExternal('https
 $('guideChatGPTPlugins').addEventListener('click', () => openExternal('https://chatgpt.com/plugins'));
 $('guideDeveloperModeDocs').addEventListener('click', () => openExternal('https://help.openai.com/en/articles/12584461-developer-mode-and-full-mcp-connectors-in-chatgpt-beta'));
 
+let refreshTimer = null;
+let refreshLoopRunning = false;
+
+async function refreshLoop() {
+  if (refreshLoopRunning) return;
+  refreshLoopRunning = true;
+  try {
+    if (!document.hidden) {
+      await refresh();
+      if (currentPage === 'invocations') await refreshInvocations();
+    }
+  } finally {
+    refreshLoopRunning = false;
+    refreshTimer = setTimeout(refreshLoop, document.hidden ? 15000 : 2500);
+  }
+}
+
+document.addEventListener('visibilitychange', () => {
+  if (!document.hidden) {
+    if (refreshTimer) clearTimeout(refreshTimer);
+    void refreshLoop();
+  }
+});
+
 async function bootstrap() {
   bindNavigation();
   bindCredentialMirrors();
@@ -486,10 +510,7 @@ async function bootstrap() {
     $('log').textContent = '正在检查 ChatX 后端…';
     await invoke('ensure_backend');
     await refresh();
-    setInterval(async () => {
-      await refresh();
-      if (currentPage === 'invocations') await refreshInvocations();
-    }, 2500);
+    refreshTimer = setTimeout(refreshLoop, 2500);
   } catch (error) {
     $('sidebarDot').className = 'status-dot bad';
     $('sidebarStatus').textContent = '启动失败';

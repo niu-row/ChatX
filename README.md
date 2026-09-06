@@ -39,7 +39,7 @@ ChatX
 普通 Windows 用户建议直接使用已经构建好的安装包：
 
 ```text
-release\ChatX-Setup-0.1.0.exe
+release\ChatX-Setup-0.2.0.exe
 ```
 
 安装版已经包含运行桌面程序所需的本地组件。**普通用户不需要另外安装 Node.js 或 Rust。**
@@ -270,6 +270,8 @@ ChatGPT 中已经启用 ChatX 应用
 
 调用日志目前保存在后端进程内存中，最多保存最近 500 条；ChatX 后端重启后会清空。
 
+调用日志 API 还会返回每次调用的响应字节数，以及按工具聚合的调用数、错误数、平均耗时、P50、P95、最大耗时和平均响应大小。
+
 ## 桌面版运行方式
 
 ### 最小化
@@ -352,9 +354,10 @@ ChatX 提供四种权限模式。
 
 ChatX 当前提供：
 
-- `fs_list`：列出目录，可限制递归深度。
+- `fs_list`：列出目录，支持递归深度、默认目录排除、结果上限、`offset` 分页以及可选元数据；元数据读取采用 32 路有界并发。
 - `fs_stat`：读取文件、目录、符号链接元数据。
-- `fs_read`：UTF-8 / Base64 读取，支持字节范围和行范围。
+- `fs_read`：UTF-8 / Base64 读取，支持字节范围和行范围；普通读取默认最多返回 256 KiB，并通过 `next_offset` 续读。
+- `fs_read_many`：在一次 MCP 调用中有限并发读取最多 100 个文件，并分别返回成功或失败结果。
 - `fs_write`：创建或覆盖文件。
 - `fs_append`：追加文件内容。
 - `fs_edit`：精确文本替换，可检查替换次数。
@@ -362,17 +365,20 @@ ChatX 当前提供：
 - `fs_delete`：删除文件或目录。
 - `fs_move`：移动 / 重命名，支持跨卷回退。
 - `fs_copy`：复制文件或目录。
-- `fs_search`：递归文字或正则搜索。
+- `fs_search`：流式递归文字或正则搜索；字面量和兼容正则均优先使用 ripgrep，不可用或语法不兼容时自动回退到有限并发 JavaScript 实现。
+- `fs_project_snapshot`：一次返回受限的项目树、关键配置文件和可选 Git 摘要；关键文件采用有界并发读取，非 Git 目录不会启动多条无效 Git 命令。
 
-允许目录会在每次文件系统 / Git 工具调用时动态生效，不需要重启 MCP Server。
+允许目录会在每次文件系统 / Git 工具调用时动态生效，不需要重启 MCP Server。权限开关还会动态更新 MCP 工具列表：被禁用的工具不会继续占用模型上下文，客户端会收到工具列表变更通知。
 
 ## Git 工具
 
 ### 常规 Git
 
 - `git_status`
-- `git_diff`
+- `git_diff`：默认限制补丁响应大小，支持 `offset` / `max_chars` 分页。
+- `git_diff_summary`：只返回逐文件增删行统计，避免为概览传输完整补丁。
 - `git_log`
+- `git_inspect`：并行返回状态、最近提交和 diff 统计。
 - `git_stage`
 - `git_unstage`
 - `git_create_branch`
@@ -399,12 +405,13 @@ git_run
 开启 Shell 后可使用：
 
 - `run_command`
+- `run_process`：直接传递 executable 和参数数组，不启动命令 Shell；前台输出支持 `output_offset` / `max_output_chars` 流式分页。
 - `process_output`
 - `process_list`
 - `process_stdin`
 - `process_terminate`
 
-`run_command` 可以调用 PowerShell、cmd、Bash、sh 或平台默认 Shell，并支持：
+`run_command` 可以调用 PowerShell、cmd、Bash、sh 或平台默认 Shell；简单程序调用可优先使用启动开销更低、无需 Shell 字符串解析的 `run_process`。`run_command` 支持：
 
 - 前台命令
 - 超时
@@ -512,6 +519,7 @@ ChatX 直接读取环境变量，不会自动加载 `.env` 文件。`.env.exampl
 | `CHATGPTX_MAX_PROCESS_BUFFER_CHARS` | `1000000` | 后台进程输出缓冲上限 |
 | `CHATGPTX_DEFAULT_COMMAND_TIMEOUT_MS` | `120000` | 默认前台命令超时时间 |
 | `CHATGPTX_MAX_SEARCH_FILES` | `10000` | 文件搜索最大扫描数量 |
+| `CHATGPTX_RG_PATH` | `rg` | 可选 ripgrep 可执行文件路径；不可用时自动使用 JavaScript 搜索 |
 
 当 `CHATGPTX_HOST` 为 loopback 地址时，服务会启用 MCP SDK 的 localhost Host / Origin 校验。
 
@@ -592,7 +600,7 @@ npm run desktop:installer
 项目当前发布的安装包放在：
 
 ```text
-release\ChatX-Setup-0.1.0.exe
+release\ChatX-Setup-0.2.0.exe
 ```
 
 ## MCP stdio / Inspector
@@ -627,7 +635,10 @@ npm run build
 npm run test:settings
 npm run test:smoke
 npm run test:desktop
+npm run benchmark
 ```
+
+`npm run benchmark` 会建立启动、连接、工具列表、500 文件目录元数据、文字/正则搜索和批量读取的性能基线，并在超过宽松回归阈值时失败。
 
 当前测试覆盖的主要内容包括：
 
@@ -636,7 +647,7 @@ npm run test:desktop
 - 权限预设。
 - 动态允许目录。
 - Windows DPAPI 凭据存储。
-- MCP 25 个工具的 smoke test。
+- MCP 29 个工具的 smoke test。
 - 文件系统读写。
 - Shell / 后台进程。
 - 受约束 Git 写入。

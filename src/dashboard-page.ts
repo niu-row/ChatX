@@ -114,7 +114,7 @@ $('clearKey').addEventListener('click',async function(){if(!confirm('清除本�
 $('applyPreset').addEventListener('click',async function(){const preset=$('preset').value;if(preset==='custom')return;if(preset==='unrestricted'&&!confirm('“完全开放”会启用 Shell、完整文件系统访问和高级 Git。确定应用？'))return;await updateSettings({preset:preset})});
 $('saveRoots').addEventListener('click',async function(){const roots=$('roots').value.split(/\r?\n/).map(function(x){return x.trim()}).filter(Boolean);if(!roots.length){showError('至少保留一个允许目录。');return}await updateSettings({roots:roots})});
 $('diagnose').addEventListener('click',async function(){const host=$('diagnostics');host.innerHTML='<div class="help">正在诊断…</div>';try{const r=await fetch('/api/diagnostics',{cache:'no-store'});const data=await r.json();host.innerHTML='';(data.checks||[]).forEach(function(c){const row=document.createElement('div');row.className='check';const name=document.createElement('span');name.textContent=c.name;const value=document.createElement('span');value.className=c.status==='ok'?'ok':(c.status==='warn'?'warn':'bad');value.textContent=c.message;row.append(name,value);host.append(row)})}catch(e){host.textContent=String(e)}});
-refresh();setInterval(refresh,2500);
+let refreshTimer=null;async function refreshLoop(){if(!document.hidden)await refresh();refreshTimer=setTimeout(refreshLoop,document.hidden?15000:2500)}document.addEventListener('visibilitychange',function(){if(!document.hidden){if(refreshTimer)clearTimeout(refreshTimer);refreshLoop()}});refreshLoop();
 </script>
 </body>
 </html>`;

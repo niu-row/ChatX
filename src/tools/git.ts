@@ -8,18 +8,27 @@ import { requirePermission, settingsDirectoryPath } from '../settings.js';
 import { assertExistingPath } from '../security/path-policy.js';
 import { errorResult, textResult } from '../utils/results.js';
 
-async function resolveRepo(inputPath: string): Promise<string> {
+export async function resolveRepo(inputPath: string): Promise<string> {
   const resolved = await assertExistingPath(inputPath);
   const stat = await fs.stat(resolved);
   if (!stat.isDirectory()) throw new Error(`Repository path is not a directory: ${resolved}`);
   return resolved;
 }
 
-async function runGit(
+export async function runGit(
   cwd: string,
   args: string[],
   timeoutMs = config.defaultCommandTimeoutMs,
-): Promise<{ exit_code: number | null; signal: NodeJS.Signals | null; stdout: string; stderr: string }> {
+  stdoutWindow?: { offset: number; maxChars: number },
+): Promise<{
+  exit_code: number | null;
+  signal: NodeJS.Signals | null;
+  stdout: string;
+  stderr: string;
+  stdout_dropped_chars: number;
+  stderr_dropped_chars: number;
+  stdout_total_chars: number;
+}> {
   return await new Promise((resolve, reject) => {
     const child = spawn('git', args, {
       cwd,
@@ -30,17 +39,38 @@ async function runGit(
 
     let stdout = '';
     let stderr = '';
+    let stdoutDroppedChars = 0;
+    let stderrDroppedChars = 0;
+    let stdoutTotalChars = 0;
     const cap = config.maxCommandOutputChars;
-    const append = (current: string, chunk: Buffer): string => {
-      const value = current + chunk.toString('utf8');
-      return value.length > cap ? value.slice(value.length - cap) : value;
+    const append = (current: string, chunk: Buffer): { value: string; dropped: number } => {
+      const incoming = chunk.toString('utf8');
+      const remaining = Math.max(0, cap - current.length);
+      return {
+        value: current + incoming.slice(0, remaining),
+        dropped: Math.max(0, incoming.length - remaining),
+      };
     };
 
     child.stdout.on('data', (chunk: Buffer) => {
-      stdout = append(stdout, chunk);
+      const incoming = chunk.toString('utf8');
+      const chunkStart = stdoutTotalChars;
+      stdoutTotalChars += incoming.length;
+      if (stdoutWindow) {
+        const from = Math.max(0, stdoutWindow.offset - chunkStart);
+        const to = Math.min(incoming.length, stdoutWindow.offset + stdoutWindow.maxChars - chunkStart);
+        if (to > from) stdout += incoming.slice(from, to);
+        stdoutDroppedChars = stdoutTotalChars - stdout.length;
+      } else {
+        const appended = append(stdout, chunk);
+        stdout = appended.value;
+        stdoutDroppedChars += appended.dropped;
+      }
     });
     child.stderr.on('data', (chunk: Buffer) => {
-      stderr = append(stderr, chunk);
+      const appended = append(stderr, chunk);
+      stderr = appended.value;
+      stderrDroppedChars += appended.dropped;
     });
 
     const timer = setTimeout(() => child.kill('SIGTERM'), timeoutMs);
@@ -49,7 +79,15 @@ async function runGit(
     child.once('error', reject);
     child.once('close', (exitCode, signal) => {
       clearTimeout(timer);
-      resolve({ exit_code: exitCode, signal, stdout, stderr });
+      resolve({
+        exit_code: exitCode,
+        signal,
+        stdout,
+        stderr,
+        stdout_dropped_chars: stdoutDroppedChars,
+        stderr_dropped_chars: stderrDroppedChars,
+        stdout_total_chars: stdoutTotalChars,
+      });
     });
   });
 }
@@ -100,10 +138,12 @@ export function registerGitTools(server: McpServer): void {
         ref: z.string().optional(),
         paths: z.array(z.string()).optional(),
         stat: z.boolean().default(false),
+        offset: z.number().int().min(0).max(100_000_000).default(0),
+        max_chars: z.number().int().min(1_024).max(config.maxCommandOutputChars).default(100_000),
       }),
       annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
     },
-    async ({ repo, staged, ref, paths, stat }) => {
+    async ({ repo, staged, ref, paths, stat, offset, max_chars }) => {
       try {
         requirePermission('gitRead', 'Git read tools');
         const cwd = await resolveRepo(repo);
@@ -112,8 +152,73 @@ export function registerGitTools(server: McpServer): void {
         if (stat) args.push('--stat');
         if (ref) args.push(validateRefName(ref, 'Git ref'));
         if (paths && paths.length > 0) args.push('--', ...paths);
+        const result = await runGit(cwd, args, config.defaultCommandTimeoutMs, {
+          offset,
+          maxChars: max_chars,
+        });
+        const stdout = result.stdout;
+        const knownTotalChars = result.stdout_total_chars;
+        const nextOffset = offset + stdout.length < knownTotalChars ? offset + stdout.length : null;
+        return textResult({
+          repo: cwd,
+          ...result,
+          stdout,
+          output_offset: offset,
+          output_chars: stdout.length,
+          total_chars: knownTotalChars,
+          truncated: nextOffset !== null,
+          next_offset: nextOffset,
+        });
+      } catch (error) {
+        return errorResult(error);
+      }
+    },
+  );
+
+  server.registerTool(
+    'git_diff_summary',
+    {
+      title: 'Git diff summary',
+      description: 'Return compact per-file additions and deletions without transferring full patch content.',
+      inputSchema: z.object({
+        repo: z.string(),
+        staged: z.boolean().default(false),
+        ref: z.string().optional(),
+        paths: z.array(z.string()).optional(),
+        max_files: z.number().int().min(1).max(10_000).default(1_000),
+      }),
+      annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
+    },
+    async ({ repo, staged, ref, paths, max_files }) => {
+      try {
+        requirePermission('gitRead', 'Git read tools');
+        const cwd = await resolveRepo(repo);
+        const args = ['diff', '--numstat'];
+        if (staged) args.push('--cached');
+        if (ref) args.push(validateRefName(ref, 'Git ref'));
+        if (paths && paths.length > 0) args.push('--', ...paths);
         const result = await runGit(cwd, args);
-        return textResult({ repo: cwd, ...result });
+        const rows = result.stdout.split(/\r?\n/).filter(Boolean);
+        const files = rows.slice(0, max_files).map((line) => {
+          const [addedText = '-', deletedText = '-', ...fileParts] = line.split('\t');
+          return {
+            path: fileParts.join('\t'),
+            additions: addedText === '-' ? null : Number(addedText),
+            deletions: deletedText === '-' ? null : Number(deletedText),
+            binary: addedText === '-' || deletedText === '-',
+          };
+        });
+        return textResult({
+          repo: cwd,
+          exit_code: result.exit_code,
+          signal: result.signal,
+          stderr: result.stderr,
+          file_count: files.length,
+          total_additions: files.reduce((sum, file) => sum + (file.additions ?? 0), 0),
+          total_deletions: files.reduce((sum, file) => sum + (file.deletions ?? 0), 0),
+          reached_file_limit: rows.length > max_files || result.stdout_dropped_chars > 0,
+          files,
+        });
       } catch (error) {
         return errorResult(error);
       }
@@ -145,6 +250,54 @@ export function registerGitTools(server: McpServer): void {
         if (ref) args.push(validateRefName(ref, 'Git ref'));
         const result = await runGit(cwd, args);
         return textResult({ repo: cwd, ...result });
+      } catch (error) {
+        return errorResult(error);
+      }
+    },
+  );
+
+  server.registerTool(
+    'git_inspect',
+    {
+      title: 'Inspect Git repository',
+      description:
+        'Return status, recent commits, and an optional diff summary concurrently in one read-only MCP call.',
+      inputSchema: z.object({
+        repo: z.string(),
+        max_count: z.number().int().min(1).max(100).default(10),
+        ref: z.string().optional(),
+        include_diff_stat: z.boolean().default(true),
+        paths: z.array(z.string()).max(500).optional(),
+      }),
+      annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
+    },
+    async ({ repo, max_count, ref, include_diff_stat, paths }) => {
+      try {
+        requirePermission('gitRead', 'Git read tools');
+        const cwd = await resolveRepo(repo);
+        const validatedRef = ref ? validateRefName(ref, 'Git ref') : null;
+        const logArgs = [
+          'log',
+          `--max-count=${max_count}`,
+          '--date=iso-strict',
+          '--pretty=format:%H%x09%an%x09%ad%x09%s',
+        ];
+        if (validatedRef) logArgs.push(validatedRef);
+        const diffArgs = ['diff', '--stat'];
+        if (validatedRef) diffArgs.push(validatedRef);
+        if (paths && paths.length > 0) diffArgs.push('--', ...paths);
+
+        const [status, log, diffStat] = await Promise.all([
+          runGit(cwd, ['status', '--porcelain=v1', '--branch']),
+          runGit(cwd, logArgs),
+          include_diff_stat ? runGit(cwd, diffArgs) : Promise.resolve(null),
+        ]);
+        return textResult({
+          repo: cwd,
+          status,
+          log,
+          diff_stat: diffStat,
+        });
       } catch (error) {
         return errorResult(error);
       }

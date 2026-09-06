@@ -175,6 +175,23 @@ function load(): { settings: RuntimeSettings; migrated: boolean } {
 
 let loaded = load();
 let current = loaded.settings;
+let pathPolicyRevision = 0;
+const permissionListeners = new Set<() => void>();
+
+function notifyPermissionListeners(): void {
+  for (const listener of permissionListeners) {
+    try {
+      listener();
+    } catch (error) {
+      console.error('[chatx] permission listener failed:', error);
+    }
+  }
+}
+
+export function onPermissionSettingsChanged(listener: () => void): () => void {
+  permissionListeners.add(listener);
+  return () => permissionListeners.delete(listener);
+}
 
 function save(): void {
   fs.mkdirSync(SETTINGS_DIR, { recursive: true });
@@ -197,6 +214,14 @@ export function getRuntimeSettings(): RuntimeSettings {
   return structuredClone(current);
 }
 
+export function getPathPolicySettings(): { fullAccess: boolean; roots: string[]; revision: number } {
+  return {
+    fullAccess: current.permissions.fullAccess,
+    roots: [...current.filesystem.roots],
+    revision: pathPolicyRevision,
+  };
+}
+
 export function updatePermissions(patch: Partial<PermissionSettings>): RuntimeSettings {
   const next = { ...current.permissions };
   for (const key of Object.keys(next) as Array<keyof PermissionSettings>) {
@@ -204,14 +229,18 @@ export function updatePermissions(patch: Partial<PermissionSettings>): RuntimeSe
     if (typeof value === 'boolean') next[key] = value;
   }
   current = { ...current, permissions: next, permissionPreset: inferPreset(next) };
+  pathPolicyRevision += 1;
   save();
+  notifyPermissionListeners();
   return getRuntimeSettings();
 }
 
 export function applyPermissionPreset(preset: Exclude<PermissionPreset, 'custom'>): RuntimeSettings {
   const permissions = structuredClone(permissionPresets[preset]);
   current = { ...current, permissionPreset: preset, permissions };
+  pathPolicyRevision += 1;
   save();
+  notifyPermissionListeners();
   return getRuntimeSettings();
 }
 
@@ -222,6 +251,7 @@ export function updateAllowedRoots(roots: string[]): RuntimeSettings {
       roots: normalizeRoots(roots),
     },
   };
+  pathPolicyRevision += 1;
   save();
   return getRuntimeSettings();
 }

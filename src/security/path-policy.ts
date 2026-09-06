@@ -1,6 +1,6 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
-import { getRuntimeSettings } from '../settings.js';
+import { getPathPolicySettings } from '../settings.js';
 
 function comparable(value: string): string {
   const normalized = path.resolve(value);
@@ -37,19 +37,21 @@ async function nearestExistingAncestor(value: string): Promise<string> {
   }
 }
 
-function configuredRoots(): string[] {
-  return getRuntimeSettings().filesystem.roots;
+let cachedRevision = -1;
+let cachedRealRoots: Promise<string[]> | null = null;
+
+async function realRootsFor(revision: number, roots: string[]): Promise<string[]> {
+  if (revision !== cachedRevision || !cachedRealRoots) {
+    cachedRevision = revision;
+    cachedRealRoots = Promise.all(roots.map((root) => realpathOrResolved(root)));
+  }
+  return await cachedRealRoots;
 }
 
-async function allowedByRealPath(target: string, roots: string[]): Promise<boolean> {
+async function allowedByRealPath(target: string, realRoots: string[]): Promise<boolean> {
   const ancestor = await nearestExistingAncestor(target);
   const realAncestor = await realpathOrResolved(ancestor);
-
-  for (const configuredRoot of roots) {
-    const realRoot = await realpathOrResolved(configuredRoot);
-    if (isWithin(realRoot, realAncestor)) return true;
-  }
-  return false;
+  return realRoots.some((realRoot) => isWithin(realRoot, realAncestor));
 }
 
 export async function assertPathAllowed(inputPath: string): Promise<string> {
@@ -58,14 +60,14 @@ export async function assertPathAllowed(inputPath: string): Promise<string> {
   }
 
   const resolved = path.resolve(inputPath);
-  const runtime = getRuntimeSettings();
-  if (runtime.permissions.fullAccess) return resolved;
+  const policy = getPathPolicySettings();
+  if (policy.fullAccess) return resolved;
 
-  const roots = configuredRoots();
-  const lexicallyAllowed = roots.some((root) => isWithin(root, resolved));
-  if (!lexicallyAllowed || !(await allowedByRealPath(resolved, roots))) {
+  const lexicallyAllowed = policy.roots.some((root) => isWithin(root, resolved));
+  const realRoots = lexicallyAllowed ? await realRootsFor(policy.revision, policy.roots) : [];
+  if (!lexicallyAllowed || !(await allowedByRealPath(resolved, realRoots))) {
     throw new Error(
-      `Path is outside configured roots: ${resolved}. Allowed roots: ${roots.join(', ')}. ` +
+      `Path is outside configured roots: ${resolved}. Allowed roots: ${policy.roots.join(', ')}. ` +
         'Enable full filesystem access only if you intentionally want unrestricted access.',
     );
   }
@@ -80,6 +82,6 @@ export async function assertExistingPath(inputPath: string): Promise<string> {
 }
 
 export function describePathPolicy(): { fullAccess: boolean; roots: string[] } {
-  const runtime = getRuntimeSettings();
-  return { fullAccess: runtime.permissions.fullAccess, roots: [...runtime.filesystem.roots] };
+  const policy = getPathPolicySettings();
+  return { fullAccess: policy.fullAccess, roots: policy.roots };
 }

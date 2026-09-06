@@ -159,6 +159,7 @@ try {
     'fs_list',
     'fs_stat',
     'fs_read',
+    'fs_read_many',
     'fs_write',
     'fs_append',
     'fs_edit',
@@ -167,24 +168,30 @@ try {
     'fs_move',
     'fs_copy',
     'fs_search',
+    'fs_project_snapshot',
     'run_command',
+    'run_process',
     'process_output',
     'process_list',
     'process_stdin',
     'process_terminate',
     'git_status',
     'git_diff',
+    'git_diff_summary',
     'git_log',
+    'git_inspect',
     'git_stage',
     'git_unstage',
     'git_create_branch',
     'git_commit',
-    'git_run',
   ];
   const missing = expected.filter((name) => !toolNames.has(name));
   if (missing.length > 0) throw new Error(`Missing tools: ${missing.join(', ')}`);
 
-  const info = await call(client, 'server_info');
+  const infoRaw = await callRaw(client, 'server_info');
+  const infoText = textOf(infoRaw);
+  if (/\n\s+"/.test(infoText)) throw new Error(`MCP JSON response is not compact: ${infoText}`);
+  const info = jsonOf(infoRaw, 'server_info');
   if (info.name !== 'chatx') throw new Error(`Unexpected server info: ${JSON.stringify(info)}`);
 
   const invocationResponse = await fetch(`${baseUrl}/api/invocations`);
@@ -195,13 +202,81 @@ try {
   if (invocationPayload.entries?.some((entry) => 'arguments' in entry || 'input' in entry)) {
     throw new Error('Invocation log must not record tool arguments.');
   }
+  const infoInvocation = invocationPayload.entries?.find((entry) => entry.tool === 'server_info');
+  if (typeof infoInvocation?.resultBytes !== 'number' || !Array.isArray(invocationPayload.summary)) {
+    throw new Error(`Invocation performance metrics are missing: ${JSON.stringify(invocationPayload)}`);
+  }
 
   await call(client, 'fs_write', { path: smokeFile, content: 'hello\nsecond line\n' });
   await call(client, 'fs_edit', { path: smokeFile, old_text: 'hello', new_text: 'world' });
   const read = await call(client, 'fs_read', { path: smokeFile });
   if (!read.content.includes('world')) throw new Error(`fs_read did not return edited content: ${read.content}`);
+
+  const batchRead = await call(client, 'fs_read_many', {
+    files: [
+      { path: smokeFile, start_line: 1, end_line: 1 },
+      { path: path.join(tempRoot, 'missing.txt') },
+    ],
+    concurrency: 2,
+  });
+  if (batchRead.requested !== 2 || batchRead.succeeded !== 1 || batchRead.failed !== 1) {
+    throw new Error(`fs_read_many returned unexpected counts: ${JSON.stringify(batchRead)}`);
+  }
+  if (batchRead.results?.[0]?.content !== 'world' || batchRead.results?.[1]?.ok !== false) {
+    throw new Error(`fs_read_many returned unexpected results: ${JSON.stringify(batchRead)}`);
+  }
+  const largeFile = path.join(tempRoot, 'large.txt');
+  await fs.writeFile(largeFile, 'x'.repeat(4_096), 'utf8');
+  const boundedRead = await call(client, 'fs_read', { path: largeFile, max_response_bytes: 1_024 });
+  if (boundedRead.bytes_read !== 1_024 || boundedRead.next_offset !== 1_024 || boundedRead.truncated !== true) {
+    throw new Error(`fs_read response budget failed: ${JSON.stringify(boundedRead)}`);
+  }
+
+  const excludedRoot = path.join(tempRoot, 'node_modules', 'hidden');
+  await fs.mkdir(excludedRoot, { recursive: true });
+  await fs.writeFile(path.join(excludedRoot, 'ignored.txt'), 'world\n', 'utf8');
+  const listing = await call(client, 'fs_list', {
+    path: tempRoot,
+    recursive: true,
+    include_metadata: false,
+    max_entries: 100,
+  });
+  if (listing.entries.some((entry) => /node_modules[\\/]/.test(entry.path))) {
+    throw new Error(`fs_list descended into an excluded directory: ${JSON.stringify(listing)}`);
+  }
+  const nodeModules = listing.entries.find((entry) => entry.path === 'node_modules');
+  if (!nodeModules?.excluded || 'size' in nodeModules) {
+    throw new Error(`fs_list exclusion or metadata control failed: ${JSON.stringify(nodeModules)}`);
+  }
+  const limitedListing = await call(client, 'fs_list', { path: tempRoot, max_entries: 1 });
+  if (limitedListing.entry_count !== 1 || limitedListing.reached_entry_limit !== true || limitedListing.next_offset !== 1) {
+    throw new Error(`fs_list result limit failed: ${JSON.stringify(limitedListing)}`);
+  }
+  const nextListing = await call(client, 'fs_list', { path: tempRoot, max_entries: 1, offset: limitedListing.next_offset });
+  if (nextListing.entry_count !== 1 || nextListing.entries[0]?.path === limitedListing.entries[0]?.path) {
+    throw new Error(`fs_list pagination failed: ${JSON.stringify(nextListing)}`);
+  }
+
   const search = await call(client, 'fs_search', { root: tempRoot, query: 'world' });
   if (search.result_count < 1) throw new Error('fs_search did not find the edited text.');
+  if (!['ripgrep', 'javascript'].includes(search.search_engine)) {
+    throw new Error(`fs_search did not report its engine: ${JSON.stringify(search)}`);
+  }
+  if (search.results.some((entry) => /node_modules[\\/]/.test(entry.path))) {
+    throw new Error(`fs_search descended into an excluded directory: ${JSON.stringify(search)}`);
+  }
+  const regexSearch = await call(client, 'fs_search', { root: tempRoot, query: 'w.rld', regex: true });
+  if (regexSearch.result_count < 1 || (search.search_engine === 'ripgrep' && regexSearch.search_engine !== 'ripgrep')) {
+    throw new Error(`fs_search regex fast path failed: ${JSON.stringify(regexSearch)}`);
+  }
+  const fallbackSearch = await call(client, 'fs_search', {
+    root: tempRoot,
+    query: 'world',
+    prefer_ripgrep: false,
+  });
+  if (fallbackSearch.search_engine !== 'javascript' || fallbackSearch.result_count < 1) {
+    throw new Error(`fs_search JavaScript fallback failed: ${JSON.stringify(fallbackSearch)}`);
+  }
 
   const shell = await call(client, 'run_command', {
     command: `node -e "process.stdout.write('shell-ok')"`,
@@ -209,6 +284,31 @@ try {
   });
   if (shell.exit_code !== 0 || !shell.stdout.includes('shell-ok')) {
     throw new Error(`run_command failed: ${JSON.stringify(shell)}`);
+  }
+
+  const directProcess = await call(client, 'run_process', {
+    executable: process.execPath,
+    args: ['-e', "process.stdout.write('process-ok')"],
+    cwd: tempRoot,
+  });
+  if (directProcess.exit_code !== 0 || !directProcess.stdout.includes('process-ok')) {
+    throw new Error(`run_process failed: ${JSON.stringify(directProcess)}`);
+  }
+  const pagedProcess = await call(client, 'run_process', {
+    executable: process.execPath,
+    args: ['-e', "process.stdout.write('a'.repeat(2500))"],
+    cwd: tempRoot,
+    max_output_chars: 1_000,
+  });
+  const pagedProcessNext = await call(client, 'run_process', {
+    executable: process.execPath,
+    args: ['-e', "process.stdout.write('a'.repeat(2500))"],
+    cwd: tempRoot,
+    output_offset: pagedProcess.stdout_next_offset,
+    max_output_chars: 1_000,
+  });
+  if (pagedProcess.stdout.length !== 1_000 || pagedProcess.stdout_next_offset !== 1_000 || pagedProcessNext.stdout_offset !== 1_000) {
+    throw new Error(`run_process output pagination failed: ${JSON.stringify({ pagedProcess, pagedProcessNext })}`);
   }
 
   const background = await call(client, 'run_command', {
@@ -235,17 +335,53 @@ try {
   const log = await call(client, 'git_log', { repo: gitRepo, max_count: 5 });
   if (!log.stdout.includes('initial smoke commit')) throw new Error(`git_log missing commit: ${JSON.stringify(log)}`);
 
+  const inspected = await call(client, 'git_inspect', { repo: gitRepo, max_count: 5 });
+  if (
+    inspected.status?.exit_code !== 0 ||
+    inspected.log?.exit_code !== 0 ||
+    !inspected.log?.stdout?.includes('initial smoke commit')
+  ) {
+    throw new Error(`git_inspect failed: ${JSON.stringify(inspected)}`);
+  }
+
+  const snapshot = await call(client, 'fs_project_snapshot', {
+    root: gitRepo,
+    key_files: ['tracked.txt'],
+    max_depth: 2,
+    max_entries: 100,
+  });
+  if (
+    snapshot.tree?.entry_count < 1 ||
+    snapshot.key_files?.[0]?.content !== 'one\n' ||
+    snapshot.git?.status?.exit_code !== 0
+  ) {
+    throw new Error(`fs_project_snapshot failed: ${JSON.stringify(snapshot)}`);
+  }
+  const nonGitSnapshot = await call(client, 'fs_project_snapshot', {
+    root: path.join(tempRoot, 'node_modules'),
+    key_files: [],
+    include_git: true,
+  });
+  if (nonGitSnapshot.git?.available !== false || !nonGitSnapshot.git?.error?.includes('not inside')) {
+    throw new Error(`fs_project_snapshot non-Git detection failed: ${JSON.stringify(nonGitSnapshot)}`);
+  }
+
   await fs.writeFile(tracked, 'two\n', 'utf8');
+  const diffSummary = await call(client, 'git_diff_summary', { repo: gitRepo });
+  if (diffSummary.file_count !== 1 || diffSummary.files?.[0]?.path !== 'tracked.txt') {
+    throw new Error(`git_diff_summary failed: ${JSON.stringify(diffSummary)}`);
+  }
+  const boundedDiff = await call(client, 'git_diff', { repo: gitRepo, max_chars: 1_024 });
+  if (boundedDiff.output_offset !== 0 || typeof boundedDiff.next_offset === 'undefined') {
+    throw new Error(`git_diff response metadata missing: ${JSON.stringify(boundedDiff)}`);
+  }
   await call(client, 'git_stage', { repo: gitRepo, paths: ['tracked.txt'] });
   const unstaged = await call(client, 'git_unstage', { repo: gitRepo, paths: ['tracked.txt'] });
   if (unstaged.exit_code !== 0) throw new Error(`git_unstage failed: ${JSON.stringify(unstaged)}`);
   const branch = await call(client, 'git_create_branch', { repo: gitRepo, name: 'smoke-branch' });
   if (branch.exit_code !== 0) throw new Error(`git_create_branch failed: ${JSON.stringify(branch)}`);
 
-  const advanced = await callRaw(client, 'git_run', { repo: gitRepo, args: ['status'] });
-  if (!advanced.isError || !textOf(advanced).includes('Advanced Git command execution is disabled')) {
-    throw new Error(`git_run should be disabled by default: ${textOf(advanced)}`);
-  }
+  if (toolNames.has('git_run')) throw new Error('git_run must not be advertised while Advanced Git is disabled.');
 
   const presetResponse = await localPost('/api/settings', { preset: 'developer' });
   const presetBody = await presetResponse.json();
@@ -254,6 +390,13 @@ try {
   }
   if (presetBody.status.policy.permissions.shell !== false || presetBody.status.policy.permissions.gitAdvanced !== false) {
     throw new Error(`Developer preset permissions are unsafe: ${JSON.stringify(presetBody.status.policy.permissions)}`);
+  }
+  const developerTools = new Set((await client.listTools()).tools.map((tool) => tool.name));
+  if (developerTools.has('run_command') || developerTools.has('run_process') || developerTools.has('git_run')) {
+    throw new Error(`Disabled tools are still advertised: ${JSON.stringify([...developerTools])}`);
+  }
+  if (!developerTools.has('fs_write') || !developerTools.has('git_commit')) {
+    throw new Error(`Developer tools were unexpectedly hidden: ${JSON.stringify([...developerTools])}`);
   }
 
   const rootsResponse = await localPost('/api/settings', { roots: [tempRoot, process.cwd()] });

@@ -134,49 +134,40 @@ function pruneProcesses(): void {
   }
 }
 
-async function runForeground(
-  command: string,
-  cwd: string,
-  shell: ShellKind,
-  env: Record<string, string> | undefined,
+type OutputWindow = { offset: number; maxChars: number };
+
+async function collectForegroundOutput(
+  child: ChildProcessWithoutNullStreams,
+  descriptor: { command: string; cwd: string; shell: ShellKind },
   timeoutMs: number,
+  window: OutputWindow,
 ): Promise<Record<string, unknown>> {
-  const child = createChild(command, cwd, shell, env);
   let stdout = '';
   let stderr = '';
-  let stdoutDropped = 0;
-  let stderrDropped = 0;
+  let stdoutTotalChars = 0;
+  let stderrDroppedChars = 0;
   let timedOut = false;
 
-  const cap = config.maxCommandOutputChars;
-  const append = (current: string, chunk: Buffer | string): { value: string; dropped: number } => {
-    let value = current + (typeof chunk === 'string' ? chunk : chunk.toString('utf8'));
-    let dropped = 0;
-    if (value.length > cap) {
-      dropped = value.length - cap;
-      value = value.slice(dropped);
-    }
-    return { value, dropped };
-  };
-
   child.stdout.on('data', (chunk: Buffer) => {
-    const result = append(stdout, chunk);
-    stdout = result.value;
-    stdoutDropped += result.dropped;
+    const incoming = chunk.toString('utf8');
+    const chunkStart = stdoutTotalChars;
+    stdoutTotalChars += incoming.length;
+    const from = Math.max(0, window.offset - chunkStart);
+    const to = Math.min(incoming.length, window.offset + window.maxChars - chunkStart);
+    if (to > from) stdout += incoming.slice(from, to);
   });
   child.stderr.on('data', (chunk: Buffer) => {
-    const result = append(stderr, chunk);
-    stderr = result.value;
-    stderrDropped += result.dropped;
+    const incoming = chunk.toString('utf8');
+    const remaining = Math.max(0, config.maxCommandOutputChars - stderr.length);
+    stderr += incoming.slice(0, remaining);
+    stderrDroppedChars += Math.max(0, incoming.length - remaining);
   });
 
   const timer = setTimeout(() => {
     timedOut = true;
     const record: ManagedProcess = {
       id: 'foreground-timeout',
-      command,
-      cwd,
-      shell,
+      ...descriptor,
       child,
       startedAt: new Date(),
       exitedAt: null,
@@ -194,18 +185,59 @@ async function runForeground(
     child.once('close', (exitCode, signal) => resolve({ exitCode, signal }));
   }).finally(() => clearTimeout(timer));
 
+  const nextOffset = window.offset + stdout.length < stdoutTotalChars
+    ? window.offset + stdout.length
+    : null;
   return {
-    command,
-    cwd,
-    shell,
+    ...descriptor,
     exit_code: result.exitCode,
     signal: result.signal,
     timed_out: timedOut,
     stdout,
     stderr,
-    stdout_dropped_chars: stdoutDropped,
-    stderr_dropped_chars: stderrDropped,
+    stdout_offset: window.offset,
+    stdout_chars: stdout.length,
+    stdout_total_chars: stdoutTotalChars,
+    stdout_truncated: nextOffset !== null,
+    stdout_next_offset: nextOffset,
+    stderr_dropped_chars: stderrDroppedChars,
   };
+}
+
+async function runForeground(
+  command: string,
+  cwd: string,
+  shell: ShellKind,
+  env: Record<string, string> | undefined,
+  timeoutMs: number,
+  window: OutputWindow,
+): Promise<Record<string, unknown>> {
+  const child = createChild(command, cwd, shell, env);
+  return collectForegroundOutput(child, { command, cwd, shell }, timeoutMs, window);
+}
+
+async function runProcessForeground(
+  executable: string,
+  args: string[],
+  cwd: string,
+  env: Record<string, string> | undefined,
+  timeoutMs: number,
+  window: OutputWindow,
+): Promise<Record<string, unknown>> {
+  const child = spawn(executable, args, {
+    cwd,
+    env: { ...process.env, ...(env ?? {}) },
+    windowsHide: true,
+    detached: process.platform !== 'win32',
+    stdio: ['pipe', 'pipe', 'pipe'],
+  });
+  const result = await collectForegroundOutput(
+    child,
+    { command: [executable, ...args].join(' '), cwd, shell: 'auto' },
+    timeoutMs,
+    window,
+  );
+  return { ...result, executable, args };
 }
 
 function runBackground(
@@ -259,12 +291,14 @@ export function registerShellTools(server: McpServer): void {
         cwd: z.string().optional(),
         shell: z.enum(['auto', 'powershell', 'cmd', 'bash', 'sh']).default('auto'),
         background: z.boolean().default(false),
+        output_offset: z.number().int().min(0).max(100_000_000).default(0),
+        max_output_chars: z.number().int().min(1_000).max(config.maxCommandOutputChars).default(config.maxCommandOutputChars),
         timeout_ms: z.number().int().min(100).max(60 * 60 * 1000).optional(),
         env: z.record(z.string(), z.string()).optional(),
       }),
       annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: true },
     },
-    async ({ command, cwd: inputCwd, shell, background, timeout_ms, env }) => {
+    async ({ command, cwd: inputCwd, shell, background, timeout_ms, output_offset, max_output_chars, env }) => {
       try {
         requireShellEnabled();
         const cwd = await resolveCwd(inputCwd);
@@ -281,8 +315,52 @@ export function registerShellTools(server: McpServer): void {
           });
         }
 
-        const result = await runForeground(command, cwd, shell, env, timeout_ms ?? config.defaultCommandTimeoutMs);
+        const result = await runForeground(
+          command,
+          cwd,
+          shell,
+          env,
+          timeout_ms ?? config.defaultCommandTimeoutMs,
+          { offset: output_offset, maxChars: max_output_chars },
+        );
         return textResult(result);
+      } catch (error) {
+        return errorResult(error);
+      }
+    },
+  );
+
+  server.registerTool(
+    'run_process',
+    {
+      title: 'Run local process',
+      description:
+        'Execute an executable with an argument array directly, without a command shell. Requires Shell permission and is not restricted by filesystem roots.',
+      inputSchema: z.object({
+        executable: z.string().min(1),
+        args: z.array(z.string()).max(500).default([]),
+        cwd: z.string().optional(),
+        timeout_ms: z.number().int().min(100).max(60 * 60 * 1000).optional(),
+        output_offset: z.number().int().min(0).max(100_000_000).default(0),
+        max_output_chars: z.number().int().min(1_000).max(config.maxCommandOutputChars).default(config.maxCommandOutputChars),
+        env: z.record(z.string(), z.string()).optional(),
+      }),
+      annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: true },
+    },
+    async ({ executable, args, cwd: inputCwd, timeout_ms, output_offset, max_output_chars, env }) => {
+      try {
+        requireShellEnabled();
+        const cwd = await resolveCwd(inputCwd);
+        return textResult(
+          await runProcessForeground(
+            executable,
+            args,
+            cwd,
+            env,
+            timeout_ms ?? config.defaultCommandTimeoutMs,
+            { offset: output_offset, maxChars: max_output_chars },
+          ),
+        );
       } catch (error) {
         return errorResult(error);
       }

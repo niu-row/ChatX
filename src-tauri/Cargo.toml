@@ -1,6 +1,6 @@
 [package]
 name = "chatx-desktop"
-version = "0.1.0"
+version = "0.2.0"
 description = "Tauri desktop console for ChatX"
 authors = ["ChatX"]
 edition = "2021"

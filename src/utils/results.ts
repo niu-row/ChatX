@@ -1,5 +1,5 @@
 export function textResult(value: unknown) {
-  const text = typeof value === 'string' ? value : JSON.stringify(value, null, 2);
+  const text = typeof value === 'string' ? value : JSON.stringify(value);
   return { content: [{ type: 'text' as const, text }] };
 }
 

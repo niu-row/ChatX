@@ -18,7 +18,7 @@ import { clearRuntimeKey, credentialStoreInfo, loadRuntimeKey, saveRuntimeKey } 
 import { SERVER_NAME, SERVER_VERSION } from './server.js';
 import { terminateAllManagedProcesses } from './tools/shell.js';
 import { DASHBOARD_HTML } from './dashboard-page.js';
-import { getInvocationLog } from './invocation-log.js';
+import { getInvocationLog, getInvocationSummary } from './invocation-log.js';
 
 const PROFILE_NAME = 'chatx';
 const MAX_BODY_BYTES = 32 * 1024;
@@ -518,7 +518,7 @@ export class TunnelDashboard {
       return true;
     }
     if (req.method === 'GET' && pathname === '/api/invocations') {
-      json(res, 200, { ok: true, entries: getInvocationLog(500) });
+      json(res, 200, { ok: true, entries: getInvocationLog(500), summary: getInvocationSummary() });
       return true;
     }
 

@@ -1,6 +1,6 @@
 {
   "name": "chatx",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "private": true,
   "description": "Local full-capability MCP server for ChatGPT custom connectors",
   "type": "module",
@@ -22,6 +22,7 @@
     "test:settings": "npm run build && node scripts/settings-test.mjs",
     "test:smoke": "npm run build && node scripts/smoke.mjs",
     "test:desktop": "node scripts/desktop-static-test.mjs",
+    "benchmark": "npm run build && node scripts/performance.mjs",
     "test": "npm run check && npm run build && node scripts/settings-test.mjs && node scripts/smoke.mjs && node scripts/desktop-static-test.mjs"
   },
   "dependencies": {
