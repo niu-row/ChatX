@@ -1,25 +1,38 @@
 import { spawn } from 'node:child_process';
 import fs from 'node:fs/promises';
-import path from 'node:path';
 import type { McpServer } from '@modelcontextprotocol/server';
 import * as z from 'zod/v4';
 import { config } from '../config.js';
-import { requirePermission, settingsDirectoryPath } from '../settings.js';
+import { requirePermission } from '../settings.js';
+import { gitEnvironment, restrictedGitOptions, validateGitRepo, validateGitPaths, disabledFilterOptions } from '../security/git-policy.js';
 import { assertExistingPath } from '../security/path-policy.js';
 import { errorResult, textResult } from '../utils/results.js';
 
 export async function resolveRepo(inputPath: string): Promise<string> {
-  const resolved = await assertExistingPath(inputPath);
-  const stat = await fs.stat(resolved);
-  if (!stat.isDirectory()) throw new Error(`Repository path is not a directory: ${resolved}`);
-  return resolved;
+  return validateGitRepo(inputPath, probeGit);
 }
 
-export async function runGit(
+async function probeGit(cwd: string, args: string[]) {
+  return executeGit(cwd, [...restrictedGitOptions, ...args], config.defaultCommandTimeoutMs, undefined, gitEnvironment());
+}
+
+export async function runGit(cwd: string, args: string[], timeoutMs = config.defaultCommandTimeoutMs,
+  stdoutWindow?: { offset: number; maxChars: number }) {
+  const filters = await disabledFilterOptions(cwd, probeGit);
+  const safeArgs = [...args];
+  if (safeArgs[0] === 'diff' || safeArgs[0] === 'log') {
+    safeArgs.splice(1, 0, '--no-ext-diff', '--no-textconv');
+  }
+  if (safeArgs[0] === 'diff' || safeArgs[0] === 'status') safeArgs.splice(1, 0, '--ignore-submodules=all');
+  return executeGit(cwd, [...restrictedGitOptions, ...filters, ...safeArgs], timeoutMs, stdoutWindow, gitEnvironment());
+}
+
+async function executeGit(
   cwd: string,
   args: string[],
   timeoutMs = config.defaultCommandTimeoutMs,
   stdoutWindow?: { offset: number; maxChars: number },
+  env: NodeJS.ProcessEnv = process.env,
 ): Promise<{
   exit_code: number | null;
   signal: NodeJS.Signals | null;
@@ -34,7 +47,7 @@ export async function runGit(
       cwd,
       windowsHide: true,
       stdio: ['ignore', 'pipe', 'pipe'],
-      env: process.env,
+      env,
     });
 
     let stdout = '';
@@ -100,12 +113,6 @@ function validateRefName(value: string, label: string): string {
   return trimmed;
 }
 
-async function disabledHooksDirectory(): Promise<string> {
-  const directory = path.join(settingsDirectoryPath(), 'disabled-git-hooks');
-  await fs.mkdir(directory, { recursive: true });
-  return directory;
-}
-
 export function registerGitTools(server: McpServer): void {
   server.registerTool(
     'git_status',
@@ -151,7 +158,7 @@ export function registerGitTools(server: McpServer): void {
         if (staged) args.push('--cached');
         if (stat) args.push('--stat');
         if (ref) args.push(validateRefName(ref, 'Git ref'));
-        if (paths && paths.length > 0) args.push('--', ...paths);
+        if (paths && paths.length > 0) args.push('--', ...await validateGitPaths(cwd, paths));
         const result = await runGit(cwd, args, config.defaultCommandTimeoutMs, {
           offset,
           maxChars: max_chars,
@@ -196,7 +203,7 @@ export function registerGitTools(server: McpServer): void {
         const args = ['diff', '--numstat'];
         if (staged) args.push('--cached');
         if (ref) args.push(validateRefName(ref, 'Git ref'));
-        if (paths && paths.length > 0) args.push('--', ...paths);
+        if (paths && paths.length > 0) args.push('--', ...await validateGitPaths(cwd, paths));
         const result = await runGit(cwd, args);
         const rows = result.stdout.split(/\r?\n/).filter(Boolean);
         const files = rows.slice(0, max_files).map((line) => {
@@ -285,7 +292,7 @@ export function registerGitTools(server: McpServer): void {
         if (validatedRef) logArgs.push(validatedRef);
         const diffArgs = ['diff', '--stat'];
         if (validatedRef) diffArgs.push(validatedRef);
-        if (paths && paths.length > 0) diffArgs.push('--', ...paths);
+        if (paths && paths.length > 0) diffArgs.push('--', ...await validateGitPaths(cwd, paths));
 
         const [status, log, diffStat] = await Promise.all([
           runGit(cwd, ['status', '--porcelain=v1', '--branch']),
@@ -316,7 +323,7 @@ export function registerGitTools(server: McpServer): void {
       try {
         requirePermission('gitWrite', 'Git write tools');
         const cwd = await resolveRepo(repo);
-        const result = await runGit(cwd, ['add', '--', ...paths]);
+        const result = await runGit(cwd, ['add', '--', ...await validateGitPaths(cwd, paths)]);
         return textResult({ repo: cwd, paths, ...result });
       } catch (error) {
         return errorResult(error);
@@ -336,7 +343,7 @@ export function registerGitTools(server: McpServer): void {
       try {
         requirePermission('gitWrite', 'Git write tools');
         const cwd = await resolveRepo(repo);
-        const result = await runGit(cwd, ['restore', '--staged', '--', ...paths]);
+        const result = await runGit(cwd, ['restore', '--staged', '--', ...await validateGitPaths(cwd, paths)]);
         return textResult({ repo: cwd, paths, ...result });
       } catch (error) {
         return errorResult(error);
@@ -383,10 +390,7 @@ export function registerGitTools(server: McpServer): void {
       try {
         requirePermission('gitWrite', 'Git write tools');
         const cwd = await resolveRepo(repo);
-        const hooks = await disabledHooksDirectory();
         const args = [
-          '-c', `core.hooksPath=${hooks}`,
-          '-c', 'commit.gpgSign=false',
           'commit',
           '--no-verify',
           '--no-gpg-sign',
@@ -419,8 +423,9 @@ export function registerGitTools(server: McpServer): void {
         requirePermission('gitAdvanced', 'Advanced Git command execution');
         requirePermission('gitWrite', 'Git write tools');
         requirePermission('gitRead', 'Git read tools');
-        const cwd = await resolveRepo(repo);
-        const result = await runGit(cwd, args, timeout_ms ?? config.defaultCommandTimeoutMs);
+        const cwd = await assertExistingPath(repo);
+        if (!(await fs.stat(cwd)).isDirectory()) throw new Error("Repository path must be a directory.");
+        const result = await executeGit(cwd, args, timeout_ms ?? config.defaultCommandTimeoutMs);
         return textResult({ repo: cwd, args, ...result });
       } catch (error) {
         return errorResult(error);

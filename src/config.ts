@@ -30,7 +30,7 @@ export const config = Object.freeze({
   roots: parseRoots(),
   settingsDir: path.resolve(process.env.CHATGPTX_SETTINGS_DIR?.trim() || path.join(process.cwd(), '.chatgptx')),
   fullAccess: envBool('CHATGPTX_FULL_ACCESS', false),
-  enableShell: envBool('CHATGPTX_ENABLE_SHELL', true),
+  enableShell: envBool('CHATGPTX_ENABLE_SHELL', false),
   authToken: process.env.CHATGPTX_AUTH_TOKEN?.trim() || null,
   maxFileBytes: envInt('CHATGPTX_MAX_FILE_BYTES', 10 * 1024 * 1024, 1024, 256 * 1024 * 1024),
   maxCommandOutputChars: envInt('CHATGPTX_MAX_COMMAND_OUTPUT_CHARS', 200_000, 1_000, 5_000_000),

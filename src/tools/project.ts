@@ -4,7 +4,7 @@ import type { McpServer } from '@modelcontextprotocol/server';
 import * as z from 'zod/v4';
 import { getRuntimeSettings, requirePermission } from '../settings.js';
 import { assertExistingPath, assertPathAllowed } from '../security/path-policy.js';
-import { runGit } from './git.js';
+import { runGit, resolveRepo } from './git.js';
 import { errorResult, textResult } from '../utils/results.js';
 
 const DEFAULT_EXCLUDED_DIRECTORIES = [
@@ -157,11 +157,10 @@ async function readKeyFiles(
 
 async function isGitRepository(root: string): Promise<boolean> {
   try {
-    await fs.access(path.join(root, '.git'));
+    await resolveRepo(root);
     return true;
   } catch {
-    const probe = await runGit(root, ['rev-parse', '--is-inside-work-tree']);
-    return probe.exit_code === 0 && probe.stdout.trim() === 'true';
+    return false;
   }
 }
 

@@ -22,8 +22,10 @@
     "test:settings": "npm run build && node scripts/settings-test.mjs",
     "test:smoke": "npm run build && node scripts/smoke.mjs",
     "test:desktop": "node scripts/desktop-static-test.mjs",
+    "test:installer": "node scripts/installer-runtime-test.mjs",
+    "test:security": "npm run build && node scripts/security-regression-test.mjs",
     "benchmark": "npm run build && node scripts/performance.mjs",
-    "test": "npm run check && npm run build && node scripts/settings-test.mjs && node scripts/smoke.mjs && node scripts/desktop-static-test.mjs"
+    "test": "npm run check && npm run build && node scripts/settings-test.mjs && node scripts/smoke.mjs && node scripts/security-regression-test.mjs && node scripts/desktop-static-test.mjs"
   },
   "dependencies": {
     "@modelcontextprotocol/node": "^2.0.0",

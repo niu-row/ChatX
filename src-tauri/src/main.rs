@@ -41,6 +41,8 @@ struct BackendState {
     child: Mutex<Option<Child>>,
     log_path: Mutex<Option<PathBuf>>,
     quitting: AtomicBool,
+    lifecycle: tokio::sync::Mutex<()>,
+    recovery_attempted: AtomicBool,
 }
 
 fn project_root() -> Option<PathBuf> {
@@ -73,8 +75,8 @@ fn migrate_source_state(source_root: &Path, target: &Path) {
     }
 }
 
-fn backend_is_healthy() -> bool {
-    let client = match reqwest::blocking::Client::builder()
+async fn backend_is_healthy() -> bool {
+    let client = match reqwest::Client::builder()
         .timeout(Duration::from_millis(900))
         .build()
     {
@@ -82,9 +84,10 @@ fn backend_is_healthy() -> bool {
         Err(_) => return false,
     };
 
-    match client.get(format!("{BACKEND_BASE}/healthz")).send() {
+    match client.get(format!("{BACKEND_BASE}/healthz")).send().await {
         Ok(response) if response.status().is_success() => response
             .json::<Value>()
+            .await
             .ok()
             .and_then(|body| body.get("service").and_then(Value::as_str).map(str::to_owned))
             .as_deref()
@@ -222,8 +225,8 @@ fn spawn_backend(app: &tauri::AppHandle) -> Result<(Child, PathBuf), String> {
     Ok((child, log_path))
 }
 
-async fn ensure_backend_impl(app: &tauri::AppHandle, state: &BackendState) -> Result<String, String> {
-    if backend_is_healthy() {
+async fn ensure_backend_started(app: &tauri::AppHandle, state: &BackendState) -> Result<String, String> {
+    if backend_is_healthy().await {
         return Ok("already-running".into());
     }
 
@@ -248,7 +251,7 @@ async fn ensure_backend_impl(app: &tauri::AppHandle, state: &BackendState) -> Re
     }
 
     for _ in 0..40 {
-        if backend_is_healthy() {
+        if backend_is_healthy().await {
             return Ok(if spawned { "started" } else { "recovered" }.into());
         }
 
@@ -299,6 +302,67 @@ async fn ensure_backend_impl(app: &tauri::AppHandle, state: &BackendState) -> Re
         format!("\n\n后端日志：\n{tail}")
     };
     Err(format!("ChatX 后端已经启动，但 6 秒内没有通过 /healthz。{suffix}"))
+}
+
+
+async fn clean_installed_runtime(app: &tauri::AppHandle) -> Result<(), String> {
+    let directory = bundled_resource_dir(app).ok_or_else(|| {
+        "未找到本安装目录的运行组件。源码模式请手动停止对应后端，避免终止其他 Node 进程。".to_string()
+    })?;
+    let app = app.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        stop_owned_backend(&app);
+        #[cfg(windows)]
+        {
+            let script = include_str!("../windows/stop-runtime.ps1");
+            let quoted_directory = directory.to_string_lossy().replace('\'', "''");
+            let output = Command::new("powershell.exe")
+                .args(["-NoLogo", "-NoProfile", "-NonInteractive", "-Command",
+                    &format!("& {{ {script} }} -InstallDir '{quoted_directory}'")])
+                .creation_flags(CREATE_NO_WINDOW)
+                .output()
+                .map_err(|error| format!("无法清理残留进程：{error}"))?;
+            if !output.status.success() {
+                return Err(format!("清理残留进程失败：{}\n{}",
+                    String::from_utf8_lossy(&output.stdout),
+                    String::from_utf8_lossy(&output.stderr)));
+            }
+            Ok(())
+        }
+        #[cfg(not(windows))]
+        {
+            let _ = directory;
+            Err("残留进程清理目前仅支持 Windows 安装版。".into())
+        }
+    }).await.map_err(|error| format!("清理任务失败：{error}"))?
+}
+
+async fn ensure_backend_impl(app: &tauri::AppHandle, state: &BackendState) -> Result<String, String> {
+    // Serialize startup/recovery across polling requests and the repair button.
+    let _operation = state.lifecycle.lock().await;
+    match ensure_backend_started(app, state).await {
+        Ok(result) => Ok(result),
+        Err(first_error) => {
+            // One automatic attempt per desktop session; do not kill/restart on every poll.
+            if state.recovery_attempted.swap(true, Ordering::SeqCst)
+                || bundled_resource_dir(app).is_none() {
+                return Err(first_error);
+            }
+            clean_installed_runtime(app).await
+                .map_err(|error| format!("{first_error}\n{error}"))?;
+            ensure_backend_started(app, state).await
+                .map_err(|error| format!("{first_error}\n清理残留进程后仍无法启动：{error}"))
+        }
+    }
+}
+
+#[tauri::command]
+async fn restart_backend(app: tauri::AppHandle, state: State<'_, BackendState>) -> Result<String, String> {
+    let _operation = state.lifecycle.lock().await;
+    state.recovery_attempted.store(true, Ordering::SeqCst);
+    clean_installed_runtime(&app).await?;
+    ensure_backend_started(&app, &state).await?;
+    Ok("残留进程已清理，后端已重启。请重新连接 Tunnel。".into())
 }
 
 #[tauri::command]
@@ -364,13 +428,13 @@ async fn backend_request(
         return Err("只允许 GET 或 POST。".into());
     }
 
-    if !backend_is_healthy() {
+    if !backend_is_healthy().await {
         ensure_backend_impl(&app, &state).await?;
     }
 
     match send_backend_request(&method, &path, &body).await {
         Ok(value) => Ok(value),
-        Err(first_error) if !backend_is_healthy() => {
+        Err(first_error) if !backend_is_healthy().await => {
             ensure_backend_impl(&app, &state).await?;
             send_backend_request(&method, &path, &body)
                 .await
@@ -506,6 +570,7 @@ fn main() {
         })
         .invoke_handler(tauri::generate_handler![
             ensure_backend,
+            restart_backend,
             backend_request,
             pick_folders,
             open_external,

@@ -94,6 +94,8 @@ async function localPost(url, body) {
 let client;
 try {
   await waitForHealth();
+  const authorized = await localPost('/api/settings', { preset: 'developer', shell: true });
+  if (!authorized.ok) throw new Error('Failed to grant isolated smoke test permissions.');
 
   const dashboard = await fetch(`${baseUrl}/`);
   if (!dashboard.ok || !(await dashboard.text()).includes('ChatX 本地控制台')) {
@@ -171,6 +173,7 @@ try {
     'fs_project_snapshot',
     'run_command',
     'run_process',
+    'execution_output',
     'process_output',
     'process_list',
     'process_stdin',
@@ -300,12 +303,10 @@ try {
     cwd: tempRoot,
     max_output_chars: 1_000,
   });
-  const pagedProcessNext = await call(client, 'run_process', {
-    executable: process.execPath,
-    args: ['-e', "process.stdout.write('a'.repeat(2500))"],
-    cwd: tempRoot,
-    output_offset: pagedProcess.stdout_next_offset,
-    max_output_chars: 1_000,
+  const pagedProcessNext = await call(client, 'execution_output', {
+    execution_id: pagedProcess.execution_id,
+    stdout_offset: pagedProcess.stdout_next_offset,
+    max_chars: 1_000,
   });
   if (pagedProcess.stdout.length !== 1_000 || pagedProcess.stdout_next_offset !== 1_000 || pagedProcessNext.stdout_offset !== 1_000) {
     throw new Error(`run_process output pagination failed: ${JSON.stringify({ pagedProcess, pagedProcessNext })}`);

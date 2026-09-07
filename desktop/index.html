@@ -176,6 +176,12 @@
             <button id="diagnose" class="primary compact" type="button">运行诊断</button>
           </div>
           <div id="diagnostics" class="diagnostics"><div class="empty-state">尚未运行诊断。</div></div>
+          <div class="guide-explain">
+            <h3>后端无法启动或连接卡住？</h3>
+            <p>清理本安装目录的 Node 和 Tunnel 进程并重启后端。当前连接和正在执行的任务会中断，设置与已保存的 Key 会保留。</p>
+            <button id="restartBackend" class="danger" type="button">清理残留并重启后端</button>
+            <p id="restartStatus" role="status" aria-live="polite"></p>
+          </div>
         </section>
 
         <section class="panel log-panel">

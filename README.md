@@ -310,6 +310,8 @@ ChatGPT 中已经启用 ChatX 应用
 
 ## 权限模式
 
+全新配置默认使用“安全”只读模式，Shell、文件写入、Git 写入、高级 Git 和完整文件系统访问默认关闭。旧配置迁移保留明确保存过的授权，缺失权限采用安全值。配置损坏或版本不支持时，关闭所有操作权限并保留原文件。设置修改会先完整校验、原子保存，成功后才切换内存权限并通知客户端；保存失败不会改变当前权限。
+
 ChatX 提供四种权限模式。
 
 ### 安全
@@ -363,7 +365,7 @@ ChatX 当前提供：
 - `fs_edit`：精确文本替换，可检查替换次数。
 - `fs_mkdir`：创建目录。
 - `fs_delete`：删除文件或目录。
-- `fs_move`：移动 / 重命名，支持跨卷回退。
+- `fs_move`：移动 / 重命名，拒绝同一路径和父子目录关系；覆盖采用暂存、备份和提交，失败时回滚，跨卷复制完成后才移除源。若清理失败，会返回保留的恢复目录。
 - `fs_copy`：复制文件或目录。
 - `fs_search`：流式递归文字或正则搜索；字面量和兼容正则均优先使用 ripgrep，不可用或语法不兼容时自动回退到有限并发 JavaScript 实现。
 - `fs_project_snapshot`：一次返回受限的项目树、关键配置文件和可选 Git 摘要；关键文件采用有界并发读取，非 Git 目录不会启动多条无效 Git 命令。
@@ -386,6 +388,10 @@ ChatX 当前提供：
 
 `git_commit` 只提交已经 staged 的变更，并且该受约束工具会关闭 Git hooks 和 GPG signing，避免提交过程通过 hook 间接执行任意外部程序。
 
+受限 Git 工具要求实际工作树根目录、Git 目录和共享 Git 目录均在允许范围内，不能只授权子目录再操作上级仓库。路径参数使用字面量相对路径，拒绝绝对路径、`..`、pathspec magic 和 `.git` 元数据路径。
+
+受限命令统一关闭 hooks、fsmonitor、外部 diff、textconv、签名与自动维护，并清除可重定向 Git 的环境变量。外部 clean/smudge/process filters 不会执行；需要这些过滤器的操作会失败，避免静默写入未过滤内容。仓库级 config include 和 alternate object database 暂不支持受限工具。
+
 ### 高级 Git
 
 ```text
@@ -405,7 +411,8 @@ git_run
 开启 Shell 后可使用：
 
 - `run_command`
-- `run_process`：直接传递 executable 和参数数组，不启动命令 Shell；前台输出支持 `output_offset` / `max_output_chars` 流式分页。
+- `run_process`：直接传递 executable 和参数数组，不启动命令 Shell；前台输出返回 `execution_id`。
+- `execution_output`：通过 `execution_id` 和 `stdout_offset` / `stderr_offset` 读取后续输出，不重新执行命令。
 - `process_output`
 - `process_list`
 - `process_stdin`
@@ -418,6 +425,8 @@ git_run
 - stdout / stderr 捕获
 - 后台进程
 - 后台进程 ID 管理
+
+前台命令首次调用仅接受 `output_offset=0`，使用 `max_output_chars` 控制单页长度。后续分页必须调用 `execution_output`；缓存最多保留 10 分钟、50 次执行、合计 1000 万字符，达到容量上限可能提前淘汰。每个输出流还受缓冲上限约束；`stdout_dropped_chars` / `stderr_dropped_chars` 标明未保留的部分。缓存过期或缺失时返回错误，不会重新执行原命令。
 
 ### 重要：允许目录不是 Shell 沙箱
 
@@ -512,7 +521,7 @@ ChatX 直接读取环境变量，不会自动加载 `.env` 文件。`.env.exampl
 | `CHATGPTX_ROOTS` | 当前工作目录 | 新设置文件的默认允许目录 |
 | `CHATGPTX_SETTINGS_DIR` | `<cwd>/.chatgptx` | 设置、DPAPI 数据、Tunnel health 文件等本地数据目录 |
 | `CHATGPTX_FULL_ACCESS` | `false` | 是否绕过允许目录检查 |
-| `CHATGPTX_ENABLE_SHELL` | `true` | 环境变量层面的 Shell 默认值 |
+| `CHATGPTX_ENABLE_SHELL` | `false` | 新配置的 Shell 默认值；显式设置 true 才开启 |
 | `CHATGPTX_AUTH_TOKEN` | 空 | 非 Tunnel 私有 HTTP 部署时可选的 Bearer Token |
 | `CHATGPTX_MAX_FILE_BYTES` | `10485760` | 单个文件读取 / 编辑大小上限 |
 | `CHATGPTX_MAX_COMMAND_OUTPUT_CHARS` | `200000` | 前台命令 stdout / stderr 缓冲上限 |
@@ -635,6 +644,8 @@ npm run build
 npm run test:settings
 npm run test:smoke
 npm run test:desktop
+npm run test:security
+npm run test:installer
 npm run benchmark
 ```
 
@@ -647,7 +658,7 @@ npm run benchmark
 - 权限预设。
 - 动态允许目录。
 - Windows DPAPI 凭据存储。
-- MCP 29 个工具的 smoke test。
+- MCP 30 个工具的 smoke test。
 - 文件系统读写。
 - Shell / 后台进程。
 - 受约束 Git 写入。
@@ -705,6 +716,14 @@ ChatX 的设计目标就是提供真实的本地操作能力，因此某些权�
 ### 修改了 MCP 工具，但 ChatGPT 里没有出现
 
 自定义 MCP 应用的工具列表不一定自动更新。根据 ChatGPT 工作空间类型，可能需要在应用管理页面执行 **Refresh / 刷新操作**，或者重新创建 / 发布应用。
+
+### 后端启动失败或有遗留进程
+
+Windows 安装版可在“诊断”页面点击“清理残留并重启后端”。确认后会终止当前安装目录下的 Node 和 tunnel-client，等待进程退出并重启后端；当前任务和 Tunnel 连接会中断，需要重新连接 Tunnel。设置和已保存的 Runtime Key 会保留。
+
+正常启动优先复用健康的后端；启动失败后，每次桌面会话最多自动清理并重试一次。恢复过程串行执行，避免轮询同时启动多个后端。清理按完整程序路径匹配，不会按名称终止其他目录中的 Node 或 tunnel-client。源码开发模式不自动清理未归属的外部后端。
+
+安装器和新版卸载器也会在修改运行组件前执行清理。首次从旧版本升级并选择“安装前卸载”时，旧卸载器尚无此逻辑，请先从托盘选择“退出 ChatX”。
 
 ### 关闭 ChatX 后为什么进程还在
 

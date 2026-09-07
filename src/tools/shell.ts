@@ -134,6 +134,54 @@ function pruneProcesses(): void {
   }
 }
 
+type CompletedExecution = {
+  id: string;
+  cwd: string;
+  completedAt: number;
+  stdout: string;
+  stderr: string;
+  stdoutTotal: number;
+  stderrTotal: number;
+  metadata: Record<string, unknown>;
+};
+const executions = new Map<string, CompletedExecution>();
+const EXECUTION_TTL_MS = 10 * 60 * 1000;
+const EXECUTION_CACHE_CHARS = 10_000_000;
+
+function pruneExecutions(): void {
+  for (const [id, entry] of executions) {
+    if (Date.now() - entry.completedAt > EXECUTION_TTL_MS) executions.delete(id);
+  }
+  let size = [...executions.values()].reduce((sum, entry) => sum + entry.stdout.length + entry.stderr.length, 0);
+  for (const [id, entry] of executions) {
+    if (size <= EXECUTION_CACHE_CHARS && executions.size <= 50) break;
+    size -= entry.stdout.length + entry.stderr.length;
+    executions.delete(id);
+  }
+}
+
+function executionPage(entry: CompletedExecution, stdoutOffset: number, stderrOffset: number, maxChars: number) {
+  const stdout = entry.stdout.slice(stdoutOffset, stdoutOffset + maxChars);
+  const stderr = entry.stderr.slice(stderrOffset, stderrOffset + maxChars);
+  return {
+    ...entry.metadata,
+    execution_id: entry.id,
+    output_expires_at: new Date(entry.completedAt + EXECUTION_TTL_MS).toISOString(),
+    stdout, stderr,
+    stdout_offset: stdoutOffset,
+    stdout_chars: stdout.length,
+    stdout_total_chars: entry.stdoutTotal,
+    stdout_stored_chars: entry.stdout.length,
+    stdout_dropped_chars: entry.stdoutTotal - entry.stdout.length,
+    stdout_truncated: stdoutOffset + stdout.length < entry.stdoutTotal,
+    stdout_next_offset: stdoutOffset + stdout.length < entry.stdout.length ? stdoutOffset + stdout.length : null,
+    stderr_offset: stderrOffset,
+    stderr_total_chars: entry.stderrTotal,
+    stderr_dropped_chars: entry.stderrTotal - entry.stderr.length,
+    stderr_next_offset: stderrOffset + stderr.length < entry.stderr.length ? stderrOffset + stderr.length : null,
+  };
+}
+
 type OutputWindow = { offset: number; maxChars: number };
 
 async function collectForegroundOutput(
@@ -145,22 +193,17 @@ async function collectForegroundOutput(
   let stdout = '';
   let stderr = '';
   let stdoutTotalChars = 0;
-  let stderrDroppedChars = 0;
+  let stderrTotalChars = 0;
   let timedOut = false;
-
-  child.stdout.on('data', (chunk: Buffer) => {
-    const incoming = chunk.toString('utf8');
-    const chunkStart = stdoutTotalChars;
+  child.stdout.setEncoding('utf8');
+  child.stderr.setEncoding('utf8');
+  child.stdout.on('data', (incoming: string) => {
     stdoutTotalChars += incoming.length;
-    const from = Math.max(0, window.offset - chunkStart);
-    const to = Math.min(incoming.length, window.offset + window.maxChars - chunkStart);
-    if (to > from) stdout += incoming.slice(from, to);
+    stdout += incoming.slice(0, Math.max(0, Math.min(config.maxProcessBufferChars, EXECUTION_CACHE_CHARS / 2) - stdout.length));
   });
-  child.stderr.on('data', (chunk: Buffer) => {
-    const incoming = chunk.toString('utf8');
-    const remaining = Math.max(0, config.maxCommandOutputChars - stderr.length);
-    stderr += incoming.slice(0, remaining);
-    stderrDroppedChars += Math.max(0, incoming.length - remaining);
+  child.stderr.on('data', (incoming: string) => {
+    stderrTotalChars += incoming.length;
+    stderr += incoming.slice(0, Math.max(0, Math.min(config.maxProcessBufferChars, EXECUTION_CACHE_CHARS / 2) - stderr.length));
   });
 
   const timer = setTimeout(() => {
@@ -185,23 +228,14 @@ async function collectForegroundOutput(
     child.once('close', (exitCode, signal) => resolve({ exitCode, signal }));
   }).finally(() => clearTimeout(timer));
 
-  const nextOffset = window.offset + stdout.length < stdoutTotalChars
-    ? window.offset + stdout.length
-    : null;
-  return {
-    ...descriptor,
-    exit_code: result.exitCode,
-    signal: result.signal,
-    timed_out: timedOut,
-    stdout,
-    stderr,
-    stdout_offset: window.offset,
-    stdout_chars: stdout.length,
-    stdout_total_chars: stdoutTotalChars,
-    stdout_truncated: nextOffset !== null,
-    stdout_next_offset: nextOffset,
-    stderr_dropped_chars: stderrDroppedChars,
+  const entry: CompletedExecution = {
+    id: randomUUID(), cwd: descriptor.cwd, completedAt: Date.now(),
+    stdout, stderr, stdoutTotal: stdoutTotalChars, stderrTotal: stderrTotalChars,
+    metadata: { ...descriptor, exit_code: result.exitCode, signal: result.signal, timed_out: timedOut },
   };
+  executions.set(entry.id, entry);
+  pruneExecutions();
+  return executionPage(entry, 0, 0, window.maxChars);
 }
 
 async function runForeground(
@@ -285,7 +319,7 @@ export function registerShellTools(server: McpServer): void {
     {
       title: 'Run local command',
       description:
-        'Execute an arbitrary local shell command as the OS user running ChatX. This is intentionally powerful: filesystem root restrictions do NOT sandbox commands. Auto uses PowerShell on Windows and /bin/sh on Unix. Use background=true for long-running processes.',
+        'Execute an arbitrary local shell command as the OS user running ChatX. This is intentionally powerful: filesystem root restrictions do NOT sandbox commands. Auto uses PowerShell on Windows and /bin/sh on Unix. Use background=true for long-running processes. Foreground calls return execution_id; use execution_output to read subsequent pages without re-running the command.',
       inputSchema: z.object({
         command: z.string().min(1),
         cwd: z.string().optional(),
@@ -301,6 +335,7 @@ export function registerShellTools(server: McpServer): void {
     async ({ command, cwd: inputCwd, shell, background, timeout_ms, output_offset, max_output_chars, env }) => {
       try {
         requireShellEnabled();
+        if (output_offset !== 0) throw new Error('Use execution_output with the previous execution_id to read more output; commands are never re-run for pagination.');
         const cwd = await resolveCwd(inputCwd);
         if (background) {
           const record = runBackground(command, cwd, shell, env);
@@ -335,7 +370,7 @@ export function registerShellTools(server: McpServer): void {
     {
       title: 'Run local process',
       description:
-        'Execute an executable with an argument array directly, without a command shell. Requires Shell permission and is not restricted by filesystem roots.',
+        'Execute an executable with an argument array directly, without a command shell. Requires Shell permission and is not restricted by filesystem roots. Returns execution_id; use execution_output for subsequent output pages.',
       inputSchema: z.object({
         executable: z.string().min(1),
         args: z.array(z.string()).max(500).default([]),
@@ -350,6 +385,7 @@ export function registerShellTools(server: McpServer): void {
     async ({ executable, args, cwd: inputCwd, timeout_ms, output_offset, max_output_chars, env }) => {
       try {
         requireShellEnabled();
+        if (output_offset !== 0) throw new Error('Use execution_output with the previous execution_id to read more output; commands are never re-run for pagination.');
         const cwd = await resolveCwd(inputCwd);
         return textResult(
           await runProcessForeground(
@@ -361,6 +397,33 @@ export function registerShellTools(server: McpServer): void {
             { offset: output_offset, maxChars: max_output_chars },
           ),
         );
+      } catch (error) {
+        return errorResult(error);
+      }
+    },
+  );
+
+  server.registerTool(
+    'execution_output',
+    {
+      title: 'Read completed execution output',
+      description: 'Read cached stdout/stderr by execution_id without running the command again. Output expires after 10 minutes and may be evicted earlier at the cache limit.',
+      inputSchema: z.object({
+        execution_id: z.string().uuid(),
+        stdout_offset: z.number().int().min(0).max(100_000_000).default(0),
+        stderr_offset: z.number().int().min(0).max(100_000_000).default(0),
+        max_chars: z.number().int().min(1_000).max(config.maxCommandOutputChars).default(config.maxCommandOutputChars),
+      }),
+      annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
+    },
+    async ({ execution_id, stdout_offset, stderr_offset, max_chars }) => {
+      try {
+        requireShellEnabled();
+        pruneExecutions();
+        const entry = executions.get(execution_id);
+        if (!entry) throw new Error('Unknown or expired execution_id. The command was not re-run.');
+        await assertPathAllowed(entry.cwd);
+        return textResult(executionPage(entry, stdout_offset, stderr_offset, max_chars));
       } catch (error) {
         return errorResult(error);
       }

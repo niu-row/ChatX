@@ -248,6 +248,7 @@ function render(payload) {
   $('rootsFact').title = s.policy.roots.join('; ');
   $('settingsVersion').textContent = String(s.settings.version);
   if (!presetDirty) $('preset').value = s.policy.permissionPreset;
+  $('restartBackend').disabled = busy;
   $('preset').disabled = busy;
   $('applyPreset').disabled = busy;
 
@@ -340,6 +341,7 @@ function formatInvocationTime(value) {
 }
 
 async function refreshInvocations() {
+  if (busy) return;
   const rows = $('invocationRows');
   if (!rows) return;
   const limit = Math.max(1, Number.parseInt($('invocationLimit').value, 10) || 50);
@@ -445,6 +447,31 @@ async function stopTunnel() {
   }
 }
 
+async function restartBackend() {
+  if (busy || !invoke) return;
+  if (!window.confirm('将强制终止本安装目录的 Node 和 Tunnel 进程，中断当前任务并重启后端。是否继续？')) return;
+  busy = true;
+  settingsRevision += 1;
+  $('restartBackend').disabled = true;
+  $('restartStatus').textContent = '正在清理残留进程并重启后端…';
+  if (state) render(state);
+  try {
+    const message = await invoke('restart_backend');
+    settingsError = '';
+    showError('');
+    $('restartStatus').textContent = message;
+    if (!refreshTimer) refreshTimer = setTimeout(refreshLoop, 2500);
+  } catch (error) {
+    $('restartStatus').textContent = normalizeError(error);
+    showError(normalizeError(error));
+  } finally {
+    busy = false;
+    $('restartBackend').disabled = false;
+    await refresh();
+  }
+}
+
+$('restartBackend').addEventListener('click', restartBackend);
 $('connect').addEventListener('click', connectTunnel);
 $('guideConnect').addEventListener('click', connectTunnel);
 $('stop').addEventListener('click', stopTunnel);

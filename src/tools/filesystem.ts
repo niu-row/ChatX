@@ -1,5 +1,6 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
+import { safeMove } from '../utils/safe-move.js';
 import { spawn } from 'node:child_process';
 import type { McpServer } from '@modelcontextprotocol/server';
 import * as z from 'zod/v4';
@@ -32,22 +33,6 @@ async function readChunk(filePath: string, offset: number, length: number): Prom
 
 function decodeBuffer(buffer: Buffer, encoding: 'utf8' | 'base64'): string {
   return encoding === 'base64' ? buffer.toString('base64') : buffer.toString('utf8');
-}
-
-async function copyWithFallback(source: string, destination: string, recursive: boolean): Promise<void> {
-  await fs.cp(source, destination, { recursive, force: true, errorOnExist: false });
-}
-
-async function moveWithFallback(source: string, destination: string): Promise<void> {
-  try {
-    await fs.rename(source, destination);
-  } catch (error) {
-    const code = error && typeof error === 'object' && 'code' in error ? String(error.code) : '';
-    if (code !== 'EXDEV') throw error;
-    const stat = await fs.lstat(source);
-    await copyWithFallback(source, destination, stat.isDirectory());
-    await fs.rm(source, { recursive: stat.isDirectory(), force: false });
-  }
 }
 
 type DirectoryListing = {
@@ -729,20 +714,8 @@ export function registerFilesystemTools(server: McpServer): void {
         requirePermission('filesystemWrite', 'Filesystem write tools');
         const src = await assertExistingPath(source);
         const dst = await assertPathAllowed(destination);
-        if (create_parents) await fs.mkdir(path.dirname(dst), { recursive: true });
-
-        try {
-          await fs.lstat(dst);
-          if (!overwrite) throw new Error(`Destination exists: ${dst}`);
-          await fs.rm(dst, { recursive: true, force: true });
-        } catch (error) {
-          const code = error && typeof error === 'object' && 'code' in error ? String(error.code) : '';
-          if (code !== 'ENOENT' && !(error instanceof Error && error.message.startsWith('Destination exists:'))) throw error;
-          if (error instanceof Error && error.message.startsWith('Destination exists:')) throw error;
-        }
-
-        await moveWithFallback(src, dst);
-        return textResult({ source: src, destination: dst, moved: true });
+        const result = await safeMove(src, dst, overwrite, create_parents);
+        return textResult({ source: src, destination: dst, ...result });
       } catch (error) {
         return errorResult(error);
       }

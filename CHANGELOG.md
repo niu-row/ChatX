@@ -2,6 +2,21 @@
 
 All notable changes to ChatX are documented in this file.
 
+## Unreleased
+
+- Validate restricted Git working-tree and metadata boundaries; reject path traversal/magic, disable external helpers, and isolate Git environment overrides.
+- Stage file moves with destination backup and rollback; reject self/ancestor moves and preserve data on copy/commit failures.
+- Default new settings to read-only permissions, preserve explicit legacy grants, and disable operations when configuration is invalid.
+- Commit validated settings to disk before switching live permissions and notifying clients.
+- Add execution IDs and bounded output caching; continuation reads never re-run commands.
+- Add security regression tests to the standard test suite.
+
+- Clean up installed Node and tunnel-client processes before installation and uninstallation, matching full executable paths and waiting for file locks to clear.
+- Add a desktop diagnostics action to clean up residual runtime processes and restart the backend.
+- Retry failed installed-backend startup once after cleanup and serialize startup/recovery requests.
+- Use asynchronous HTTP health checks in desktop async commands.
+- Add Windows runtime cleanup regression coverage (`npm run test:installer`).
+
 ## 0.2.0 - 2026-09-06
 
 ### Added

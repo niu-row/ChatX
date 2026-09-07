@@ -5,14 +5,10 @@ import type { IncomingMessage, ServerResponse } from 'node:http';
 import { config } from './config.js';
 import {
   SETTINGS_VERSION,
-  applyPermissionPreset,
   getRuntimeSettings,
   saveTunnelId,
   settingsFilePath,
-  updateAllowedRoots,
-  updatePermissions,
-  type PermissionPreset,
-  type PermissionSettings,
+  updateRuntimeSettings,
 } from './settings.js';
 import { clearRuntimeKey, credentialStoreInfo, loadRuntimeKey, saveRuntimeKey } from './security/credential-store.js';
 import { SERVER_NAME, SERVER_VERSION } from './server.js';
@@ -355,8 +351,8 @@ export class TunnelDashboard {
     this.operation = 'connecting';
     this.lastError = null;
     this.lastTunnelId = tunnelId;
-    saveTunnelId(tunnelId);
     try {
+      saveTunnelId(tunnelId);
       const local = await this.probeLocalMcp();
       if (!local.ok) throw new Error(local.message);
       this.addLog('health', `本地 MCP 已就绪：${local.message}`);
@@ -405,33 +401,7 @@ export class TunnelDashboard {
   private async updateSettings(req: IncomingMessage, res: ServerResponse): Promise<void> {
     const body = await readJson(req);
     const before = getRuntimeSettings();
-    const preset = body.preset;
-    if (preset === 'safe' || preset === 'developer' || preset === 'unrestricted') {
-      applyPermissionPreset(preset as Exclude<PermissionPreset, 'custom'>);
-    }
-
-    const allowed: Array<keyof PermissionSettings> = [
-      'filesystemRead',
-      'filesystemWrite',
-      'gitRead',
-      'gitWrite',
-      'gitAdvanced',
-      'shell',
-      'fullAccess',
-    ];
-    const patch: Partial<PermissionSettings> = {};
-    for (const key of allowed) {
-      if (typeof body[key] === 'boolean') patch[key] = body[key] as boolean;
-    }
-    if (Object.keys(patch).length > 0) updatePermissions(patch);
-
-    if (Array.isArray(body.roots)) {
-      const roots = body.roots.filter((value): value is string => typeof value === 'string' && value.trim().length > 0);
-      if (roots.length === 0) throw new Error('至少需要一个允许目录。');
-      updateAllowedRoots(roots);
-    }
-
-    const after = getRuntimeSettings();
+    const after = updateRuntimeSettings(body);
     if (before.permissions.shell && !after.permissions.shell) {
       const terminated = await terminateAllManagedProcesses();
       this.addLog('console', `Shell 已关闭；已请求终止 ${terminated} 个由 ChatX 管理的后台进程。`);

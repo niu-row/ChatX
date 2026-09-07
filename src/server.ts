@@ -127,7 +127,7 @@ export function buildServer(): McpServer {
     'fs_write', 'fs_append', 'fs_edit', 'fs_mkdir', 'fs_delete', 'fs_move', 'fs_copy',
   ]);
   const shellTools = new Set([
-    'run_command', 'run_process', 'process_output', 'process_list', 'process_stdin', 'process_terminate',
+    'run_command', 'run_process', 'execution_output', 'process_output', 'process_list', 'process_stdin', 'process_terminate',
   ]);
   const gitReadTools = new Set(['git_status', 'git_diff', 'git_diff_summary', 'git_log', 'git_inspect']);
   const gitWriteTools = new Set(['git_stage', 'git_unstage', 'git_create_branch', 'git_commit']);
