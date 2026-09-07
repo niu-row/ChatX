@@ -118,8 +118,7 @@ fn runtime_paths(app: &tauri::AppHandle) -> Result<RuntimePaths, String> {
         let tunnel = root.join("tunnel-client.exe");
         let node = root.join("node.exe");
         let launcher = root.join("desktop-commander-launcher.mjs");
-        let desktop_commander = root.join("desktop-commander").join("node_modules")
-            .join("@wonderwhy-er").join("desktop-commander").join("dist").join("index.js");
+        let desktop_commander = root.join("desktop-commander").join("dist").join("index.js");
         if tunnel.is_file() && node.is_file() && launcher.is_file() && desktop_commander.is_file() {
             return Ok(RuntimePaths { root, tunnel, node, launcher, desktop_commander });
         }

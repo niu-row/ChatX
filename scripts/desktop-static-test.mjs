@@ -26,6 +26,7 @@ requireText('main.rs', main, 'connection');
 requireText('main.rs', main, 'tunnelId');
 requireText('main.rs', main, 'desktop-commander-home');
 requireText('main.rs', main, 'desktop-commander-launcher.mjs');
+requireText('main.rs', main, 'root.join("desktop-commander").join("dist").join("index.js")');
 requireText('main.rs', main, 'env:CHATX_TUNNEL_RUNTIME_KEY');
 requireText('main.rs', main, 'ProtectedData');
 requireText('main.rs', main, 'fn runtime_not_running');
@@ -35,6 +36,7 @@ requireText('main.rs', main, 'let runtime_manifest = manifest(&paths);');
 requireText('main.rs', main, '"tunnelVersion":tunnel_version');
 requireText('main.rs', main, 'stop_runtime(&app, None)?;');
 rejectText('main.rs', main, 'let _ = stop_runtime(&app, None);');
+rejectText('main.rs', main, 'join("@wonderwhy-er").join("desktop-commander")');
 rejectText('main.rs', main, '"tunnelVersion":executable_version(&paths.tunnel)');
 rejectText('main.rs', main, '127.0.0.1:3210');
 rejectText('main.rs', main, 'backend_request');
@@ -55,6 +57,8 @@ requireText('prepare-desktop-bundle.mjs', prepare, 'DESKTOP_COMMANDER_MCPB_PATH'
 requireText('prepare-desktop-bundle.mjs', prepare, 'Desktop Commander MCPB SHA-256');
 requireText('prepare-desktop-bundle.mjs', prepare, 'releaseUrl');
 requireText('prepare-desktop-bundle.mjs', prepare, 'Expand-Archive');
+requireText('prepare-desktop-bundle.mjs', prepare, "const dcRoot = path.join(resourceDir, 'desktop-commander');");
+requireText('prepare-desktop-bundle.mjs', prepare, "entry: 'desktop-commander/dist/index.js'");
 requireText('prepare-desktop-bundle.mjs', prepare, 'locked-github-release');
 requireText('prepare-desktop-bundle.mjs', prepare, 'github-release-mcpb');
 requireText('prepare-desktop-bundle.mjs', prepare, 'runtimeKeyStrippedByLauncher');
@@ -62,6 +66,7 @@ requireText('prepare-desktop-bundle.mjs', prepare, 'createRequire');
 requireText('prepare-desktop-bundle.mjs', prepare, 'rgPath');
 requireText('prepare-desktop-bundle.mjs', prepare, 'ripgrepRelative');
 requireText('prepare-desktop-bundle.mjs', prepare, 'DesktopCommander-LICENSE.txt');
+rejectText('prepare-desktop-bundle.mjs', prepare, "node_modules', '@wonderwhy-er', 'desktop-commander'");
 rejectText('prepare-desktop-bundle.mjs', prepare, 'npm_execpath');
 rejectText('prepare-desktop-bundle.mjs', prepare, 'runNpm');
 rejectText('prepare-desktop-bundle.mjs', prepare, 'Desktop Commander install');
@@ -69,8 +74,11 @@ rejectText('prepare-desktop-bundle.mjs', prepare, 'Desktop Commander ripgrep reb
 
 requireText('installer-runtime-test.mjs', installerRuntime, "manifest.schemaVersion !== 3");
 requireText('installer-runtime-test.mjs', installerRuntime, "manifest.runtimePolicy !== 'locked-github-release'");
+requireText('installer-runtime-test.mjs', installerRuntime, "const dcRoot = path.join(resourceDir, 'desktop-commander');");
+requireText('installer-runtime-test.mjs', installerRuntime, "manifest.desktopCommander?.entry !== 'desktop-commander/dist/index.js'");
 requireText('installer-runtime-test.mjs', installerRuntime, 'releaseSha256 !== locked.desktopCommander.sha256');
 requireText('installer-runtime-test.mjs', installerRuntime, 'runtimeKeyStrippedByLauncher');
+rejectText('installer-runtime-test.mjs', installerRuntime, "node_modules', '@wonderwhy-er', 'desktop-commander'");
 
 requireText('build-installer.mjs', installer, "const publish = args.has('--publish');");
 requireText('build-installer.mjs', installer, 'const requireSigning = publish ||');
@@ -86,11 +94,13 @@ requireText('desktop-commander-launcher.mjs', launcher, 'USERPROFILE');
 requireText('desktop-commander-launcher.mjs', launcher, 'HOME');
 
 requireText('bridge-smoke-test.mjs', bridge, "from '@modelcontextprotocol/client/stdio'");
+requireText('bridge-smoke-test.mjs', bridge, "path.join(resourceDir, 'desktop-commander', 'dist', 'index.js')");
 requireText('bridge-smoke-test.mjs', bridge, "call('start_search'");
 requireText('bridge-smoke-test.mjs', bridge, "call('start_process'");
 requireText('bridge-smoke-test.mjs', bridge, "transportEnv.CHATX_TUNNEL_RUNTIME_KEY = 'chatx-secret-smoke'");
 requireText('bridge-smoke-test.mjs', bridge, 'CHATX_KEY_STRIPPED');
 requireText('bridge-smoke-test.mjs', bridge, 'chatx-ripgrep-smoke');
+rejectText('bridge-smoke-test.mjs', bridge, "node_modules', '@wonderwhy-er', 'desktop-commander'");
 
 requireText('tauri.conf.json', tauri, 'resources/desktop-commander');
 requireText('tauri.conf.json', tauri, 'desktop-commander-launcher.mjs');

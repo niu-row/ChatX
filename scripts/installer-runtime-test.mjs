@@ -21,7 +21,7 @@ function sha256(file) {
   return crypto.createHash('sha256').update(fs.readFileSync(file)).digest('hex');
 }
 
-const dcRoot = path.join(resourceDir, 'desktop-commander', 'node_modules', '@wonderwhy-er', 'desktop-commander');
+const dcRoot = path.join(resourceDir, 'desktop-commander');
 const dcPackage = path.join(dcRoot, 'package.json');
 const dcBundleManifest = path.join(dcRoot, 'manifest.json');
 const dcEntry = path.join(dcRoot, 'dist', 'index.js');
@@ -48,7 +48,7 @@ if (manifest.desktopCommander?.releaseAsset !== locked.desktopCommander.releaseA
 if (manifest.desktopCommander?.releaseSize !== locked.desktopCommander.size) throw new Error('runtime manifest Desktop Commander release size mismatch.');
 if (manifest.desktopCommander?.releaseSha256 !== locked.desktopCommander.sha256) throw new Error('runtime manifest Desktop Commander release SHA-256 mismatch.');
 if (manifest.desktopCommander?.bundleManifestSha256 !== sha256(dcBundleManifest)) throw new Error('runtime manifest Desktop Commander bundle manifest SHA-256 mismatch.');
-if (!manifest.desktopCommander?.entry?.endsWith('/dist/index.js')) throw new Error('runtime manifest Desktop Commander entry is invalid.');
+if (manifest.desktopCommander?.entry !== 'desktop-commander/dist/index.js') throw new Error('runtime manifest Desktop Commander entry is invalid.');
 if (manifest.desktopCommander?.launcher !== 'desktop-commander-launcher.mjs') throw new Error('runtime manifest launcher is invalid.');
 if (manifest.desktopCommander?.telemetryDisabledByEnv !== true) throw new Error('Desktop Commander telemetry kill-switch must be enabled by the ChatX launcher.');
 if (manifest.desktopCommander?.runtimeKeyStrippedByLauncher !== true) throw new Error('Desktop Commander launcher must strip the Tunnel Runtime Key.');

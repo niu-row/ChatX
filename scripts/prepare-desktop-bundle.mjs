@@ -43,8 +43,8 @@ function run(label, command, args, options = {}) {
   return result;
 }
 
-async function resolveRipgrepBinary(dcPackageRoot) {
-  const requireFromDc = createRequire(path.join(dcPackageRoot, 'package.json'));
+async function resolveRipgrepBinary(dcRoot) {
+  const requireFromDc = createRequire(path.join(dcRoot, 'package.json'));
   const entry = requireFromDc.resolve('@vscode/ripgrep');
   const module = await import(pathToFileURL(entry).href);
   const rgPath = module.rgPath ?? module.default?.rgPath;
@@ -163,23 +163,22 @@ for (const name of ['LICENSE', 'NOTICE']) {
 }
 
 const dcRoot = path.join(resourceDir, 'desktop-commander');
-const dcPackageRoot = path.join(dcRoot, 'node_modules', '@wonderwhy-er', 'desktop-commander');
-fs.mkdirSync(dcPackageRoot, { recursive: true });
+fs.mkdirSync(dcRoot, { recursive: true });
 const dcArchive = await acquireDesktopCommanderArchive();
 try {
   run(
     'Desktop Commander MCPB extract',
     'powershell.exe',
     ['-NoLogo', '-NoProfile', '-NonInteractive', '-Command', 'Expand-Archive -LiteralPath $env:CHATX_MCPB_ARCHIVE -DestinationPath $env:CHATX_MCPB_DEST -Force'],
-    { env: { CHATX_MCPB_ARCHIVE: dcArchive, CHATX_MCPB_DEST: dcPackageRoot } },
+    { env: { CHATX_MCPB_ARCHIVE: dcArchive, CHATX_MCPB_DEST: dcRoot } },
   );
 } finally {
   fs.rmSync(dcArchive, { force: true });
 }
 
-const dcManifestPath = path.join(dcPackageRoot, 'manifest.json');
-const dcPackagePath = path.join(dcPackageRoot, 'package.json');
-const dcEntry = path.join(dcPackageRoot, 'dist', 'index.js');
+const dcManifestPath = path.join(dcRoot, 'manifest.json');
+const dcPackagePath = path.join(dcRoot, 'package.json');
+const dcEntry = path.join(dcRoot, 'dist', 'index.js');
 for (const file of [dcManifestPath, dcPackagePath, dcEntry]) {
   if (!fs.existsSync(file)) throw new Error(`Desktop Commander release bundle is incomplete: ${file}`);
 }
@@ -189,13 +188,13 @@ const dcPackage = JSON.parse(fs.readFileSync(dcPackagePath, 'utf8'));
 requireLocked('Desktop Commander MCPB manifest version', dcManifest.version, runtimeLock.desktopCommander.version);
 requireLocked('Desktop Commander package version', dcPackage.version, runtimeLock.desktopCommander.version);
 
-const ripgrep = await resolveRipgrepBinary(dcPackageRoot);
+const ripgrep = await resolveRipgrepBinary(dcRoot);
 const ripgrepRelative = path.relative(resourceDir, ripgrep).split(path.sep).join('/');
 if (!ripgrepRelative || ripgrepRelative === '..' || ripgrepRelative.startsWith('../')) {
   throw new Error(`Resolved ripgrep binary is outside the bundled resource directory: ${ripgrep}`);
 }
 
-const dcLicense = path.join(dcPackageRoot, 'LICENSE');
+const dcLicense = path.join(dcRoot, 'LICENSE');
 if (!fs.existsSync(dcLicense)) throw new Error('Desktop Commander LICENSE was not included in the locked MCPB release asset.');
 fs.copyFileSync(dcLicense, path.join(resourceDir, 'DesktopCommander-LICENSE.txt'));
 
@@ -219,7 +218,7 @@ const manifest = {
     releaseSize: runtimeLock.desktopCommander.size,
     releaseSha256: runtimeLock.desktopCommander.sha256,
     bundleManifestSha256: sha256(dcManifestPath),
-    entry: 'desktop-commander/node_modules/@wonderwhy-er/desktop-commander/dist/index.js',
+    entry: 'desktop-commander/dist/index.js',
     launcher: 'desktop-commander-launcher.mjs',
     telemetryDisabledByEnv: true,
     runtimeKeyStrippedByLauncher: true,
