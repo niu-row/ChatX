@@ -1,5 +1,5 @@
 {
-  "schemaVersion": 2,
+  "schemaVersion": 3,
   "platform": "win32-x64",
   "node": {
     "version": "v24.16.0",
@@ -12,6 +12,12 @@
     "noticeSha256": "1364c020d86ecf948b78b7c655175032068203d13aece70fb0bfe112d7802dc2"
   },
   "desktopCommander": {
-    "version": "0.2.48"
+    "version": "0.2.48",
+    "sourceCommit": "ea8e9a47440ccffefede7060e0ddb490540f414d",
+    "releaseTag": "v0.2.48",
+    "releaseAsset": "desktop-commander-0.2.48.mcpb",
+    "releaseUrl": "https://github.com/wonderwhy-er/DesktopCommanderMCP/releases/download/v0.2.48/desktop-commander-0.2.48.mcpb",
+    "size": 53423074,
+    "sha256": "f261fc8e93f5b43ad077a73211acc97108072e892092f88f49fb4acf2e97ead7"
   }
 }

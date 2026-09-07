@@ -28,21 +28,23 @@ Windows 安装包固定打包：
 
 - OpenAI `tunnel-client`
 - Node.js
-- `@wonderwhy-er/desktop-commander` 0.2.48
-- Desktop Commander 所需的 Windows `ripgrep`
+- Desktop Commander 0.2.48 的官方 GitHub Release MCPB
+- MCPB 内随包提供的 Windows `ripgrep`
 
 Desktop Commander 通过 stdio 启动，不要求最终用户安装 Node、npm、ripgrep 或 Desktop Commander。
 
 构建时 `scripts/prepare-desktop-bundle.mjs` 会：
 
 1. 校验 `runtime-lock.json` 中锁定的 Node 与 tunnel-client 版本/SHA-256。
-2. 安装固定版本 Desktop Commander 到 `src-tauri/resources/desktop-commander`。
-3. 保持普通 npm lifecycle scripts 关闭，然后单独执行 `npm rebuild @vscode/ripgrep`，保证 `start_search` 可用。
-4. 验证并记录 bundled `rg.exe` 的 SHA-256。
-5. 保留 OpenAI tunnel-client LICENSE/NOTICE 和 Desktop Commander MIT LICENSE。
-6. 生成 `runtime-manifest.json`。
+2. 校验 Desktop Commander 0.2.48 GitHub Release 的 tag、asset 名称、URL、文件大小和 SHA-256。
+3. 优先使用 `DESKTOP_COMMANDER_MCPB_PATH` 指定的本地 MCPB；未指定时从锁定的上游 GitHub Release URL 下载。
+4. 在解包前校验整个 MCPB 的 SHA-256，再验证包内 `manifest.json`、`package.json` 和 `dist/index.js`。
+5. 使用 MCPB 内已经固定的生产 `node_modules`，不在 ChatX 构建阶段重新解析 Desktop Commander 的 npm 传递依赖。
+6. 解析 MCPB 内的 `@vscode/ripgrep`，验证 Windows binary 存在并记录 SHA-256。
+7. 保留 OpenAI tunnel-client LICENSE/NOTICE 和 Desktop Commander MIT LICENSE。
+8. 生成 `runtime-manifest.json`，记录 GitHub Release provenance、bundle manifest hash 和 ripgrep hash。
 
-Desktop Commander 顶层版本固定为 0.2.48；构建生成的独立 `package-lock.json` 哈希会记录在 manifest 中，用于确认某个安装包实际包含的依赖树。
+因此 Desktop Commander 的运行依赖树由锁定的 GitHub Release MCPB 二进制整体确定，而不是由每次构建时的 `npm install` 结果决定。
 
 ## 使用
 
@@ -107,8 +109,9 @@ connection.tunnelId
 - Node 版本必须匹配 `runtime-lock.json`
 - 已安装/可定位锁定版本的 OpenAI tunnel-client
 - Rust/Tauri 构建环境
+- 可访问锁定的 Desktop Commander GitHub Release，或准备好对应 MCPB 本地文件
 
-安装依赖：
+安装 ChatX 开发依赖：
 
 ```powershell
 npm ci
@@ -126,7 +129,14 @@ npm test
 npm run desktop:verify
 ```
 
-`desktop:verify` 会检查安装资源，并实际启动 bundled Desktop Commander，执行 MCP `initialize/tools/list`、Runtime Key 子进程隔离检查，以及文件写入、读取和 ripgrep 搜索 smoke test。它完全在本机运行，不依赖 GitHub Actions。
+`desktop:verify` 会先验证/解包锁定的 Desktop Commander MCPB，然后实际启动 bundled Desktop Commander，执行 MCP `initialize/tools/list`、Runtime Key 子进程隔离检查，以及文件写入、读取和 ripgrep 搜索 smoke test。它完全在本机运行，不依赖 GitHub Actions。
+
+如果已经下载官方 MCPB，或构建环境不应重复访问网络，可以指定本地文件；文件仍必须与 `runtime-lock.json` 中的大小和 SHA-256 完全匹配：
+
+```powershell
+$env:DESKTOP_COMMANDER_MCPB_PATH = "C:\path\to\desktop-commander-0.2.48.mcpb"
+npm run desktop:verify
+```
 
 准备运行资源并启动开发版：
 
@@ -192,6 +202,8 @@ Runtime API Key 只通过环境变量引用传给 tunnel-client：
 ```
 
 如果选择记住密钥，ChatX 在 Windows 上通过 DPAPI CurrentUser 加密保存；Tunnel ID 可以保存在普通 JSON 设置中。Desktop Commander launcher 会删除继承到 MCP 进程的 `CHATX_TUNNEL_RUNTIME_KEY`，避免其继续传播到工具启动的子进程。
+
+Desktop Commander 的构建输入使用 `runtime-lock.json` 中锁定的 GitHub Release MCPB。ChatX 在解包前验证整个 release asset 的大小和 SHA-256，因此包内 `dist`、生产依赖和 ripgrep 都由同一个已锁定 artifact 决定。
 
 关闭主窗口只会把 ChatX 隐藏到托盘。选择“退出 ChatX”或“停止连接”会停止 `chatx-local` Tunnel runtime。
 

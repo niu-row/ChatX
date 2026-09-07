@@ -5,6 +5,7 @@ const html = fs.readFileSync('desktop/index.html', 'utf8');
 const app = fs.readFileSync('desktop/app.js', 'utf8');
 const prepare = fs.readFileSync('scripts/prepare-desktop-bundle.mjs', 'utf8');
 const installer = fs.readFileSync('scripts/build-installer.mjs', 'utf8');
+const installerRuntime = fs.readFileSync('scripts/installer-runtime-test.mjs', 'utf8');
 const launcher = fs.readFileSync('scripts/desktop-commander-launcher.mjs', 'utf8');
 const bridge = fs.readFileSync('scripts/bridge-smoke-test.mjs', 'utf8');
 const tauri = fs.readFileSync('src-tauri/tauri.conf.json', 'utf8');
@@ -49,24 +50,32 @@ requireText('desktop/app.js', app, "['error', 'unavailable'].includes");
 rejectText('desktop/app.js', app, '/api/tunnel/status');
 rejectText('desktop/app.js', app, 'permissionPreset');
 
-requireText('prepare-desktop-bundle.mjs', prepare, '@wonderwhy-er/desktop-commander@');
-requireText('prepare-desktop-bundle.mjs', prepare, '--ignore-scripts');
-requireText('prepare-desktop-bundle.mjs', prepare, 'Desktop Commander ripgrep rebuild');
-requireText('prepare-desktop-bundle.mjs', prepare, "'@vscode/ripgrep'");
+requireText('prepare-desktop-bundle.mjs', prepare, 'runtimeLock.schemaVersion !== 3');
+requireText('prepare-desktop-bundle.mjs', prepare, 'DESKTOP_COMMANDER_MCPB_PATH');
+requireText('prepare-desktop-bundle.mjs', prepare, 'Desktop Commander MCPB SHA-256');
+requireText('prepare-desktop-bundle.mjs', prepare, 'releaseUrl');
+requireText('prepare-desktop-bundle.mjs', prepare, 'Expand-Archive');
+requireText('prepare-desktop-bundle.mjs', prepare, 'locked-github-release');
+requireText('prepare-desktop-bundle.mjs', prepare, 'github-release-mcpb');
+requireText('prepare-desktop-bundle.mjs', prepare, 'runtimeKeyStrippedByLauncher');
 requireText('prepare-desktop-bundle.mjs', prepare, 'createRequire');
 requireText('prepare-desktop-bundle.mjs', prepare, 'rgPath');
 requireText('prepare-desktop-bundle.mjs', prepare, 'ripgrepRelative');
-requireText('prepare-desktop-bundle.mjs', prepare, 'desktop-commander-launcher.mjs');
 requireText('prepare-desktop-bundle.mjs', prepare, 'DesktopCommander-LICENSE.txt');
-requireText('prepare-desktop-bundle.mjs', prepare, 'npm_execpath');
-requireText('prepare-desktop-bundle.mjs', prepare, 'runNpm');
-rejectText('prepare-desktop-bundle.mjs', prepare, "run('Desktop Commander install', 'npm.cmd'");
-rejectText('prepare-desktop-bundle.mjs', prepare, "run('Desktop Commander ripgrep rebuild', 'npm.cmd'");
-rejectText('prepare-desktop-bundle.mjs', prepare, "desktop-commander/node_modules/@vscode/ripgrep/bin/rg.exe");
+rejectText('prepare-desktop-bundle.mjs', prepare, 'npm_execpath');
+rejectText('prepare-desktop-bundle.mjs', prepare, 'runNpm');
+rejectText('prepare-desktop-bundle.mjs', prepare, 'Desktop Commander install');
+rejectText('prepare-desktop-bundle.mjs', prepare, 'Desktop Commander ripgrep rebuild');
+
+requireText('installer-runtime-test.mjs', installerRuntime, "manifest.schemaVersion !== 3");
+requireText('installer-runtime-test.mjs', installerRuntime, "manifest.runtimePolicy !== 'locked-github-release'");
+requireText('installer-runtime-test.mjs', installerRuntime, 'releaseSha256 !== locked.desktopCommander.sha256');
+requireText('installer-runtime-test.mjs', installerRuntime, 'runtimeKeyStrippedByLauncher');
 
 requireText('build-installer.mjs', installer, "const publish = args.has('--publish');");
 requireText('build-installer.mjs', installer, 'const requireSigning = publish ||');
 requireText('build-installer.mjs', installer, 'Publishing a ChatX release requires CHATX_WINDOWS_CERT_THUMBPRINT');
+requireText('build-installer.mjs', installer, 'if (certificateThumbprint)');
 requireText('build-installer.mjs', installer, 'published signed installer');
 rejectText('build-installer.mjs', installer, 'published unsigned installer');
 rejectText('build-installer.mjs', installer, 'release is unsigned; this is intentional');
@@ -87,8 +96,14 @@ requireText('tauri.conf.json', tauri, 'resources/desktop-commander');
 requireText('tauri.conf.json', tauri, 'desktop-commander-launcher.mjs');
 rejectText('tauri.conf.json', tauri, 'chatgptx-backend.mjs');
 
-if (runtimeLock.schemaVersion !== 2) throw new Error('runtime-lock.json schemaVersion must be 2.');
+if (runtimeLock.schemaVersion !== 3) throw new Error('runtime-lock.json schemaVersion must be 3.');
 if (runtimeLock.desktopCommander?.version !== '0.2.48') throw new Error('Desktop Commander must be locked to 0.2.48.');
+if (runtimeLock.desktopCommander?.releaseTag !== 'v0.2.48') throw new Error('Desktop Commander release tag must be locked to v0.2.48.');
+if (runtimeLock.desktopCommander?.releaseAsset !== 'desktop-commander-0.2.48.mcpb') throw new Error('Desktop Commander MCPB release asset must be locked.');
+if (!/^https:\/\/github\.com\/wonderwhy-er\/DesktopCommanderMCP\/releases\/download\//.test(runtimeLock.desktopCommander?.releaseUrl ?? '')) {
+  throw new Error('Desktop Commander release URL must point to the upstream GitHub release.');
+}
+if (!/^[0-9a-f]{64}$/i.test(runtimeLock.desktopCommander?.sha256 ?? '')) throw new Error('Desktop Commander MCPB SHA-256 must be locked.');
 if (pkg.version !== '0.3.0') throw new Error('ChatX bridge release must be version 0.3.0.');
 if (!pkg.scripts?.['test:bridge']) throw new Error('package scripts must include the real Desktop Commander bridge smoke test.');
 

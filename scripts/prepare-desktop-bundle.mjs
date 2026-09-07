@@ -15,8 +15,8 @@ if (!fs.existsSync(lockPath)) throw new Error('runtime-lock.json is required for
 if (!fs.existsSync(launcherSource)) throw new Error('Desktop Commander launcher source is missing.');
 const runtimeLock = JSON.parse(fs.readFileSync(lockPath, 'utf8'));
 const platform = `${os.platform()}-${os.arch()}`;
-if (runtimeLock.schemaVersion !== 2 || runtimeLock.platform !== platform) {
-  throw new Error(`Runtime lock is for schema/platform ${runtimeLock.schemaVersion}/${runtimeLock.platform ?? 'unknown'}, current is 2/${platform}.`);
+if (runtimeLock.schemaVersion !== 3 || runtimeLock.platform !== platform) {
+  throw new Error(`Runtime lock is for schema/platform ${runtimeLock.schemaVersion}/${runtimeLock.platform ?? 'unknown'}, current is 3/${platform}.`);
 }
 
 function sha256(file) {
@@ -28,13 +28,14 @@ function requireLocked(label, actual, expected) {
 }
 
 function run(label, command, args, options = {}) {
+  const { env: extraEnv, ...spawnOptions } = options;
   const result = spawnSync(command, args, {
     cwd: root,
     encoding: 'utf8',
     windowsHide: true,
-    env: { ...process.env, npm_config_update_notifier: 'false' },
+    env: { ...process.env, ...(extraEnv ?? {}) },
     timeout: 180_000,
-    ...options,
+    ...spawnOptions,
   });
   if (result.error || result.status !== 0) {
     throw new Error(`${label} failed: ${result.error?.message ?? result.stderr ?? result.stdout}`);
@@ -42,35 +43,8 @@ function run(label, command, args, options = {}) {
   return result;
 }
 
-function resolveNpmCli() {
-  const candidates = [
-    process.env.npm_execpath?.trim(),
-    path.join(path.dirname(process.execPath), 'node_modules', 'npm', 'bin', 'npm-cli.js'),
-  ].filter(Boolean);
-
-  for (const candidate of candidates) {
-    if (candidate && fs.existsSync(candidate)) return path.resolve(candidate);
-  }
-
-  throw new Error(
-    'npm CLI entry was not found. Run this script through npm (npm run desktop:prepare) or use a Node installation that includes npm.',
-  );
-}
-
-const npmCli = resolveNpmCli();
-function runNpm(label, args, options = {}) {
-  // Do not spawn npm.cmd directly. Node 24 on Windows can return EINVAL for
-  // direct .cmd execution via spawnSync. Running npm-cli.js with the current
-  // node executable also avoids cmd.exe quoting issues for paths with spaces.
-  return run(label, process.execPath, [npmCli, ...args], options);
-}
-
-async function resolveRipgrepBinary(dcRoot) {
-  // @vscode/ripgrep changed packaging in 1.18: older releases downloaded to
-  // @vscode/ripgrep/bin/rg.exe, while newer releases expose a binary from a
-  // platform-specific optional package. Use the package's public rgPath export
-  // instead of assuming either internal layout.
-  const requireFromDc = createRequire(path.join(dcRoot, 'package.json'));
+async function resolveRipgrepBinary(dcPackageRoot) {
+  const requireFromDc = createRequire(path.join(dcPackageRoot, 'package.json'));
   const entry = requireFromDc.resolve('@vscode/ripgrep');
   const module = await import(pathToFileURL(entry).href);
   const rgPath = module.rgPath ?? module.default?.rgPath;
@@ -84,8 +58,53 @@ async function resolveRipgrepBinary(dcRoot) {
   return resolved;
 }
 
+function validateDesktopCommanderLock() {
+  const dc = runtimeLock.desktopCommander ?? {};
+  const expectedTag = `v${dc.version}`;
+  const expectedAsset = `desktop-commander-${dc.version}.mcpb`;
+  const expectedUrl = `https://github.com/wonderwhy-er/DesktopCommanderMCP/releases/download/${expectedTag}/${expectedAsset}`;
+  requireLocked('Desktop Commander release tag', dc.releaseTag, expectedTag);
+  requireLocked('Desktop Commander release asset', dc.releaseAsset, expectedAsset);
+  requireLocked('Desktop Commander release URL', dc.releaseUrl, expectedUrl);
+  if (!/^[0-9a-f]{40}$/i.test(dc.sourceCommit ?? '')) {
+    throw new Error('Desktop Commander sourceCommit must be a full Git commit SHA.');
+  }
+  if (!Number.isInteger(dc.size) || dc.size <= 0) {
+    throw new Error('Desktop Commander release asset size must be a positive integer.');
+  }
+  if (!/^[0-9a-f]{64}$/i.test(dc.sha256 ?? '')) {
+    throw new Error('Desktop Commander release asset SHA-256 must be pinned.');
+  }
+}
+
+async function acquireDesktopCommanderArchive() {
+  const dc = runtimeLock.desktopCommander;
+  const target = path.join(resourceDir, 'desktop-commander-release.zip');
+  const configured = process.env.DESKTOP_COMMANDER_MCPB_PATH?.trim();
+
+  if (configured) {
+    const source = path.resolve(configured);
+    if (!fs.existsSync(source)) {
+      throw new Error(`DESKTOP_COMMANDER_MCPB_PATH does not exist: ${source}`);
+    }
+    fs.copyFileSync(source, target);
+  } else {
+    const response = await fetch(dc.releaseUrl, { redirect: 'follow' });
+    if (!response.ok) {
+      throw new Error(`Desktop Commander release download failed: HTTP ${response.status} ${response.statusText}`);
+    }
+    const bytes = Buffer.from(await response.arrayBuffer());
+    fs.writeFileSync(target, bytes);
+  }
+
+  requireLocked('Desktop Commander MCPB size', fs.statSync(target).size, dc.size);
+  requireLocked('Desktop Commander MCPB SHA-256', sha256(target), dc.sha256);
+  return target;
+}
+
 requireLocked('Node version', process.version, runtimeLock.node.version);
 requireLocked('Node SHA-256', sha256(process.execPath), runtimeLock.node.sha256);
+validateDesktopCommanderLock();
 
 if (process.platform !== 'win32') {
   throw new Error('The current desktop packaging workflow is configured for Windows.');
@@ -144,53 +163,46 @@ for (const name of ['LICENSE', 'NOTICE']) {
 }
 
 const dcRoot = path.join(resourceDir, 'desktop-commander');
-fs.mkdirSync(dcRoot, { recursive: true });
-const packageSpec = `@wonderwhy-er/desktop-commander@${runtimeLock.desktopCommander.version}`;
-runNpm('Desktop Commander install', [
-  'install',
-  '--prefix', dcRoot,
-  '--omit=dev',
-  '--no-audit',
-  '--no-fund',
-  '--ignore-scripts',
-  '--save-exact',
-  packageSpec,
-]);
-
-// Desktop Commander 0.2.48 allows @vscode/ripgrep ^1.15.9. Rebuild supports
-// the legacy package that downloads rg in postinstall; newer 1.18+ packages
-// have no postinstall and resolve rg from a platform-specific optional package.
-runNpm('Desktop Commander ripgrep rebuild', [
-  'rebuild',
-  '--prefix', dcRoot,
-  '--no-audit',
-  '--no-fund',
-  '@vscode/ripgrep',
-]);
-
 const dcPackageRoot = path.join(dcRoot, 'node_modules', '@wonderwhy-er', 'desktop-commander');
+fs.mkdirSync(dcPackageRoot, { recursive: true });
+const dcArchive = await acquireDesktopCommanderArchive();
+try {
+  run(
+    'Desktop Commander MCPB extract',
+    'powershell.exe',
+    ['-NoLogo', '-NoProfile', '-NonInteractive', '-Command', 'Expand-Archive -LiteralPath $env:CHATX_MCPB_ARCHIVE -DestinationPath $env:CHATX_MCPB_DEST -Force'],
+    { env: { CHATX_MCPB_ARCHIVE: dcArchive, CHATX_MCPB_DEST: dcPackageRoot } },
+  );
+} finally {
+  fs.rmSync(dcArchive, { force: true });
+}
+
+const dcManifestPath = path.join(dcPackageRoot, 'manifest.json');
 const dcPackagePath = path.join(dcPackageRoot, 'package.json');
 const dcEntry = path.join(dcPackageRoot, 'dist', 'index.js');
-if (!fs.existsSync(dcPackagePath) || !fs.existsSync(dcEntry)) {
-  throw new Error('Desktop Commander package is incomplete after npm install.');
+for (const file of [dcManifestPath, dcPackagePath, dcEntry]) {
+  if (!fs.existsSync(file)) throw new Error(`Desktop Commander release bundle is incomplete: ${file}`);
 }
-const ripgrep = await resolveRipgrepBinary(dcRoot);
+
+const dcManifest = JSON.parse(fs.readFileSync(dcManifestPath, 'utf8'));
+const dcPackage = JSON.parse(fs.readFileSync(dcPackagePath, 'utf8'));
+requireLocked('Desktop Commander MCPB manifest version', dcManifest.version, runtimeLock.desktopCommander.version);
+requireLocked('Desktop Commander package version', dcPackage.version, runtimeLock.desktopCommander.version);
+
+const ripgrep = await resolveRipgrepBinary(dcPackageRoot);
 const ripgrepRelative = path.relative(resourceDir, ripgrep).split(path.sep).join('/');
 if (!ripgrepRelative || ripgrepRelative === '..' || ripgrepRelative.startsWith('../')) {
   throw new Error(`Resolved ripgrep binary is outside the bundled resource directory: ${ripgrep}`);
 }
 
-const dcPackage = JSON.parse(fs.readFileSync(dcPackagePath, 'utf8'));
-requireLocked('Desktop Commander version', dcPackage.version, runtimeLock.desktopCommander.version);
 const dcLicense = path.join(dcPackageRoot, 'LICENSE');
-if (!fs.existsSync(dcLicense)) throw new Error('Desktop Commander LICENSE was not included by npm.');
+if (!fs.existsSync(dcLicense)) throw new Error('Desktop Commander LICENSE was not included in the locked MCPB release asset.');
 fs.copyFileSync(dcLicense, path.join(resourceDir, 'DesktopCommander-LICENSE.txt'));
 
-const dcInstallLock = path.join(dcRoot, 'package-lock.json');
 const manifest = {
-  schemaVersion: 2,
+  schemaVersion: 3,
   platform,
-  runtimePolicy: 'locked-top-level',
+  runtimePolicy: 'locked-github-release',
   node: { version: process.version, sha256: sha256(nodeTarget) },
   tunnelClient: {
     version: tunnelVersion,
@@ -200,12 +212,19 @@ const manifest = {
   },
   desktopCommander: {
     version: dcPackage.version,
+    source: 'github-release-mcpb',
+    sourceCommit: runtimeLock.desktopCommander.sourceCommit,
+    releaseTag: runtimeLock.desktopCommander.releaseTag,
+    releaseAsset: runtimeLock.desktopCommander.releaseAsset,
+    releaseSize: runtimeLock.desktopCommander.size,
+    releaseSha256: runtimeLock.desktopCommander.sha256,
+    bundleManifestSha256: sha256(dcManifestPath),
     entry: 'desktop-commander/node_modules/@wonderwhy-er/desktop-commander/dist/index.js',
     launcher: 'desktop-commander-launcher.mjs',
     telemetryDisabledByEnv: true,
+    runtimeKeyStrippedByLauncher: true,
     ripgrep: ripgrepRelative,
     ripgrepSha256: sha256(ripgrep),
-    installLockSha256: fs.existsSync(dcInstallLock) ? sha256(dcInstallLock) : null,
     license: 'DesktopCommander-LICENSE.txt',
   },
 };
@@ -215,5 +234,6 @@ console.log(`desktop resources prepared: ${resourceDir}`);
 console.log('  architecture: tunnel-client -> stdio -> Desktop Commander');
 console.log(`  node: ${process.version}`);
 console.log(`  tunnel-client: ${tunnelVersion}`);
-console.log(`  desktop-commander: ${dcPackage.version}`);
+console.log(`  desktop-commander: ${dcPackage.version} (${runtimeLock.desktopCommander.releaseAsset})`);
+console.log(`  desktop-commander release SHA-256: ${runtimeLock.desktopCommander.sha256}`);
 console.log(`  ripgrep: ${ripgrep}`);
