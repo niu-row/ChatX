@@ -36,13 +36,13 @@ ChatX
 
 ## Windows 用户：推荐直接安装
 
-普通 Windows 用户应使用经过 Authenticode 签名的正式安装包。正式发布后文件名为：
+普通 Windows 用户可以直接使用项目发布的安装包：
 
 ```text
 release\ChatX-Setup-0.2.1.exe
 ```
 
-`release` 目录只保留通过 `npm run desktop:release` 生成并验证签名的正式包；普通 `desktop:installer` 产生的未签名开发包不会复制到这里。
+当前发布流程允许未签名安装包。未签名不会影响 ChatX 功能，但 Windows 可能显示“未知发布者”或 SmartScreen 提示。`release` 目录只保留通过 `npm run desktop:release` 生成的当前版本安装包；普通 `desktop:installer` 产生的开发构建不会自动复制到这里。
 
 安装版已经包含运行桌面程序所需的本地组件。**普通用户不需要另外安装 Node.js 或 Rust。**
 
@@ -609,7 +609,7 @@ npm run desktop:build
 
 ### 构建 NSIS 安装包
 
-开发验证用未签名安装包：
+只构建、不复制到 `release`：
 
 ```bash
 npm run desktop:installer
@@ -617,21 +617,19 @@ npm run desktop:installer
 
 桌面打包会强制校验 `runtime-lock.json` 中锁定的 Node、tunnel-client 版本及 SHA-256，不允许悄悄替换运行时。
 
-正式发布必须使用 Authenticode 代码签名证书和时间戳服务：
+构建并发布当前版本安装包：
 
-```powershell
-$env:CHATX_WINDOWS_CERT_THUMBPRINT = '<证书指纹>'
-$env:CHATX_WINDOWS_TIMESTAMP_URL = '<RFC3161 时间戳 URL>'
+```bash
 npm run desktop:release
 ```
 
-`desktop:release` 会验证主程序和 NSIS 安装包的 Authenticode 状态，只有签名有效才复制到：
+没有代码签名证书也可以发布；脚本会明确提示安装包未签名，然后复制到：
 
 ```text
 release\ChatX-Setup-0.2.1.exe
 ```
 
-如果没有证书，正式发布命令会直接失败；不会生成未签名的正式包。
+未签名安装包功能不受影响，但 Windows 可能显示“未知发布者”或 SmartScreen 提示。以后如果配置 `CHATX_WINDOWS_CERT_THUMBPRINT` 和 `CHATX_WINDOWS_TIMESTAMP_URL`，同一发布命令会自动启用 Authenticode 签名并验证签名结果。
 
 ## MCP stdio / Inspector
 

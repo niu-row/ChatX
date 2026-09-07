@@ -8,7 +8,7 @@ All notable changes to ChatX are documented in this file.
 - Split destructive filesystem operations (`fs_delete`, `fs_move`) from ordinary file writes; the developer preset keeps destructive access disabled by default.
 - Treat Advanced Git as Shell-equivalent and require Shell permission for `git_run` at both visibility and handler layers.
 - Lock bundled Node and tunnel-client versions plus SHA-256 hashes in `runtime-lock.json` and verify them before every desktop package build.
-- Add mandatory Authenticode signing support for distributable releases; `desktop:release` refuses to publish without a configured code-signing certificate and timestamp service.
+- Keep Authenticode signing optional: `desktop:release` publishes unsigned installers with an explicit warning when no certificate is configured, and automatically signs/verifies when signing settings are provided.
 - Add version consistency checks across npm, Tauri, Cargo, and the MCP server.
 - Centralize permission labels/descriptions in the backend so desktop and browser consoles no longer maintain separate permission tables.
 

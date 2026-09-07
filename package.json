@@ -17,7 +17,7 @@
     "desktop:dev": "npm run build && tauri dev",
     "desktop:build": "npm run desktop:prepare && tauri build --no-bundle",
     "desktop:installer": "npm run desktop:prepare && node scripts/build-installer.mjs",
-    "desktop:release": "npm run desktop:prepare && node scripts/build-installer.mjs --require-signing --publish",
+    "desktop:release": "npm run desktop:prepare && node scripts/build-installer.mjs --publish",
     "start:stdio": "node dist/index.js --stdio",
     "check": "tsc -p tsconfig.json --noEmit",
     "test:settings": "npm run build && node scripts/settings-test.mjs",

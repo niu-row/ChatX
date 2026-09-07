@@ -88,8 +88,11 @@ assert.match(prepare, /tunnel-client\.exe/);
 assert.equal(pkg.scripts['desktop:dev'], 'npm run build && tauri dev');
 assert.equal(pkg.scripts['desktop:build'], 'npm run desktop:prepare && tauri build --no-bundle');
 assert.equal(pkg.scripts['desktop:installer'], 'npm run desktop:prepare && node scripts/build-installer.mjs');
+assert.equal(pkg.scripts['desktop:release'], 'npm run desktop:prepare && node scripts/build-installer.mjs --publish');
 assert.match(buildInstaller, /os error 32/i);
 assert.match(buildInstaller, /maxAttempts = 3/);
+assert.match(buildInstaller, /published.*unsigned/i);
+assert.doesNotMatch(pkg.scripts['desktop:release'], /require-signing/);
 
 execFileSync(process.execPath, ['--check', 'desktop/app.js'], { stdio: 'pipe' });
 execFileSync(process.execPath, ['--check', 'scripts/prepare-desktop-bundle.mjs'], { stdio: 'pipe' });

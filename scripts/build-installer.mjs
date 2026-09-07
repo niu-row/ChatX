@@ -96,11 +96,10 @@ try {
     const installerSigner = verifyAuthenticode(installer);
     console.log(`[chatx] Authenticode valid: app=${appSigner}, installer=${installerSigner}`);
   } else {
-    console.warn('[chatx] installer is unsigned. Use npm run desktop:release for distributable builds.');
+    console.warn('[chatx] installer is unsigned; Windows may show Unknown Publisher / SmartScreen warnings.');
   }
 
   if (publish) {
-    if (!certificateThumbprint) throw new Error('Publishing an installer requires Authenticode signing.');
     const releaseDir = path.resolve('release');
     fs.mkdirSync(releaseDir, { recursive: true });
     const destination = path.join(releaseDir, `ChatX-Setup-${pkg.version}.exe`);
@@ -108,7 +107,10 @@ try {
       if (/^ChatX-Setup-.*\.exe$/i.test(entry)) fs.rmSync(path.join(releaseDir, entry), { force: true });
     }
     fs.copyFileSync(installer, destination);
-    console.log(`[chatx] published signed installer: ${destination}`);
+    console.log(`[chatx] published ${certificateThumbprint ? 'signed' : 'unsigned'} installer: ${destination}`);
+    if (!certificateThumbprint) {
+      console.warn('[chatx] release is unsigned; this is intentional, but Windows may warn users before installation.');
+    }
   }
 } finally {
   fs.rmSync(signingConfig, { force: true });
