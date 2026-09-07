@@ -45,7 +45,8 @@ function setPage(page) {
 }
 
 function runtimeRunning(s) {
-  return ['running', 'healthy', 'connected'].includes(String(s?.runtimeState || '').toLowerCase());
+  if (s?.runtimeActive === true) return true;
+  return ['ready', 'running', 'healthy', 'connected', 'live'].includes(String(s?.runtimeState || '').toLowerCase());
 }
 
 function render(s) {
@@ -63,7 +64,7 @@ function render(s) {
   $('heroConnect').textContent = running ? '查看连接' : '配置连接';
   $('heroStop').disabled = busy || !running;
 
-  $('tunnelFact').textContent = running ? 'Running' : String(s.runtimeState || 'Stopped');
+  $('tunnelFact').textContent = running ? 'Ready' : String(s.runtimeState || 'Stopped');
   $('tunnelVersion').textContent = s.tunnelVersion || 'tunnel-client unavailable';
   $('dcFact').textContent = unavailable ? 'Unavailable' : 'Bundled';
   $('dcVersion').textContent = `v${s.desktopCommander?.version || 'unknown'}`;

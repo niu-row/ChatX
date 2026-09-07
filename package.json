@@ -1,6 +1,6 @@
 {
   "name": "chatx",
-  "version": "0.2.1",
+  "version": "0.3.0",
   "private": true,
   "description": "Windows desktop bridge connecting ChatGPT Secure MCP Tunnel to Desktop Commander",
   "type": "module",
@@ -13,8 +13,11 @@
     "desktop:build": "npm run desktop:prepare && tauri build --no-bundle",
     "desktop:installer": "npm run desktop:prepare && node scripts/build-installer.mjs",
     "desktop:release": "npm run desktop:prepare && node scripts/build-installer.mjs --publish",
+    "desktop:verify": "npm run desktop:prepare && npm run test:runtime",
     "test:desktop": "node scripts/desktop-static-test.mjs",
     "test:installer": "node scripts/installer-runtime-test.mjs",
+    "test:bridge": "node scripts/bridge-smoke-test.mjs",
+    "test:runtime": "npm run test:installer && npm run test:bridge",
     "test:version": "node scripts/version-consistency-test.mjs",
     "test": "node scripts/version-consistency-test.mjs && node scripts/desktop-static-test.mjs"
   },

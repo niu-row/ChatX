@@ -22,23 +22,27 @@ Desktop Commander
 
 ChatX 不再实现自己的 Filesystem、Git、Shell 或 MCP HTTP Server。文件读写、搜索、编辑和命令执行由 Desktop Commander 提供；ChatX 只负责桌面 UI、运行组件打包、Tunnel 配置、启动/停止、诊断和日志。
 
-## 运行组件
+## 0.3.0 运行组件
 
 Windows 安装包固定打包：
 
 - OpenAI `tunnel-client`
 - Node.js
 - `@wonderwhy-er/desktop-commander` 0.2.48
+- Desktop Commander 所需的 Windows `ripgrep`
 
-Desktop Commander 通过 stdio 启动，不要求最终用户安装 Node、npm 或 Desktop Commander。
+Desktop Commander 通过 stdio 启动，不要求最终用户安装 Node、npm、ripgrep 或 Desktop Commander。
 
 构建时 `scripts/prepare-desktop-bundle.mjs` 会：
 
 1. 校验 `runtime-lock.json` 中锁定的 Node 与 tunnel-client 版本/SHA-256。
 2. 安装固定版本 Desktop Commander 到 `src-tauri/resources/desktop-commander`。
-3. 禁用 Desktop Commander npm postinstall 脚本，避免构建阶段安装追踪；其当前 `@vscode/ripgrep` 依赖本身随平台包提供 binary。
-4. 保留 OpenAI tunnel-client LICENSE/NOTICE 和 Desktop Commander MIT LICENSE。
-5. 生成 `runtime-manifest.json`。
+3. 保持普通 npm lifecycle scripts 关闭，然后单独执行 `npm rebuild @vscode/ripgrep`，保证 `start_search` 可用。
+4. 验证并记录 bundled `rg.exe` 的 SHA-256。
+5. 保留 OpenAI tunnel-client LICENSE/NOTICE 和 Desktop Commander MIT LICENSE。
+6. 生成 `runtime-manifest.json`。
+
+Desktop Commander 顶层版本固定为 0.2.48；构建生成的独立 `package-lock.json` 哈希会记录在 manifest 中，用于确认某个安装包实际包含的依赖树。
 
 ## 使用
 
@@ -56,18 +60,42 @@ tunnel-client runtimes connect
   --alias chatx-local
   --tunnel-id <tunnel id>
   --runtime-api-key env:CHATX_TUNNEL_RUNTIME_KEY
-  --mcp-command "<bundled node> <bundled desktop commander> --no-onboarding"
+  --mcp-command "<bundled node> <ChatX launcher> <isolated home> <bundled Desktop Commander> --no-onboarding"
 ```
 
-Tunnel runtime 由 OpenAI tunnel-client 管理。ChatX 使用 `runtimes status` 获取状态，使用 `runtimes stop` 停止连接。
+Tunnel runtime 由 OpenAI tunnel-client 管理。ChatX 使用 `runtimes status` 获取结构化状态，并以 `ready` / `healthy` 等字段判断连接是否可用；使用 `runtimes stop` 停止连接。
 
-## Desktop Commander 权限模型
+## Desktop Commander 本地状态
 
-Desktop Commander 是高权限本地自动化工具。它可以读取和修改文件，并执行终端命令。
+ChatX bundled Desktop Commander 不使用用户独立安装 Desktop Commander 的配置目录。
 
-其 `allowedDirectories` 和 command blocklist 属于防误操作 guardrail，不是 OS sandbox。终端命令能够以当前 Windows 用户身份启动其他程序，因此如果需要强隔离，应使用 Docker、VM、dev container 或独立机器。
+ChatX launcher 会把它的 HOME/USERPROFILE 指向 ChatX 自己的数据目录：
 
-ChatX 不再额外制造一套与终端能力重叠的 Filesystem/Git/Shell 权限开关。
+```text
+<ChatX app local data>/state/desktop-commander-home
+```
+
+因此单独安装的 Desktop Commander 与 ChatX bundled instance 不会共用 `config.json`。
+
+ChatX 同时设置 Desktop Commander 官方支持的硬关闭开关：
+
+```text
+DESKTOP_COMMANDER_DISABLE_TELEMETRY=1
+```
+
+所以 ChatX bundled instance 不发送 Desktop Commander telemetry。
+
+Desktop Commander 仍然是高权限本地自动化工具。它可以读取和修改文件，并执行终端命令。其 `allowedDirectories` 和 command blocklist 属于防误操作 guardrail，不是 OS sandbox；终端命令能够以当前 Windows 用户身份启动其他程序。如需强隔离，应使用 VM、dev container 或独立机器。
+
+## 从 0.2.1 升级
+
+0.3.0 会读取旧版 `settings.json` 中的：
+
+```text
+connection.tunnelId
+```
+
+并迁移到新的精简设置格式。旧版 `runtime-key.dpapi` 使用的 DPAPI CurrentUser + Base64 格式保持兼容，因此已保存 Runtime Key 可以继续使用。
 
 ## 开发
 
@@ -83,6 +111,20 @@ ChatX 不再额外制造一套与终端能力重叠的 Filesystem/Git/Shell 权�
 ```powershell
 npm ci
 ```
+
+静态检查：
+
+```powershell
+npm test
+```
+
+准备 bundled runtime 并执行真实 Desktop Commander stdio MCP 验证：
+
+```powershell
+npm run desktop:verify
+```
+
+`desktop:verify` 会检查安装资源，并实际启动 bundled Desktop Commander，执行 MCP `initialize/tools/list` 以及文件写入、读取和 ripgrep 搜索 smoke test。它完全在本机运行，不依赖 GitHub Actions。
 
 准备运行资源并启动开发版：
 
@@ -108,18 +150,6 @@ npm run desktop:installer
 npm run desktop:release
 ```
 
-静态检查：
-
-```powershell
-npm test
-```
-
-准备完资源后可额外检查安装资源：
-
-```powershell
-npm run test:installer
-```
-
 ## 目录
 
 ```text
@@ -129,12 +159,14 @@ desktop/
   app.js
 
 src-tauri/
-  src/main.rs        # Tunnel/runtime lifecycle + Tauri commands
+  src/main.rs
   tauri.conf.json
   resources/         # build-time generated, not source of truth
 
 scripts/
   prepare-desktop-bundle.mjs
+  desktop-commander-launcher.mjs
+  bridge-smoke-test.mjs
   build-installer.mjs
   desktop-static-test.mjs
   installer-runtime-test.mjs

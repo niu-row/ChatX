@@ -16,10 +16,6 @@ $ErrorActionPreference = 'Stop'
 function Get-OwnedRuntimeProcesses {
     param([string[]] $ExecutablePaths)
 
-    # NSIS is a 32-bit process, so $SYSDIR\WindowsPowerShell may launch 32-bit
-    # PowerShell even on x64 Windows. System.Diagnostics.Process.Path is null for
-    # 64-bit targets in that environment. Win32_Process.ExecutablePath works
-    # cross-bitness, so use CIM for identity and Get-Process only for termination.
     $names = @($ExecutablePaths | ForEach-Object { [IO.Path]::GetFileName($_) } | Select-Object -Unique)
     $filter = ($names | ForEach-Object { "Name = '$($_.Replace("'", "''"))'" }) -join ' OR '
     $owned = @()
@@ -41,7 +37,6 @@ function Get-OwnedRuntimeProcesses {
             $process | Add-Member -NotePropertyName ChatXPath -NotePropertyValue $processPath -Force
             $owned += $process
         } catch {
-            # The process may have exited between the CIM query and Get-Process.
             continue
         }
     }
@@ -58,8 +53,9 @@ try {
     $filesToUnlock = @(
         [IO.Path]::Combine($directory, 'node.exe'),
         [IO.Path]::Combine($directory, 'tunnel-client.exe'),
-        [IO.Path]::Combine($directory, 'chatgptx-backend.mjs'),
-        [IO.Path]::Combine($directory, 'runtime-manifest.json')
+        [IO.Path]::Combine($directory, 'desktop-commander-launcher.mjs'),
+        [IO.Path]::Combine($directory, 'runtime-manifest.json'),
+        [IO.Path]::Combine($directory, 'DesktopCommander-LICENSE.txt')
     )
     if (-not $SkipDesktop) {
         $processTargets = @($desktopTarget) + $processTargets
@@ -70,8 +66,6 @@ try {
     $cleanPasses = 0
     $locked = @()
     do {
-        # Stop the desktop first so it cannot restart Node/tunnel-client while
-        # the installer is trying to replace their binaries.
         $running = @(Get-OwnedRuntimeProcesses -ExecutablePaths $processTargets | Sort-Object @{ Expression = {
             if ([string]::Equals($_.ChatXPath, $desktopTarget, [StringComparison]::OrdinalIgnoreCase)) { 0 } else { 1 }
         }})
@@ -89,9 +83,6 @@ try {
             }
         }
 
-        # Verify every runtime file that the installer replaces, not just the
-        # Node/tunnel executables. FileShare.None catches delayed image handles,
-        # antivirus scans, and other transient holders before NSIS starts copy.
         $locked = @()
         foreach ($target in $filesToUnlock) {
             if (Test-Path -LiteralPath $target) {

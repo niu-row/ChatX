@@ -41,6 +41,7 @@ struct RuntimePaths {
     root: PathBuf,
     tunnel: PathBuf,
     node: PathBuf,
+    launcher: PathBuf,
     desktop_commander: PathBuf,
 }
 
@@ -69,8 +70,27 @@ fn secret_path(app: &tauri::AppHandle) -> Result<PathBuf, String> { Ok(state_dir
 
 fn load_settings(app: &tauri::AppHandle) -> Settings {
     let Ok(path) = settings_path(app) else { return Settings::default(); };
-    let Ok(text) = fs::read_to_string(path) else { return Settings::default(); };
-    serde_json::from_str(&text).unwrap_or_default()
+    let Ok(text) = fs::read_to_string(&path) else { return Settings::default(); };
+
+    if let Ok(settings) = serde_json::from_str::<Settings>(&text) {
+        return settings;
+    }
+
+    // ChatX <= 0.2.1 stored the Tunnel ID under connection.tunnelId. Preserve
+    // that value when the desktop bridge first starts, then rewrite the small
+    // 0.3.x settings shape. The DPAPI file format itself is unchanged.
+    let Ok(legacy) = serde_json::from_str::<Value>(&text) else { return Settings::default(); };
+    let tunnel_id = legacy
+        .get("connection")
+        .and_then(|value| value.get("tunnelId"))
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    let Some(tunnel_id) = tunnel_id else { return Settings::default(); };
+    let remember_key = secret_path(app).map(|secret| secret.is_file()).unwrap_or(false);
+    let migrated = Settings { tunnel_id: tunnel_id.to_string(), remember_key };
+    let _ = save_settings(app, &migrated);
+    migrated
 }
 
 fn save_settings(app: &tauri::AppHandle, settings: &Settings) -> Result<(), String> {
@@ -97,10 +117,11 @@ fn runtime_paths(app: &tauri::AppHandle) -> Result<RuntimePaths, String> {
     for root in resource_candidates(app) {
         let tunnel = root.join("tunnel-client.exe");
         let node = root.join("node.exe");
+        let launcher = root.join("desktop-commander-launcher.mjs");
         let desktop_commander = root.join("desktop-commander").join("node_modules")
             .join("@wonderwhy-er").join("desktop-commander").join("dist").join("index.js");
-        if tunnel.is_file() && node.is_file() && desktop_commander.is_file() {
-            return Ok(RuntimePaths { root, tunnel, node, desktop_commander });
+        if tunnel.is_file() && node.is_file() && launcher.is_file() && desktop_commander.is_file() {
+            return Ok(RuntimePaths { root, tunnel, node, launcher, desktop_commander });
         }
     }
     Err("未找到完整运行组件。请重新安装 ChatX，或先运行 npm run desktop:prepare。".into())
@@ -174,8 +195,18 @@ fn quote_mcp_path(path: &Path) -> String {
     format!("\"{value}\"")
 }
 
-fn mcp_command(paths: &RuntimePaths) -> String {
-    format!("{} {} --no-onboarding", quote_mcp_path(&paths.node), quote_mcp_path(&paths.desktop_commander))
+fn desktop_commander_home(app: &tauri::AppHandle) -> Result<PathBuf, String> {
+    Ok(state_dir(app)?.join("desktop-commander-home"))
+}
+
+fn mcp_command(paths: &RuntimePaths, dc_home: &Path) -> String {
+    format!(
+        "{} {} {} {} --no-onboarding",
+        quote_mcp_path(&paths.node),
+        quote_mcp_path(&paths.launcher),
+        quote_mcp_path(dc_home),
+        quote_mcp_path(&paths.desktop_commander),
+    )
 }
 
 fn stop_runtime(app: &tauri::AppHandle, state: Option<&AppState>) -> Result<Value, String> {
@@ -193,16 +224,29 @@ fn stop_runtime(app: &tauri::AppHandle, state: Option<&AppState>) -> Result<Valu
     }
 }
 
-fn runtime_status(paths: &RuntimePaths) -> (String, Option<Value>, String) {
+fn runtime_payload_active(payload: &Value) -> bool {
+    if payload.get("ready").and_then(Value::as_bool) == Some(true)
+        || payload.get("healthy").and_then(Value::as_bool) == Some(true)
+    {
+        return true;
+    }
+    matches!(
+        payload.get("runtime_state").and_then(Value::as_str).unwrap_or("").to_ascii_lowercase().as_str(),
+        "ready" | "running" | "healthy" | "connected" | "live"
+    )
+}
+
+fn runtime_status(paths: &RuntimePaths) -> (String, bool, Option<Value>, String) {
     let args = vec!["runtimes".into(), "status".into(), RUNTIME_ALIAS.into(), "--json".into()];
     match run_tunnel(paths, &args, None) {
         Ok(output) if output.status.success() => {
             let parsed = parse_json_output(&output);
-            let state = parsed.as_ref().and_then(|v| v.get("runtime_state")).and_then(Value::as_str).unwrap_or("running").to_string();
-            (state, parsed, String::new())
+            let state = parsed.as_ref().and_then(|v| v.get("runtime_state")).and_then(Value::as_str).unwrap_or("unknown").to_string();
+            let active = parsed.as_ref().map(runtime_payload_active).unwrap_or(false);
+            (state, active, parsed, String::new())
         }
-        Ok(output) => ("stopped".into(), None, output_text(&output)),
-        Err(error) => ("error".into(), None, error),
+        Ok(output) => ("stopped".into(), false, None, output_text(&output)),
+        Err(error) => ("error".into(), false, None, error),
     }
 }
 
@@ -217,7 +261,8 @@ fn get_status(app: tauri::AppHandle, state: State<'_, AppState>) -> Result<Value
     let secret_saved = secret_path(&app)?.is_file();
     match runtime_paths(&app) {
         Ok(paths) => {
-            let (runtime_state, runtime, last_error) = runtime_status(&paths);
+            let dc_home = desktop_commander_home(&app)?;
+            let (runtime_state, runtime_active, runtime, last_error) = runtime_status(&paths);
             let logs = state.logs.lock().map(|v| v.clone()).unwrap_or_default();
             Ok(json!({
                 "service":{"name":"ChatX","version":APP_VERSION},
@@ -226,11 +271,12 @@ fn get_status(app: tauri::AppHandle, state: State<'_, AppState>) -> Result<Value
                 "rememberKey":settings.remember_key,
                 "runtimeKeySaved":secret_saved,
                 "runtimeState":runtime_state,
+                "runtimeActive":runtime_active,
                 "runtime":runtime,
                 "lastError":last_error,
                 "tunnelVersion":executable_version(&paths.tunnel),
                 "desktopCommander":manifest(&paths).get("desktopCommander").cloned().unwrap_or_else(|| json!({"version":"unknown"})),
-                "mcpCommand":mcp_command(&paths),
+                "mcpCommand":mcp_command(&paths, &dc_home),
                 "logs":logs
             }))
         }
@@ -241,6 +287,7 @@ fn get_status(app: tauri::AppHandle, state: State<'_, AppState>) -> Result<Value
             "rememberKey":settings.remember_key,
             "runtimeKeySaved":secret_saved,
             "runtimeState":"unavailable",
+            "runtimeActive":false,
             "lastError":error,
             "logs":state.logs.lock().map(|v| v.clone()).unwrap_or_default()
         }))
@@ -261,14 +308,16 @@ fn connect_tunnel(app: tauri::AppHandle, state: State<'_, AppState>, tunnel_id: 
     save_settings(&app, &Settings { tunnel_id: tunnel_id.clone(), remember_key })?;
     let paths = runtime_paths(&app)?;
     let profiles = state_dir(&app)?.join("tunnel-profiles");
+    let dc_home = desktop_commander_home(&app)?;
     fs::create_dir_all(&profiles).map_err(|e| format!("创建 Tunnel profile 目录失败：{e}"))?;
+    fs::create_dir_all(&dc_home).map_err(|e| format!("创建 Desktop Commander 数据目录失败：{e}"))?;
     let _ = stop_runtime(&app, None);
     let args = vec![
         "runtimes".into(), "connect".into(), "--alias".into(), RUNTIME_ALIAS.into(),
         "--tunnel-id".into(), tunnel_id,
         "--runtime-api-key".into(), "env:CHATX_TUNNEL_RUNTIME_KEY".into(),
         "--profile-dir".into(), profiles.to_string_lossy().into_owned(),
-        "--mcp-command".into(), mcp_command(&paths), "--json".into()
+        "--mcp-command".into(), mcp_command(&paths, &dc_home), "--json".into()
     ];
     push_log(&state, "正在启动 Secure MCP Tunnel → Desktop Commander");
     let output = run_tunnel(&paths, &args, Some(&key))?;
@@ -300,12 +349,14 @@ fn run_diagnostics(app: tauri::AppHandle) -> Result<Value, String> {
     let mut checks = Vec::new();
     match runtime_paths(&app) {
         Ok(paths) => {
+            let dc_home = desktop_commander_home(&app)?;
             checks.push(json!({"name":"tunnel-client","ok":true,"detail":executable_version(&paths.tunnel)}));
             checks.push(json!({"name":"Node.js","ok":paths.node.is_file(),"detail":paths.node.to_string_lossy()}));
             checks.push(json!({"name":"Desktop Commander","ok":paths.desktop_commander.is_file(),"detail":paths.desktop_commander.to_string_lossy()}));
-            checks.push(json!({"name":"MCP command","ok":true,"detail":mcp_command(&paths)}));
-            let (runtime_state, runtime, error) = runtime_status(&paths);
-            checks.push(json!({"name":"Tunnel runtime","ok":runtime_state=="running","detail":if error.is_empty(){runtime.map(|v|v.to_string()).unwrap_or(runtime_state)}else{error}}));
+            checks.push(json!({"name":"Desktop Commander isolation","ok":paths.launcher.is_file(),"detail":dc_home.to_string_lossy()}));
+            checks.push(json!({"name":"MCP command","ok":true,"detail":mcp_command(&paths, &dc_home)}));
+            let (runtime_state, runtime_active, runtime, error) = runtime_status(&paths);
+            checks.push(json!({"name":"Tunnel runtime","ok":runtime_active,"detail":if error.is_empty(){runtime.map(|v|v.to_string()).unwrap_or(runtime_state)}else{error}}));
         }
         Err(error) => checks.push(json!({"name":"Bundled runtime","ok":false,"detail":error}))
     }
