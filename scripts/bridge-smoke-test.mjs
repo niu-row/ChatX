@@ -2,7 +2,8 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { Client, StdioClientTransport } from '@modelcontextprotocol/client';
+import { Client } from '@modelcontextprotocol/client';
+import { StdioClientTransport } from '@modelcontextprotocol/client/stdio';
 
 const resourceDir = path.resolve('src-tauri', 'resources');
 const node = path.join(resourceDir, 'node.exe');

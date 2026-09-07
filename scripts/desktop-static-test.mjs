@@ -5,6 +5,7 @@ const html = fs.readFileSync('desktop/index.html', 'utf8');
 const app = fs.readFileSync('desktop/app.js', 'utf8');
 const prepare = fs.readFileSync('scripts/prepare-desktop-bundle.mjs', 'utf8');
 const launcher = fs.readFileSync('scripts/desktop-commander-launcher.mjs', 'utf8');
+const bridge = fs.readFileSync('scripts/bridge-smoke-test.mjs', 'utf8');
 const tauri = fs.readFileSync('src-tauri/tauri.conf.json', 'utf8');
 const runtimeLock = JSON.parse(fs.readFileSync('runtime-lock.json', 'utf8'));
 const pkg = JSON.parse(fs.readFileSync('package.json', 'utf8'));
@@ -49,6 +50,10 @@ requireText('prepare-desktop-bundle.mjs', prepare, 'DesktopCommander-LICENSE.txt
 requireText('desktop-commander-launcher.mjs', launcher, 'DESKTOP_COMMANDER_DISABLE_TELEMETRY');
 requireText('desktop-commander-launcher.mjs', launcher, 'USERPROFILE');
 requireText('desktop-commander-launcher.mjs', launcher, 'HOME');
+
+requireText('bridge-smoke-test.mjs', bridge, "from '@modelcontextprotocol/client/stdio'");
+requireText('bridge-smoke-test.mjs', bridge, "call('start_search'");
+requireText('bridge-smoke-test.mjs', bridge, 'chatx-ripgrep-smoke');
 
 requireText('tauri.conf.json', tauri, 'resources/desktop-commander');
 requireText('tauri.conf.json', tauri, 'desktop-commander-launcher.mjs');
