@@ -95,7 +95,7 @@ try {
   const installer = path.resolve('src-tauri', 'target', 'release', 'bundle', 'nsis', `ChatX_${pkg.version}_x64-setup.exe`);
   if (!fs.existsSync(installer)) throw new Error(`Expected NSIS installer was not created: ${installer}`);
 
-  if (requireSigning) {
+  if (certificateThumbprint) {
     const appSigner = verifyAuthenticode(appExe);
     const installerSigner = verifyAuthenticode(installer);
     console.log(`[chatx] Authenticode valid: app=${appSigner}, installer=${installerSigner}`);
