@@ -206,22 +206,31 @@ try {
     'process_list',
     'process_stdin',
     'process_terminate',
-    'git_status',
-    'git_diff',
-    'git_diff_summary',
-    'git_log',
     'git_inspect',
-    'git_stage',
-    'git_unstage',
+    'git_diff',
+    'git_index',
     'git_create_branch',
     'git_commit',
   ];
   const missing = expected.filter((name) => !toolNames.has(name));
   if (missing.length > 0) throw new Error(`Missing tools: ${missing.join(', ')}`);
+  const missingOutputSchemas = listed.tools
+    .filter((tool) => !tool.outputSchema)
+    .map((tool) => tool.name);
+  if (missingOutputSchemas.length > 0) {
+    throw new Error(`Tools missing outputSchema: ${missingOutputSchemas.join(', ')}`);
+  }
+  const appendDefinition = listed.tools.find((tool) => tool.name === 'fs_append');
+  if (!appendDefinition?.outputSchema?.properties?.path || !appendDefinition.outputSchema.properties?.size) {
+    throw new Error(`fs_append outputSchema is not descriptive: ${JSON.stringify(appendDefinition?.outputSchema)}`);
+  }
 
   const infoRaw = await callRaw(client, 'server_info');
   const infoText = textOf(infoRaw);
   if (/\n\s+"/.test(infoText)) throw new Error(`MCP JSON response is not compact: ${infoText}`);
+  if (infoRaw.structuredContent?.name !== 'chatx') {
+    throw new Error(`server_info missing structuredContent: ${JSON.stringify(infoRaw)}`);
+  }
   const info = jsonOf(infoRaw, 'server_info');
   if (info.name !== 'chatx') throw new Error(`Unexpected server info: ${JSON.stringify(info)}`);
 
@@ -239,6 +248,10 @@ try {
   }
 
   await call(client, 'fs_write', { path: smokeFile, content: 'hello\nsecond line\n' });
+  const appendRaw = await callRaw(client, 'fs_append', { path: smokeFile, content: 'appended\n' });
+  if (appendRaw.structuredContent?.path !== smokeFile || typeof appendRaw.structuredContent?.size !== 'number') {
+    throw new Error(`fs_append missing structuredContent: ${JSON.stringify(appendRaw)}`);
+  }
   await call(client, 'fs_edit', { path: smokeFile, old_text: 'hello', new_text: 'world' });
   const read = await call(client, 'fs_read', { path: smokeFile });
   if (!read.content.includes('world')) throw new Error(`fs_read did not return edited content: ${read.content}`);
@@ -248,7 +261,6 @@ try {
       { path: smokeFile, start_line: 1, end_line: 1 },
       { path: path.join(tempRoot, 'missing.txt') },
     ],
-    concurrency: 2,
   });
   if (batchRead.requested !== 2 || batchRead.succeeded !== 1 || batchRead.failed !== 1) {
     throw new Error(`fs_read_many returned unexpected counts: ${JSON.stringify(batchRead)}`);
@@ -258,9 +270,9 @@ try {
   }
   const largeFile = path.join(tempRoot, 'large.txt');
   await fs.writeFile(largeFile, 'x'.repeat(4_096), 'utf8');
-  const boundedRead = await call(client, 'fs_read', { path: largeFile, max_response_bytes: 1_024 });
+  const boundedRead = await call(client, 'fs_read', { path: largeFile, length: 1_024 });
   if (boundedRead.bytes_read !== 1_024 || boundedRead.next_offset !== 1_024 || boundedRead.truncated !== true) {
-    throw new Error(`fs_read response budget failed: ${JSON.stringify(boundedRead)}`);
+    throw new Error(`fs_read byte pagination failed: ${JSON.stringify(boundedRead)}`);
   }
 
   const excludedRoot = path.join(tempRoot, 'node_modules', 'hidden');
@@ -303,10 +315,9 @@ try {
   const fallbackSearch = await call(client, 'fs_search', {
     root: tempRoot,
     query: 'world',
-    prefer_ripgrep: false,
   });
-  if (fallbackSearch.search_engine !== 'javascript' || fallbackSearch.result_count < 1) {
-    throw new Error(`fs_search JavaScript fallback failed: ${JSON.stringify(fallbackSearch)}`);
+  if (!['ripgrep', 'literal'].includes(fallbackSearch.search_engine) || fallbackSearch.result_count < 1) {
+    throw new Error(`fs_search literal search failed: ${JSON.stringify(fallbackSearch)}`);
   }
 
   const shell = await call(client, 'run_command', {
@@ -356,19 +367,18 @@ try {
   const tracked = path.join(gitRepo, 'tracked.txt');
   await fs.writeFile(tracked, 'one\n', 'utf8');
 
-  const staged = await call(client, 'git_stage', { repo: gitRepo, paths: ['tracked.txt'] });
-  if (staged.exit_code !== 0) throw new Error(`git_stage failed: ${JSON.stringify(staged)}`);
+  const staged = await call(client, 'git_index', { repo: gitRepo, action: 'stage', paths: ['tracked.txt'] });
+  if (staged.exit_code !== 0) throw new Error(`git_index stage failed: ${JSON.stringify(staged)}`);
   const committed = await call(client, 'git_commit', { repo: gitRepo, message: 'initial smoke commit' });
   if (committed.exit_code !== 0) throw new Error(`git_commit failed: ${JSON.stringify(committed)}`);
 
-  const log = await call(client, 'git_log', { repo: gitRepo, max_count: 5 });
-  if (!log.stdout.includes('initial smoke commit')) throw new Error(`git_log missing commit: ${JSON.stringify(log)}`);
+  const log = await call(client, 'git_inspect', { repo: gitRepo, max_count: 5 });
+  if (!log.commits?.some((commit) => commit.subject.includes('initial smoke commit'))) throw new Error(`git_inspect log missing commit: ${JSON.stringify(log)}`);
 
   const inspected = await call(client, 'git_inspect', { repo: gitRepo, max_count: 5 });
   if (
-    inspected.status?.exit_code !== 0 ||
-    inspected.log?.exit_code !== 0 ||
-    !inspected.log?.stdout?.includes('initial smoke commit')
+    !inspected.status ||
+    !inspected.commits?.some((commit) => commit.subject.includes('initial smoke commit'))
   ) {
     throw new Error(`git_inspect failed: ${JSON.stringify(inspected)}`);
   }
@@ -396,17 +406,22 @@ try {
   }
 
   await fs.writeFile(tracked, 'two\n', 'utf8');
-  const diffSummary = await call(client, 'git_diff_summary', { repo: gitRepo });
-  if (diffSummary.file_count !== 1 || diffSummary.files?.[0]?.path !== 'tracked.txt') {
-    throw new Error(`git_diff_summary failed: ${JSON.stringify(diffSummary)}`);
+  const diffSummary = await call(client, 'git_inspect', { repo: gitRepo, sections: ['diff_summary'] });
+  if (
+    diffSummary.status !== null ||
+    diffSummary.commits !== null ||
+    diffSummary.diff_summary?.file_count !== 1 ||
+    diffSummary.diff_summary.files?.[0]?.path !== 'tracked.txt'
+  ) {
+    throw new Error(`git_inspect diff summary failed: ${JSON.stringify(diffSummary)}`);
   }
   const boundedDiff = await call(client, 'git_diff', { repo: gitRepo, max_chars: 1_024 });
   if (boundedDiff.output_offset !== 0 || typeof boundedDiff.next_offset === 'undefined') {
     throw new Error(`git_diff response metadata missing: ${JSON.stringify(boundedDiff)}`);
   }
-  await call(client, 'git_stage', { repo: gitRepo, paths: ['tracked.txt'] });
-  const unstaged = await call(client, 'git_unstage', { repo: gitRepo, paths: ['tracked.txt'] });
-  if (unstaged.exit_code !== 0) throw new Error(`git_unstage failed: ${JSON.stringify(unstaged)}`);
+  await call(client, 'git_index', { repo: gitRepo, action: 'stage', paths: ['tracked.txt'] });
+  const unstaged = await call(client, 'git_index', { repo: gitRepo, action: 'unstage', paths: ['tracked.txt'] });
+  if (unstaged.exit_code !== 0) throw new Error(`git_index unstage failed: ${JSON.stringify(unstaged)}`);
   const branch = await call(client, 'git_create_branch', { repo: gitRepo, name: 'smoke-branch' });
   if (branch.exit_code !== 0) throw new Error(`git_create_branch failed: ${JSON.stringify(branch)}`);
 

@@ -118,7 +118,6 @@ try {
         files: Array.from({ length: 50 }, (_, index) => ({
           path: path.join(corpus, `file-${String(index).padStart(4, '0')}.txt`),
         })),
-        concurrency: 16,
       });
       return result.succeeded;
     }),

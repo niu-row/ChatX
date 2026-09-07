@@ -35,6 +35,8 @@ export const config = Object.freeze({
   maxFileBytes: envInt('CHATGPTX_MAX_FILE_BYTES', 10 * 1024 * 1024, 1024, 256 * 1024 * 1024),
   maxCommandOutputChars: envInt('CHATGPTX_MAX_COMMAND_OUTPUT_CHARS', 200_000, 1_000, 5_000_000),
   maxProcessBufferChars: envInt('CHATGPTX_MAX_PROCESS_BUFFER_CHARS', 1_000_000, 10_000, 20_000_000),
+  maxMcpResponseBytes: envInt('CHATGPTX_MAX_MCP_RESPONSE_BYTES', 2 * 1024 * 1024, 64 * 1024, 32 * 1024 * 1024),
+  maxRunningProcesses: envInt('CHATGPTX_MAX_RUNNING_PROCESSES', 16, 1, 128),
   defaultCommandTimeoutMs: envInt('CHATGPTX_DEFAULT_COMMAND_TIMEOUT_MS', 120_000, 1_000, 60 * 60 * 1000),
   maxSearchFiles: envInt('CHATGPTX_MAX_SEARCH_FILES', 10_000, 100, 1_000_000),
 });

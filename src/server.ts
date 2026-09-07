@@ -9,26 +9,11 @@ import { registerFilesystemTools } from './tools/filesystem.js';
 import { registerGitTools } from './tools/git.js';
 import { registerProjectTools } from './tools/project.js';
 import { registerShellTools } from './tools/shell.js';
-import { textResult } from './utils/results.js';
+import { resultPayloadBytes, textResult } from './utils/results.js';
 import { recordInvocation } from './invocation-log.js';
 
 export const SERVER_NAME = 'chatx';
 export const SERVER_VERSION = '0.2.1';
-
-function resultPayloadBytes(result: unknown): number | null {
-  if (!result || typeof result !== 'object' || !('content' in result)) return null;
-  const content = (result as { content?: unknown }).content;
-  if (!Array.isArray(content)) return null;
-  let bytes = 0;
-  for (const item of content) {
-    if (item && typeof item === 'object' && 'text' in item && typeof item.text === 'string') {
-      bytes += Buffer.byteLength(item.text);
-    } else {
-      bytes += Buffer.byteLength(JSON.stringify(item));
-    }
-  }
-  return bytes;
-}
 
 export function buildServer(): McpServer {
   const server = new McpServer(
@@ -86,6 +71,25 @@ export function buildServer(): McpServer {
       title: 'ChatX server info',
       description: 'Return server, platform, capability, local path-policy, and runtime settings information.',
       inputSchema: z.object({}),
+      outputSchema: z.looseObject({
+        name: z.string(),
+        version: z.string(),
+        platform: z.string(),
+        arch: z.string(),
+        hostname: z.string(),
+        node_version: z.string(),
+        cwd: z.string(),
+        settings_version: z.number().int(),
+        permission_preset: z.string(),
+        filesystem: z.unknown(),
+        permissions: z.record(z.string(), z.boolean()),
+        runtime_key_store: z.looseObject({
+          supported: z.boolean(),
+          provider: z.string(),
+          saved: z.boolean(),
+        }),
+        warning: z.string(),
+      }),
       annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
     },
     async () => {
@@ -102,7 +106,6 @@ export function buildServer(): McpServer {
         settings_version: runtime.version,
         permission_preset: runtime.permissionPreset,
         filesystem: describePathPolicy(),
-        shell_enabled: runtime.permissions.shell,
         permissions: runtime.permissions,
         runtime_key_store: {
           supported: credentials.supported,
@@ -130,8 +133,8 @@ export function buildServer(): McpServer {
   const shellTools = new Set([
     'run_command', 'run_process', 'execution_output', 'process_output', 'process_list', 'process_stdin', 'process_terminate',
   ]);
-  const gitReadTools = new Set(['git_status', 'git_diff', 'git_diff_summary', 'git_log', 'git_inspect']);
-  const gitWriteTools = new Set(['git_stage', 'git_unstage', 'git_create_branch', 'git_commit']);
+  const gitReadTools = new Set(['git_inspect', 'git_diff']);
+  const gitWriteTools = new Set(['git_index', 'git_create_branch', 'git_commit']);
 
   const toolAllowed = (name: string, permissions: PermissionSettings): boolean => {
     if (filesystemReadTools.has(name)) return permissions.filesystemRead;

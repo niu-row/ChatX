@@ -12,6 +12,7 @@ process.env.CHATGPTX_ROOTS = root;
 process.env.CHATGPTX_ENABLE_SHELL = 'false';
 process.env.CHATGPTX_FULL_ACCESS = 'false';
 process.env.CHATGPTX_MAX_PROCESS_BUFFER_CHARS = '10000';
+process.env.CHATGPTX_MAX_MCP_RESPONSE_BYTES = '65536';
 const settingsUrl = new URL('../dist/settings.js', import.meta.url).href;
 const handlers = new Map();
 const mock = { registerTool(name, meta, handler) { handlers.set(name, { meta, handler }); } };
@@ -88,6 +89,38 @@ try {
   (await import('../dist/tools/git.js')).registerGitTools(mock);
   (await import('../dist/tools/project.js')).registerProjectTools(mock);
   (await import('../dist/tools/shell.js')).registerShellTools(mock);
+
+  const strictInputCases = [
+    ['fs_read', { path: root, max_response_bytes: 1024 }],
+    ['fs_read_many', { files: [{ path: root }], max_total_bytes: 1024 }],
+    ['fs_edit', { path: root, old_text: 'x', new_text: 'y', expected_replacements: 1 }],
+    ['fs_search', { root, query: 'x', prefer_ripgrep: false }],
+    ['fs_project_snapshot', { root, max_total_bytes: 1024 }],
+    ['git_inspect', { repo: root, include_diff_stat: true }],
+    ['git_diff', { repo: root, stat: true }],
+    ['run_command', { command: 'echo x', output_offset: 1 }],
+    ['run_process', { executable: process.execPath, output_offset: 1 }],
+  ];
+  for (const [name, args] of strictInputCases) {
+    const { meta } = handlers.get(name);
+    assert.throws(() => meta.inputSchema.parse(args), /unrecognized|unknown/i, `${name} should reject removed parameters`);
+  }
+
+  const pagedReadFile = path.join(root, 'paged-read.txt');
+  await fs.writeFile(pagedReadFile, '\0'.repeat(20_000));
+  const pagedRead = await call('fs_read', { path: pagedReadFile });
+  assert.ok(pagedRead.bytes_read < 20_000);
+  assert.equal(pagedRead.next_offset, pagedRead.bytes_read);
+  assert.equal(pagedRead.truncated, true);
+
+  const modeFile = path.join(root, 'executable.sh');
+  await fs.writeFile(modeFile, '#!/bin/sh\necho before\n', { mode: 0o755 });
+  const modeBefore = (await fs.stat(modeFile)).mode & 0o777;
+  await call('fs_edit', { path: modeFile, old_text: 'before', new_text: 'after' });
+  if (process.platform !== 'win32') {
+    assert.equal((await fs.stat(modeFile)).mode & 0o777, modeBefore, 'fs_edit must preserve executable mode bits');
+  }
+
   const moveRoot = path.join(root, 'moves');
   await fs.mkdir(moveRoot);
   const source = path.join(moveRoot, 'source.txt');
@@ -161,15 +194,15 @@ try {
   const diff = await call('git_diff', { repo });
   assert.equal(diff.exit_code, 0, diff.stderr);
   assert.ok(diff.stdout.includes('changed'));
-  const status = await call('git_status', { repo });
-  assert.equal(status.exit_code, 0, status.stderr);
+  const status = await call('git_inspect', { repo });
+  assert.ok(status.status && status.status.branch);
   assert.equal(await fs.access(marker).then(() => true, () => false), false);
   for (const paths of [['../outside.txt'], [':(top)outside.txt'], [path.join(repo, 'outside.txt')], ['.git/config']]) {
     await rejected('git_diff', { repo, paths });
   }
   process.env.GIT_WORK_TREE = root;
   process.env.GIT_DIR = path.join(root, 'nonexistent');
-  assert.equal((await call('git_status', { repo })).exit_code, 0);
+  assert.ok((await call('git_inspect', { repo })).status);
   delete process.env.GIT_WORK_TREE;
   delete process.env.GIT_DIR;
 
@@ -179,11 +212,11 @@ try {
   settings.applyPermissionPreset('developer');
   git(repo, ['config', 'filter.test.clean', helper.replaceAll('\\', '/')]);
   await fs.writeFile(path.join(repo, '.gitattributes'), 'outside.txt filter=test\n');
-  const filtered = await call('git_stage', { repo, paths: ['outside.txt'] });
-  assert.notEqual(filtered.exit_code, 0, 'Filtered staging must fail rather than bypass the filter silently');
+  const filtered = await rejected('git_index', { repo, action: 'stage', paths: ['outside.txt'] });
+  assert.match(filtered.content[0].text, /filter|failed/i);
   assert.equal(await fs.access(marker).then(() => true, () => false), false);
   await fs.writeFile(path.join(repo, '.gitattributes'), '');
-  const staged = await call('git_stage', { repo, paths: ['outside.txt'] });
+  const staged = await call('git_index', { repo, action: 'stage', paths: ['outside.txt'] });
   assert.equal(staged.exit_code, 0, staged.stderr);
   await fs.mkdir(path.join(repo, 'hooks'));
   for (const name of ['pre-commit', 'post-commit', 'reference-transaction']) {
@@ -199,13 +232,13 @@ try {
   await fs.mkdir(separate);
   git(separate, ['init', '--separate-git-dir', metadata]);
   settings.updateAllowedRoots([separate]);
-  await rejected('git_status', { repo: separate });
+  await rejected('git_inspect', { repo: separate });
   settings.updateAllowedRoots([repo]);
   await fs.writeFile(path.join(repo, '.git', 'objects', 'info', 'alternates'), metadata + '\n');
-  await rejected('git_status', { repo });
+  await rejected('git_inspect', { repo });
   await fs.rm(path.join(repo, '.git', 'objects', 'info', 'alternates'));
   git(repo, ['config', 'include.path', path.join(root, 'other-config')]);
-  await rejected('git_status', { repo });
+  await rejected('git_inspect', { repo });
   git(repo, ['config', '--unset', 'include.path']);
 
   settings.updateRuntimeSettings({ preset: 'developer', shell: true, roots: [root] });
@@ -218,8 +251,6 @@ try {
   assert.equal(execution.stdout + next.stdout + last.stdout, 'a'.repeat(2500));
   assert.equal(last.stdout_next_offset, null);
   assert.equal(await fs.readFile(counter, 'utf8'), 'x');
-  await rejected('run_process', { executable: process.execPath, args, cwd: root, output_offset: 1000 });
-  await rejected('run_command', { command: 'echo never', cwd: root, output_offset: 1000 });
   assert.equal(await fs.readFile(counter, 'utf8'), 'x');
   const capped = await call('run_process', { executable: process.execPath, args: ['-e', 'process.stdout.write("z".repeat(15000))'], cwd: root });
   assert.equal(capped.stdout_stored_chars, 10000);

@@ -375,7 +375,7 @@ ChatX 当前提供：
 - `fs_delete`：删除文件或目录。
 - `fs_move`：移动 / 重命名，拒绝同一路径和父子目录关系；覆盖采用暂存、备份和提交，失败时回滚，跨卷复制完成后才移除源。若清理失败，会返回保留的恢复目录。
 - `fs_copy`：复制文件或目录。
-- `fs_search`：流式递归文字或正则搜索；字面量和兼容正则均优先使用 ripgrep，不可用或语法不兼容时自动回退到有限并发 JavaScript 实现。
+- `fs_search`：流式递归文字或正则搜索；优先使用 ripgrep。不可用或正则语法不兼容时不会降级执行不受控正则，避免搜索行为不一致和高复杂度正则风险。
 - `fs_project_snapshot`：一次返回受限的项目树、关键配置文件和可选 Git 摘要；关键文件采用有界并发读取，非 Git 目录不会启动多条无效 Git 命令。
 
 允许目录会在每次文件系统 / Git 工具调用时动态生效，不需要重启 MCP Server。权限开关还会动态更新 MCP 工具列表：被禁用的工具不会继续占用模型上下文，客户端会收到工具列表变更通知。
@@ -384,13 +384,9 @@ ChatX 当前提供：
 
 ### 常规 Git
 
-- `git_status`
-- `git_diff`：默认限制补丁响应大小，支持 `offset` / `max_chars` 分页。
-- `git_diff_summary`：只返回逐文件增删行统计，避免为概览传输完整补丁。
-- `git_log`
-- `git_inspect`：并行返回状态、最近提交和 diff 统计。
-- `git_stage`
-- `git_unstage`
+- `git_inspect`：结构化返回状态、最近提交和 diff 统计；需要概览时优先使用。
+- `git_diff`：返回完整补丁，默认限制响应大小，支持 `offset` / `max_chars` 分页。
+- `git_index`：管理 staged 状态，使用 `action: stage | unstage`。
 - `git_create_branch`
 - `git_commit`
 
@@ -435,7 +431,7 @@ Shell
 - 后台进程
 - 后台进程 ID 管理
 
-前台命令首次调用仅接受 `output_offset=0`，使用 `max_output_chars` 控制单页长度。后续分页必须调用 `execution_output`；缓存最多保留 10 分钟、50 次执行、合计 1000 万字符，达到容量上限可能提前淘汰。每个输出流还受缓冲上限约束；`stdout_dropped_chars` / `stderr_dropped_chars` 标明未保留的部分。缓存过期或缺失时返回错误，不会重新执行原命令。
+前台命令使用 `max_output_chars` 控制首屏长度。后续分页必须调用 `execution_output` 并传入返回的 offset；缓存最多保留 10 分钟、50 次执行、合计 1000 万字符，达到容量上限可能提前淘汰。每个输出流还受缓冲上限约束；`stdout_dropped_chars` / `stderr_dropped_chars` 标明未保留的部分。缓存过期或缺失时返回错误，不会重新执行原命令。
 
 ### 重要：允许目录不是 Shell 沙箱
 
@@ -535,6 +531,8 @@ ChatX 直接读取环境变量，不会自动加载 `.env` 文件。`.env.exampl
 | `CHATGPTX_MAX_FILE_BYTES` | `10485760` | 单个文件读取 / 编辑大小上限 |
 | `CHATGPTX_MAX_COMMAND_OUTPUT_CHARS` | `200000` | 前台命令 stdout / stderr 缓冲上限 |
 | `CHATGPTX_MAX_PROCESS_BUFFER_CHARS` | `1000000` | 后台进程输出缓冲上限 |
+| `CHATGPTX_MAX_MCP_RESPONSE_BYTES` | `2097152` | 单次 MCP 响应的序列化字节上限；文件读取分页预算会随之缩放 |
+| `CHATGPTX_MAX_RUNNING_PROCESSES` | `16` | 同时运行的后台托管进程上限 |
 | `CHATGPTX_DEFAULT_COMMAND_TIMEOUT_MS` | `120000` | 默认前台命令超时时间 |
 | `CHATGPTX_MAX_SEARCH_FILES` | `10000` | 文件搜索最大扫描数量 |
 | `CHATGPTX_RG_PATH` | `rg` | 可选 ripgrep 可执行文件路径；不可用时自动使用 JavaScript 搜索 |
@@ -679,7 +677,7 @@ npm run benchmark
 - 权限预设。
 - 动态允许目录。
 - Windows DPAPI 凭据存储。
-- MCP 30 个工具的 smoke test。
+- MCP 工具集合的 smoke test（当前共注册 31 个工具，实际暴露数量会随权限动态变化）。
 - 文件系统读写。
 - Shell / 后台进程。
 - 受约束 Git 写入。

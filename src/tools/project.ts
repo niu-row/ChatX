@@ -26,6 +26,8 @@ const DEFAULT_KEY_FILES = [
   'README.md',
   'tsconfig.json',
 ];
+const SNAPSHOT_MAX_FILE_BYTES = 64 * 1024;
+const SNAPSHOT_MAX_TOTAL_BYTES = 256 * 1024;
 
 function resolveProjectFile(root: string, relativePath: string): string {
   if (path.isAbsolute(relativePath)) throw new Error(`Key file path must be relative: ${relativePath}`);
@@ -174,13 +176,21 @@ export function registerProjectTools(server: McpServer): void {
       inputSchema: z.object({
         root: z.string(),
         max_depth: z.number().int().min(0).max(10).default(3),
-        max_entries: z.number().int().min(1).max(10_000).default(500),
+        max_entries: z.number().int().min(1).max(5_000).default(500),
         exclude_directories: z.array(z.string()).default(DEFAULT_EXCLUDED_DIRECTORIES),
         key_files: z.array(z.string()).max(20).default(DEFAULT_KEY_FILES),
-        max_file_bytes: z.number().int().min(1_024).max(256 * 1024).default(64 * 1024),
-        max_total_bytes: z.number().int().min(1_024).max(1024 * 1024).default(256 * 1024),
         include_git: z.boolean().default(true),
         git_log_count: z.number().int().min(1).max(50).default(5),
+      }).strict(),
+      outputSchema: z.looseObject({
+        root: z.string(),
+        tree: z.looseObject({
+          entry_count: z.number().int(),
+          reached_entry_limit: z.boolean(),
+          entries: z.array(z.looseObject({})),
+        }),
+        key_files: z.array(z.looseObject({})),
+        git: z.looseObject({}).nullable(),
       }),
       annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
     },
@@ -190,8 +200,6 @@ export function registerProjectTools(server: McpServer): void {
       max_entries,
       exclude_directories,
       key_files,
-      max_file_bytes,
-      max_total_bytes,
       include_git,
       git_log_count,
     }) => {
@@ -203,7 +211,7 @@ export function registerProjectTools(server: McpServer): void {
 
         const [tree, files] = await Promise.all([
           collectProjectTree(resolvedRoot, max_depth, max_entries, new Set(exclude_directories)),
-          readKeyFiles(resolvedRoot, key_files, max_file_bytes, max_total_bytes),
+          readKeyFiles(resolvedRoot, key_files, SNAPSHOT_MAX_FILE_BYTES, SNAPSHOT_MAX_TOTAL_BYTES),
         ]);
 
         let git: Record<string, unknown> | null = null;

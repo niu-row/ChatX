@@ -35,14 +35,14 @@ All notable changes to ChatX are documented in this file.
 - `fs_read_many` for bounded concurrent multi-file reads.
 - `fs_project_snapshot` for a bounded project tree, key files, and Git context.
 - `run_process` for direct executable invocation without shell parsing.
-- `git_inspect` and `git_diff_summary` for compact repository inspection.
+- `git_inspect` for structured repository inspection with status, recent commits, and diff summary.
 - Invocation latency and response-size summaries in the local console API.
 - A repeatable `npm run benchmark` performance regression suite.
 
 ### Improved
 
 - Added response budgets and continuation offsets to file reads, directory listings, Git diffs, and foreground process output.
-- Accelerated literal and compatible regular-expression searches with ripgrep while preserving the JavaScript fallback.
+- Accelerated literal and compatible regular-expression searches with ripgrep while rejecting incompatible regular expressions instead of unsafe fallback execution.
 - Added bounded concurrency to directory metadata collection, batch reads, and project key-file reads.
 - Cached canonical filesystem roots until path-policy settings change.
 - Reduced MCP JSON response size and avoided advertising disabled tools.
