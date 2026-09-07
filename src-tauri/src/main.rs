@@ -245,10 +245,22 @@ fn runtime_status(paths: &RuntimePaths) -> (String, bool, Option<Value>, String)
     let args = vec!["runtimes".into(), "status".into(), RUNTIME_ALIAS.into(), "--json".into()];
     match run_tunnel(paths, &args, None) {
         Ok(output) if output.status.success() => {
-            let parsed = parse_json_output(&output);
-            let state = parsed.as_ref().and_then(|v| v.get("runtime_state")).and_then(Value::as_str).unwrap_or("unknown").to_string();
-            let active = parsed.as_ref().map(runtime_payload_active).unwrap_or(false);
-            (state, active, parsed, String::new())
+            let Some(parsed) = parse_json_output(&output) else {
+                let text = output_text(&output);
+                let error = if text.is_empty() {
+                    "Tunnel 状态返回为空或不是有效 JSON。".to_string()
+                } else {
+                    format!("Tunnel 状态返回不是有效 JSON：{text}")
+                };
+                return ("error".into(), false, None, error);
+            };
+            let active = runtime_payload_active(&parsed);
+            let state = parsed
+                .get("runtime_state")
+                .and_then(Value::as_str)
+                .map(str::to_string)
+                .unwrap_or_else(|| if active { "ready".into() } else { "unknown".into() });
+            (state, active, Some(parsed), String::new())
         }
         Ok(output) => {
             let text = output_text(&output);
@@ -274,6 +286,17 @@ fn get_status(app: tauri::AppHandle, state: State<'_, AppState>) -> Result<Value
     match runtime_paths(&app) {
         Ok(paths) => {
             let dc_home = desktop_commander_home(&app)?;
+            let runtime_manifest = manifest(&paths);
+            let tunnel_version = runtime_manifest
+                .get("tunnelClient")
+                .and_then(|value| value.get("version"))
+                .and_then(Value::as_str)
+                .unwrap_or("unknown")
+                .to_string();
+            let desktop_commander = runtime_manifest
+                .get("desktopCommander")
+                .cloned()
+                .unwrap_or_else(|| json!({"version":"unknown"}));
             let (runtime_state, runtime_active, runtime, last_error) = runtime_status(&paths);
             let logs = state.logs.lock().map(|v| v.clone()).unwrap_or_default();
             Ok(json!({
@@ -286,8 +309,8 @@ fn get_status(app: tauri::AppHandle, state: State<'_, AppState>) -> Result<Value
                 "runtimeActive":runtime_active,
                 "runtime":runtime,
                 "lastError":last_error,
-                "tunnelVersion":executable_version(&paths.tunnel),
-                "desktopCommander":manifest(&paths).get("desktopCommander").cloned().unwrap_or_else(|| json!({"version":"unknown"})),
+                "tunnelVersion":tunnel_version,
+                "desktopCommander":desktop_commander,
                 "mcpCommand":mcp_command(&paths, &dc_home),
                 "logs":logs
             }))
