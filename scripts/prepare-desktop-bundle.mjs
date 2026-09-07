@@ -40,6 +40,29 @@ function run(label, command, args, options = {}) {
   return result;
 }
 
+function resolveNpmCli() {
+  const candidates = [
+    process.env.npm_execpath?.trim(),
+    path.join(path.dirname(process.execPath), 'node_modules', 'npm', 'bin', 'npm-cli.js'),
+  ].filter(Boolean);
+
+  for (const candidate of candidates) {
+    if (candidate && fs.existsSync(candidate)) return path.resolve(candidate);
+  }
+
+  throw new Error(
+    'npm CLI entry was not found. Run this script through npm (npm run desktop:prepare) or use a Node installation that includes npm.',
+  );
+}
+
+const npmCli = resolveNpmCli();
+function runNpm(label, args, options = {}) {
+  // Do not spawn npm.cmd directly. Node 24 on Windows can return EINVAL for
+  // direct .cmd execution via spawnSync. Running npm-cli.js with the current
+  // node executable also avoids cmd.exe quoting issues for paths with spaces.
+  return run(label, process.execPath, [npmCli, ...args], options);
+}
+
 requireLocked('Node version', process.version, runtimeLock.node.version);
 requireLocked('Node SHA-256', sha256(process.execPath), runtimeLock.node.sha256);
 
@@ -102,7 +125,7 @@ for (const name of ['LICENSE', 'NOTICE']) {
 const dcRoot = path.join(resourceDir, 'desktop-commander');
 fs.mkdirSync(dcRoot, { recursive: true });
 const packageSpec = `@wonderwhy-er/desktop-commander@${runtimeLock.desktopCommander.version}`;
-run('Desktop Commander install', 'npm.cmd', [
+runNpm('Desktop Commander install', [
   'install',
   '--prefix', dcRoot,
   '--omit=dev',
@@ -116,7 +139,7 @@ run('Desktop Commander install', 'npm.cmd', [
 // Desktop Commander requires ripgrep for start_search. Its own Docker build also
 // installs dependencies with scripts disabled and then explicitly rebuilds only
 // @vscode/ripgrep, avoiding unrelated package lifecycle scripts.
-run('Desktop Commander ripgrep rebuild', 'npm.cmd', [
+runNpm('Desktop Commander ripgrep rebuild', [
   'rebuild',
   '--prefix', dcRoot,
   '--no-audit',
