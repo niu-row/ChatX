@@ -8,6 +8,9 @@ const rust = fs.readFileSync('src-tauri/src/main.rs', 'utf8');
 const html = fs.readFileSync('desktop/index.html', 'utf8');
 const appJs = fs.readFileSync('desktop/app.js', 'utf8');
 const prepare = fs.readFileSync('scripts/prepare-desktop-bundle.mjs', 'utf8');
+const installerHooks = fs.readFileSync('src-tauri/windows/hooks.nsh', 'utf8');
+const stopRuntime = fs.readFileSync('src-tauri/windows/stop-runtime.ps1', 'utf8');
+const buildInstaller = fs.readFileSync('scripts/build-installer.mjs', 'utf8');
 const pkg = JSON.parse(fs.readFileSync('package.json', 'utf8'));
 
 assert.equal(config.build.frontendDist, '../desktop');
@@ -19,6 +22,12 @@ assert.equal(config.bundle.active, true);
 assert.ok(config.bundle.targets.includes('nsis'));
 assert.equal(config.bundle.windows?.nsis?.installMode, 'currentUser');
 assert.equal(config.bundle.windows.nsis.installerHooks, './windows/hooks.nsh');
+assert.match(installerHooks, /-MainBinaryName/);
+assert.ok(installerHooks.indexOf('nsExec::ExecToLog') < installerHooks.indexOf('!insertmacro CheckIfAppIsRunning'),
+  'Runtime cleanup must run before the standard app-running check');
+assert.match(stopRuntime, /chatx-desktop\.exe/);
+assert.match(stopRuntime, /chatgptx-backend\.mjs/);
+assert.match(stopRuntime, /FileShare\]::None/);
 assert.match(rust, /async fn restart_backend/);
 assert.match(rust, /restart_backend,/);
 assert.match(html, /id="restartBackend"/);
@@ -78,8 +87,11 @@ assert.match(prepare, /node\.exe/);
 assert.match(prepare, /tunnel-client\.exe/);
 assert.equal(pkg.scripts['desktop:dev'], 'npm run build && tauri dev');
 assert.equal(pkg.scripts['desktop:build'], 'npm run desktop:prepare && tauri build --no-bundle');
-assert.equal(pkg.scripts['desktop:installer'], 'npm run desktop:prepare && tauri build --bundles nsis');
+assert.equal(pkg.scripts['desktop:installer'], 'npm run desktop:prepare && node scripts/build-installer.mjs');
+assert.match(buildInstaller, /os error 32/i);
+assert.match(buildInstaller, /maxAttempts = 3/);
 
 execFileSync(process.execPath, ['--check', 'desktop/app.js'], { stdio: 'pipe' });
 execFileSync(process.execPath, ['--check', 'scripts/prepare-desktop-bundle.mjs'], { stdio: 'pipe' });
+execFileSync(process.execPath, ['--check', 'scripts/build-installer.mjs'], { stdio: 'pipe' });
 console.log('desktop static test ok: installer resources, tray behavior, native folder picker, detailed guide');

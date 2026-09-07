@@ -400,6 +400,20 @@ try {
     throw new Error(`Developer tools were unexpectedly hidden: ${JSON.stringify([...developerTools])}`);
   }
 
+  const advancedWithoutShellResponse = await localPost('/api/settings', { gitAdvanced: true });
+  if (!advancedWithoutShellResponse.ok) throw new Error('Failed to enable Advanced Git for visibility regression test.');
+  const advancedWithoutShellTools = new Set((await client.listTools()).tools.map((tool) => tool.name));
+  if (advancedWithoutShellTools.has('git_run')) {
+    throw new Error('git_run must remain hidden while Shell is disabled, even when Advanced Git is enabled.');
+  }
+  const advancedWithShellResponse = await localPost('/api/settings', { shell: true });
+  if (!advancedWithShellResponse.ok) throw new Error('Failed to enable Shell for Advanced Git visibility regression test.');
+  const advancedWithShellTools = new Set((await client.listTools()).tools.map((tool) => tool.name));
+  if (!advancedWithShellTools.has('git_run')) {
+    throw new Error('git_run must be advertised when Shell, Advanced Git, Git read, and Git write are enabled.');
+  }
+  await localPost('/api/settings', { preset: 'developer' });
+
   const rootsResponse = await localPost('/api/settings', { roots: [tempRoot, process.cwd()] });
   const rootsBody = await rootsResponse.json();
   if (!rootsResponse.ok || rootsBody.status?.policy?.roots?.length !== 2) {

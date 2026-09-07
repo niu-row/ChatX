@@ -255,9 +255,8 @@ export class TunnelDashboard {
     return { ok: true, message: `${localBaseUrl()}/healthz` };
   }
 
-  private start(apiKey: string): Promise<CommandResult> {
-    return new Promise(async (resolve) => {
-      fs.mkdirSync(path.dirname(this.healthUrlFile), { recursive: true });
+  private async start(apiKey: string): Promise<CommandResult> {
+    fs.mkdirSync(path.dirname(this.healthUrlFile), { recursive: true });
       fs.rmSync(this.healthUrlFile, { force: true });
       this.tunnelHealthUrl = null;
 
@@ -301,28 +300,24 @@ export class TunnelDashboard {
       const deadline = Date.now() + 15_000;
       while (Date.now() < deadline) {
         if (spawnError) {
-          resolve({ ok: false, exitCode: child.exitCode, output: spawnError });
-          return;
+          return { ok: false, exitCode: child.exitCode, output: spawnError };
         }
         if (child.exitCode !== null) {
-          resolve({ ok: false, exitCode: child.exitCode, output: startupOutput.trim() });
-          return;
+          return { ok: false, exitCode: child.exitCode, output: startupOutput.trim() };
         }
         this.tunnelHealthUrl = await this.readTunnelHealthUrl();
         if (this.tunnelHealthUrl) {
           const ready = await this.probeTunnelReady();
           if (ready.ok) {
             this.addLog('health', ready.message);
-            resolve({ ok: true, exitCode: null, output: startupOutput.trim() });
-            return;
+            return { ok: true, exitCode: null, output: startupOutput.trim() };
           }
         }
         await new Promise((done) => setTimeout(done, 300));
       }
 
       child.kill();
-      resolve({ ok: false, exitCode: child.exitCode, output: `${startupOutput.trim()}\nTunnel 启动后 15 秒内未通过 /readyz 健康检查。` });
-    });
+      return { ok: false, exitCode: child.exitCode, output: `${startupOutput.trim()}\nTunnel 启动后 15 秒内未通过 /readyz 健康检查。` };
   }
 
   private async connect(req: IncomingMessage, res: ServerResponse): Promise<void> {

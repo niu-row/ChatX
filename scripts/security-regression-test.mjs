@@ -171,6 +171,9 @@ try {
   delete process.env.GIT_DIR;
 
   settings.applyPermissionPreset('developer');
+  settings.updateRuntimeSettings({ gitAdvanced: true });
+  await rejected('git_run', { repo, args: ['status'] });
+  settings.applyPermissionPreset('developer');
   git(repo, ['config', 'filter.test.clean', helper.replaceAll('\\', '/')]);
   await fs.writeFile(path.join(repo, '.gitattributes'), 'outside.txt filter=test\n');
   const filtered = await call('git_stage', { repo, paths: ['outside.txt'] });

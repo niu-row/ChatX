@@ -97,7 +97,12 @@ async function killProcessTree(record: ManagedProcess): Promise<void> {
         windowsHide: true,
         stdio: 'ignore',
       });
-      killer.once('close', () => resolve());
+      killer.once('close', (code) => {
+        if (code !== 0 && record.child.exitCode === null && record.child.signalCode === null) {
+          record.child.kill('SIGTERM');
+        }
+        resolve();
+      });
       killer.once('error', () => {
         record.child.kill('SIGTERM');
         resolve();

@@ -24,7 +24,7 @@ const permissionMeta = [
   ['filesystemWrite', '修改文件', '写入、编辑、复制、移动和删除'],
   ['gitRead', 'Git 读取', 'status、diff、log'],
   ['gitWrite', 'Git 写入', '受约束的 stage、unstage、branch、commit'],
-  ['gitAdvanced', '高级 Git', '任意 git 参数；高风险，默认关闭'],
+  ['gitAdvanced', '高级 Git', '任意 git 参数；等同 Shell，需同时开启 Shell'],
   ['shell', 'Shell 命令', '高权限；不受允许目录边界约束'],
   ['fullAccess', '完整文件系统访问', '绕过允许目录边界'],
 ];

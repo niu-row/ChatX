@@ -410,7 +410,7 @@ export function registerGitTools(server: McpServer): void {
     {
       title: 'Run advanced Git command',
       description:
-        'Escape hatch for arbitrary Git arguments. Disabled unless Advanced Git is explicitly enabled in the local console; also requires Git read and write permissions.',
+        'Escape hatch for arbitrary Git arguments. This is shell-equivalent because Git aliases/configuration can execute external programs. Requires Shell, Advanced Git, Git read, and Git write permissions.',
       inputSchema: z.object({
         repo: z.string(),
         args: z.array(z.string()).min(1).max(200),
@@ -420,6 +420,7 @@ export function registerGitTools(server: McpServer): void {
     },
     async ({ repo, args, timeout_ms }) => {
       try {
+        requirePermission('shell', 'Shell tools required by Advanced Git');
         requirePermission('gitAdvanced', 'Advanced Git command execution');
         requirePermission('gitWrite', 'Git write tools');
         requirePermission('gitRead', 'Git read tools');

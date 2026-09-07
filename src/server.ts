@@ -110,7 +110,7 @@ export function buildServer(): McpServer {
           saved: credentials.saved,
         },
         warning:
-          'run_command executes with the permissions of the OS account running ChatX. Filesystem root policy does not sandbox shell commands. git_run additionally requires the Advanced Git permission.',
+          'run_command executes with the permissions of the OS account running ChatX. Filesystem root policy does not sandbox shell commands. git_run is shell-equivalent and requires Shell, Advanced Git, Git read, and Git write permissions.',
       });
     },
   );
@@ -138,7 +138,9 @@ export function buildServer(): McpServer {
     if (shellTools.has(name)) return permissions.shell;
     if (gitReadTools.has(name)) return permissions.gitRead;
     if (gitWriteTools.has(name)) return permissions.gitWrite;
-    if (name === 'git_run') return permissions.gitAdvanced && permissions.gitRead && permissions.gitWrite;
+    if (name === 'git_run') {
+      return permissions.shell && permissions.gitAdvanced && permissions.gitRead && permissions.gitWrite;
+    }
     return true;
   };
 
