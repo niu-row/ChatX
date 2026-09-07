@@ -71,12 +71,16 @@ requireText('build-installer.mjs', installer, 'published signed installer');
 rejectText('build-installer.mjs', installer, 'published unsigned installer');
 rejectText('build-installer.mjs', installer, 'release is unsigned; this is intentional');
 
+requireText('desktop-commander-launcher.mjs', launcher, 'delete process.env.CHATX_TUNNEL_RUNTIME_KEY');
 requireText('desktop-commander-launcher.mjs', launcher, 'DESKTOP_COMMANDER_DISABLE_TELEMETRY');
 requireText('desktop-commander-launcher.mjs', launcher, 'USERPROFILE');
 requireText('desktop-commander-launcher.mjs', launcher, 'HOME');
 
 requireText('bridge-smoke-test.mjs', bridge, "from '@modelcontextprotocol/client/stdio'");
 requireText('bridge-smoke-test.mjs', bridge, "call('start_search'");
+requireText('bridge-smoke-test.mjs', bridge, "call('start_process'");
+requireText('bridge-smoke-test.mjs', bridge, "transportEnv.CHATX_TUNNEL_RUNTIME_KEY = 'chatx-secret-smoke'");
+requireText('bridge-smoke-test.mjs', bridge, 'CHATX_KEY_STRIPPED');
 requireText('bridge-smoke-test.mjs', bridge, 'chatx-ripgrep-smoke');
 
 requireText('tauri.conf.json', tauri, 'resources/desktop-commander');
