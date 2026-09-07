@@ -47,6 +47,7 @@
         "languages": ["SimpChinese", "English"],
         "displayLanguageSelector": false,
         "installerIcon": "icons/icon.ico",
+        "template": "./windows/installer-template.nsi",
         "installerHooks": "./windows/hooks.nsh"
       }
     }

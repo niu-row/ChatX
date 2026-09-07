@@ -9,6 +9,7 @@ const html = fs.readFileSync('desktop/index.html', 'utf8');
 const appJs = fs.readFileSync('desktop/app.js', 'utf8');
 const prepare = fs.readFileSync('scripts/prepare-desktop-bundle.mjs', 'utf8');
 const installerHooks = fs.readFileSync('src-tauri/windows/hooks.nsh', 'utf8');
+const installerTemplate = fs.readFileSync('src-tauri/windows/installer-template.nsi', 'utf8');
 const stopRuntime = fs.readFileSync('src-tauri/windows/stop-runtime.ps1', 'utf8');
 const buildInstaller = fs.readFileSync('scripts/build-installer.mjs', 'utf8');
 const pkg = JSON.parse(fs.readFileSync('package.json', 'utf8'));
@@ -21,7 +22,10 @@ assert.equal(config.app.windows?.[0]?.title, 'ChatX 本地控制台');
 assert.equal(config.bundle.active, true);
 assert.ok(config.bundle.targets.includes('nsis'));
 assert.equal(config.bundle.windows?.nsis?.installMode, 'currentUser');
+assert.equal(config.bundle.windows.nsis.template, './windows/installer-template.nsi');
 assert.equal(config.bundle.windows.nsis.installerHooks, './windows/hooks.nsh');
+assert.match(installerTemplate, /ChatX upgrades must not invoke an older uninstaller/);
+assert.match(installerTemplate, /\$\{ElseIf\} \$R0 = 1[\s\S]*?StrCpy \$ReinstallPageCheck 2[\s\S]*?Abort/);
 assert.match(installerHooks, /-MainBinaryName/);
 assert.ok(installerHooks.indexOf('nsExec::ExecToLog') < installerHooks.indexOf('!insertmacro CheckIfAppIsRunning'),
   'Runtime cleanup must run before the standard app-running check');

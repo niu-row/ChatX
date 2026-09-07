@@ -44,6 +44,8 @@ release\ChatX-Setup-0.2.1.exe
 
 当前发布流程允许未签名安装包。未签名不会影响 ChatX 功能，但 Windows 可能显示“未知发布者”或 SmartScreen 提示。`release` 目录只保留通过 `npm run desktop:release` 生成的当前版本安装包；普通 `desktop:installer` 产生的开发构建不会自动复制到这里。
 
+从旧版升级时，新安装器会直接跳过旧版 `uninstall.exe`，先用当前版本自带的 runtime 清理逻辑释放 ChatX/Node/tunnel-client，再覆盖安装。这样旧版卸载器自身的历史 bug 不会阻塞升级。
+
 安装版已经包含运行桌面程序所需的本地组件。**普通用户不需要另外安装 Node.js 或 Rust。**
 
 安装完成后，从开始菜单或桌面快捷方式启动 **ChatX** 即可。正式安装版使用 Windows GUI 子系统，不会额外弹出 CMD 控制台窗口。

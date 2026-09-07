@@ -9,6 +9,7 @@ All notable changes to ChatX are documented in this file.
 - Treat Advanced Git as Shell-equivalent and require Shell permission for `git_run` at both visibility and handler layers.
 - Lock bundled Node and tunnel-client versions plus SHA-256 hashes in `runtime-lock.json` and verify them before every desktop package build.
 - Keep Authenticode signing optional: `desktop:release` publishes unsigned installers with an explicit warning when no certificate is configured, and automatically signs/verifies when signing settings are provided.
+- Bypass older NSIS uninstallers during upgrades so historical runtime-cleanup bugs cannot block an in-place ChatX update.
 - Add version consistency checks across npm, Tauri, Cargo, and the MCP server.
 - Centralize permission labels/descriptions in the backend so desktop and browser consoles no longer maintain separate permission tables.
 
