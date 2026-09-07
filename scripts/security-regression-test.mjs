@@ -94,6 +94,9 @@ try {
   const destination = path.join(moveRoot, 'destination.txt');
   await fs.writeFile(source, 'source');
   await fs.writeFile(destination, 'original-destination');
+  const destructiveDenied = await rejected('fs_move', { source, destination: path.join(moveRoot, 'denied.txt') });
+  assert.match(destructiveDenied.content[0].text, /delete\/move tools is disabled/);
+  settings.updateRuntimeSettings({ filesystemDestructive: true });
   await rejected('fs_move', { source, destination: source, overwrite: true });
   assert.equal(await fs.readFile(source, 'utf8'), 'source');
   await rejected('fs_move', { source: moveRoot, destination: path.join(moveRoot, 'child'), overwrite: true });

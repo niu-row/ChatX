@@ -36,11 +36,13 @@ ChatX
 
 ## Windows 用户：推荐直接安装
 
-普通 Windows 用户建议直接使用已经构建好的安装包：
+普通 Windows 用户应使用经过 Authenticode 签名的正式安装包。正式发布后文件名为：
 
 ```text
-release\ChatX-Setup-0.2.0.exe
+release\ChatX-Setup-0.2.1.exe
 ```
+
+`release` 目录只保留通过 `npm run desktop:release` 生成并验证签名的正式包；普通 `desktop:installer` 产生的未签名开发包不会复制到这里。
 
 安装版已经包含运行桌面程序所需的本地组件。**普通用户不需要另外安装 Node.js 或 Rust。**
 
@@ -220,7 +222,8 @@ ChatGPT 中已经启用 ChatX 应用
 其中：
 
 - 读取文件需要“文件读取”权限。
-- 修改文件需要“文件写入”权限。
+- 写入、编辑、复制和创建目录需要“文件写入”权限。
+- 删除或移动文件/目录还需要单独开启“删除/移动”高风险权限；“开发”预设默认关闭。
 - Git 提交等操作需要 Git 写入权限。
 - 任意 Git 参数需要同时开启“高级 Git”和 Shell；该能力按 Shell 等价权限处理。
 - 执行 npm、python、PowerShell 等命令需要 Shell 权限。
@@ -306,11 +309,11 @@ ChatGPT 中已经启用 ChatX 应用
 
 如果本次本地后端是由 ChatX 桌面程序启动的，退出时会同时清理它管理的 Tunnel 和后端进程。
 
-如果 3210 端口上的 ChatX 后端在桌面程序启动之前就已经存在，桌面程序会复用该后端，不会把这个外部进程当作自己的子进程关闭。
+桌面程序会为每次会话生成随机 secret，并通过 `/healthz` challenge/HMAC 验证 3210 端口上的后端确实由当前桌面实例启动。未通过身份校验的本地服务不会被复用，桌面端也不会向其发送 Runtime API Key 或其他 `/api/*` 控制请求。
 
 ## 权限模式
 
-全新配置默认使用“安全”只读模式，Shell、文件写入、Git 写入、高级 Git 和完整文件系统访问默认关闭。旧配置迁移保留明确保存过的授权，缺失权限采用安全值。配置损坏或版本不支持时，关闭所有操作权限并保留原文件。设置修改会先完整校验、原子保存，成功后才切换内存权限并通知客户端；保存失败不会改变当前权限。
+全新配置默认使用“安全”只读模式，Shell、文件写入、删除/移动、Git 写入、高级 Git 和完整文件系统访问默认关闭。settings v3 将删除/移动拆成独立高风险权限；旧 v1/v2 配置会安全迁移。配置损坏或版本不支持时，关闭所有操作权限并保留原文件。设置修改会先完整校验、原子保存，成功后才切换内存权限并通知客户端；保存失败不会改变当前权限。
 
 ChatX 提供四种权限模式。
 
@@ -320,6 +323,7 @@ ChatX 提供四种权限模式。
 
 - 文件读取：开
 - 文件写入：关
+- 删除/移动：关
 - Git 读取：开
 - Git 写入：关
 - 高级 Git：关
@@ -332,6 +336,7 @@ ChatX 提供四种权限模式。
 
 - 文件读取：开
 - 文件写入：开
+- 删除/移动：关
 - Git 读取：开
 - Git 写入：开
 - 高级 Git：关
@@ -343,6 +348,7 @@ ChatX 提供四种权限模式。
 高风险模式：
 
 - 文件读写：开
+- 删除/移动：开
 - Git 读写：开
 - 高级 Git：开
 - Shell：开
@@ -603,15 +609,29 @@ npm run desktop:build
 
 ### 构建 NSIS 安装包
 
+开发验证用未签名安装包：
+
 ```bash
 npm run desktop:installer
 ```
 
-项目当前发布的安装包放在：
+桌面打包会强制校验 `runtime-lock.json` 中锁定的 Node、tunnel-client 版本及 SHA-256，不允许悄悄替换运行时。
+
+正式发布必须使用 Authenticode 代码签名证书和时间戳服务：
+
+```powershell
+$env:CHATX_WINDOWS_CERT_THUMBPRINT = '<证书指纹>'
+$env:CHATX_WINDOWS_TIMESTAMP_URL = '<RFC3161 时间戳 URL>'
+npm run desktop:release
+```
+
+`desktop:release` 会验证主程序和 NSIS 安装包的 Authenticode 状态，只有签名有效才复制到：
 
 ```text
-release\ChatX-Setup-0.2.0.exe
+release\ChatX-Setup-0.2.1.exe
 ```
+
+如果没有证书，正式发布命令会直接失败；不会生成未签名的正式包。
 
 ## MCP stdio / Inspector
 

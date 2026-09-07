@@ -7,7 +7,9 @@ param(
     [string] $MainBinaryName = 'chatx-desktop.exe',
 
     [ValidateRange(1, 120)]
-    [int] $TimeoutSeconds = 20
+    [int] $TimeoutSeconds = 20,
+
+    [switch] $SkipDesktop
 )
 $ErrorActionPreference = 'Stop'
 
@@ -47,17 +49,19 @@ try {
     $directory = [IO.Path]::GetFullPath($InstallDir)
     $desktopTarget = [IO.Path]::Combine($directory, $MainBinaryName)
     $processTargets = @(
-        $desktopTarget,
         [IO.Path]::Combine($directory, 'node.exe'),
         [IO.Path]::Combine($directory, 'tunnel-client.exe')
     )
     $filesToUnlock = @(
-        $desktopTarget,
         [IO.Path]::Combine($directory, 'node.exe'),
         [IO.Path]::Combine($directory, 'tunnel-client.exe'),
         [IO.Path]::Combine($directory, 'chatgptx-backend.mjs'),
         [IO.Path]::Combine($directory, 'runtime-manifest.json')
     )
+    if (-not $SkipDesktop) {
+        $processTargets = @($desktopTarget) + $processTargets
+        $filesToUnlock = @($desktopTarget) + $filesToUnlock
+    }
 
     $deadline = [DateTime]::UtcNow.AddSeconds($TimeoutSeconds)
     $cleanPasses = 0

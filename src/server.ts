@@ -13,7 +13,7 @@ import { textResult } from './utils/results.js';
 import { recordInvocation } from './invocation-log.js';
 
 export const SERVER_NAME = 'chatx';
-export const SERVER_VERSION = '0.2.0';
+export const SERVER_VERSION = '0.2.1';
 
 function resultPayloadBytes(result: unknown): number | null {
   if (!result || typeof result !== 'object' || !('content' in result)) return null;
@@ -124,8 +124,9 @@ export function buildServer(): McpServer {
     'fs_list', 'fs_stat', 'fs_read', 'fs_read_many', 'fs_search', 'fs_project_snapshot',
   ]);
   const filesystemWriteTools = new Set([
-    'fs_write', 'fs_append', 'fs_edit', 'fs_mkdir', 'fs_delete', 'fs_move', 'fs_copy',
+    'fs_write', 'fs_append', 'fs_edit', 'fs_mkdir', 'fs_copy',
   ]);
+  const filesystemDestructiveTools = new Set(['fs_delete', 'fs_move']);
   const shellTools = new Set([
     'run_command', 'run_process', 'execution_output', 'process_output', 'process_list', 'process_stdin', 'process_terminate',
   ]);
@@ -135,6 +136,9 @@ export function buildServer(): McpServer {
   const toolAllowed = (name: string, permissions: PermissionSettings): boolean => {
     if (filesystemReadTools.has(name)) return permissions.filesystemRead;
     if (filesystemWriteTools.has(name)) return permissions.filesystemWrite;
+    if (filesystemDestructiveTools.has(name)) {
+      return permissions.filesystemWrite && permissions.filesystemDestructive;
+    }
     if (shellTools.has(name)) return permissions.shell;
     if (gitReadTools.has(name)) return permissions.gitRead;
     if (gitWriteTools.has(name)) return permissions.gitWrite;

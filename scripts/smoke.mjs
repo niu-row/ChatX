@@ -1,4 +1,5 @@
 import { spawn, spawnSync } from 'node:child_process';
+import { createHmac } from 'node:crypto';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
@@ -6,6 +7,7 @@ import { Client, StreamableHTTPClientTransport } from '@modelcontextprotocol/cli
 
 const port = 33000 + Math.floor(Math.random() * 10000);
 const baseUrl = `http://127.0.0.1:${port}`;
+const desktopSessionSecret = 'smoke-desktop-session-secret-0123456789abcdef';
 const tempRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'chatgptx-smoke-'));
 const settingsDir = path.join(tempRoot, '.settings');
 const smokeFile = path.join(tempRoot, 'smoke.txt');
@@ -22,6 +24,7 @@ const server = spawn(process.execPath, ['dist/index.js'], {
     CHATGPTX_SETTINGS_DIR: settingsDir,
     CHATGPTX_FULL_ACCESS: 'false',
     CHATGPTX_ENABLE_SHELL: 'true',
+    CHATX_DESKTOP_SESSION_SECRET: desktopSessionSecret,
   },
   stdio: ['ignore', 'pipe', 'pipe'],
 });
@@ -86,14 +89,38 @@ async function localPost(url, body) {
       'content-type': 'application/json',
       origin: baseUrl,
       'sec-fetch-site': 'same-origin',
+      'x-chatx-desktop-session': desktopSessionSecret,
     },
     body: JSON.stringify(body ?? {}),
+  });
+}
+
+async function localGet(url) {
+  return await fetch(`${baseUrl}${url}`, {
+    cache: 'no-store',
+    headers: { 'x-chatx-desktop-session': desktopSessionSecret },
   });
 }
 
 let client;
 try {
   await waitForHealth();
+
+  const challenge = 'chatx-smoke-health-challenge';
+  const identityResponse = await fetch(`${baseUrl}/healthz`, {
+    headers: { 'x-chatx-desktop-challenge': challenge },
+  });
+  const identity = await identityResponse.json();
+  const expectedProof = createHmac('sha256', desktopSessionSecret).update(challenge, 'utf8').digest('hex');
+  if (!identityResponse.ok || identity.service !== 'chatx' || identity.desktop_proof !== expectedProof) {
+    throw new Error(`Desktop backend identity proof failed: ${JSON.stringify(identity)}`);
+  }
+
+  const unauthenticatedStatus = await fetch(`${baseUrl}/api/tunnel/status`);
+  if (unauthenticatedStatus.status !== 401) {
+    throw new Error(`Desktop API accepted a request without the session secret: ${unauthenticatedStatus.status}`);
+  }
+
   const authorized = await localPost('/api/settings', { preset: 'developer', shell: true });
   if (!authorized.ok) throw new Error('Failed to grant isolated smoke test permissions.');
 
@@ -102,16 +129,16 @@ try {
     throw new Error('Dashboard did not load.');
   }
 
-  const tunnelStatusResponse = await fetch(`${baseUrl}/api/tunnel/status`);
+  const tunnelStatusResponse = await localGet('/api/tunnel/status');
   const tunnelStatus = await tunnelStatusResponse.json();
   if (!tunnelStatusResponse.ok || tunnelStatus.status?.service?.name !== 'chatx') {
     throw new Error(`Unexpected dashboard status: ${JSON.stringify(tunnelStatus)}`);
   }
-  if (tunnelStatus.status?.settings?.version !== 2) {
-    throw new Error(`Expected settings v2, got ${JSON.stringify(tunnelStatus.status?.settings)}`);
+  if (tunnelStatus.status?.settings?.version !== 3) {
+    throw new Error(`Expected settings v3, got ${JSON.stringify(tunnelStatus.status?.settings)}`);
   }
 
-  const diagnosticsResponse = await fetch(`${baseUrl}/api/diagnostics`);
+  const diagnosticsResponse = await localGet('/api/diagnostics');
   const diagnostics = await diagnosticsResponse.json();
   const localMcpCheck = diagnostics.checks?.find((check) => check.name === '本地 MCP');
   if (!diagnosticsResponse.ok || localMcpCheck?.status !== 'ok') {
@@ -120,7 +147,10 @@ try {
 
   const crossSiteConnect = await fetch(`${baseUrl}/api/tunnel/connect`, {
     method: 'POST',
-    headers: { 'content-type': 'application/json' },
+    headers: {
+      'content-type': 'application/json',
+      'x-chatx-desktop-session': desktopSessionSecret,
+    },
     body: JSON.stringify({ tunnelId: 'tunnel_12345678', apiKey: 'not-a-real-key' }),
   });
   if (crossSiteConnect.status !== 403) {
@@ -166,8 +196,6 @@ try {
     'fs_append',
     'fs_edit',
     'fs_mkdir',
-    'fs_delete',
-    'fs_move',
     'fs_copy',
     'fs_search',
     'fs_project_snapshot',
@@ -197,7 +225,7 @@ try {
   const info = jsonOf(infoRaw, 'server_info');
   if (info.name !== 'chatx') throw new Error(`Unexpected server info: ${JSON.stringify(info)}`);
 
-  const invocationResponse = await fetch(`${baseUrl}/api/invocations`);
+  const invocationResponse = await localGet('/api/invocations');
   const invocationPayload = await invocationResponse.json();
   if (!invocationResponse.ok || !invocationPayload.entries?.some((entry) => entry.tool === 'server_info' && entry.status === 'ok')) {
     throw new Error(`Invocation log did not record server_info: ${JSON.stringify(invocationPayload)}`);
@@ -389,11 +417,18 @@ try {
   if (!presetResponse.ok || presetBody.status?.policy?.permissionPreset !== 'developer') {
     throw new Error(`Developer preset failed: ${JSON.stringify(presetBody)}`);
   }
-  if (presetBody.status.policy.permissions.shell !== false || presetBody.status.policy.permissions.gitAdvanced !== false) {
+  if (
+    presetBody.status.policy.permissions.shell !== false ||
+    presetBody.status.policy.permissions.gitAdvanced !== false ||
+    presetBody.status.policy.permissions.filesystemDestructive !== false
+  ) {
     throw new Error(`Developer preset permissions are unsafe: ${JSON.stringify(presetBody.status.policy.permissions)}`);
   }
   const developerTools = new Set((await client.listTools()).tools.map((tool) => tool.name));
-  if (developerTools.has('run_command') || developerTools.has('run_process') || developerTools.has('git_run')) {
+  if (
+    developerTools.has('run_command') || developerTools.has('run_process') || developerTools.has('git_run') ||
+    developerTools.has('fs_delete') || developerTools.has('fs_move')
+  ) {
     throw new Error(`Disabled tools are still advertised: ${JSON.stringify([...developerTools])}`);
   }
   if (!developerTools.has('fs_write') || !developerTools.has('git_commit')) {
@@ -418,6 +453,13 @@ try {
   const rootsBody = await rootsResponse.json();
   if (!rootsResponse.ok || rootsBody.status?.policy?.roots?.length !== 2) {
     throw new Error(`Dynamic roots update failed: ${JSON.stringify(rootsBody)}`);
+  }
+
+  const destructiveResponse = await localPost('/api/settings', { filesystemDestructive: true });
+  if (!destructiveResponse.ok) throw new Error('Failed to enable destructive filesystem tools for smoke cleanup.');
+  const destructiveTools = new Set((await client.listTools()).tools.map((tool) => tool.name));
+  if (!destructiveTools.has('fs_delete') || !destructiveTools.has('fs_move')) {
+    throw new Error(`Destructive filesystem tools were not advertised after explicit enablement: ${JSON.stringify([...destructiveTools])}`);
   }
 
   await call(client, 'fs_delete', { path: smokeFile });

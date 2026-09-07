@@ -3,11 +3,12 @@ import path from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { config } from './config.js';
 
-export const SETTINGS_VERSION = 2 as const;
+export const SETTINGS_VERSION = 3 as const;
 
 export type PermissionSettings = {
   filesystemRead: boolean;
   filesystemWrite: boolean;
+  filesystemDestructive: boolean;
   gitRead: boolean;
   gitWrite: boolean;
   gitAdvanced: boolean;
@@ -16,6 +17,22 @@ export type PermissionSettings = {
 };
 
 export type PermissionPreset = 'safe' | 'developer' | 'unrestricted' | 'custom';
+
+export const permissionMetadata: ReadonlyArray<Readonly<{
+  key: keyof PermissionSettings;
+  title: string;
+  description: string;
+  highRisk: boolean;
+}>> = [
+  { key: 'filesystemRead', title: '读取文件', description: '目录列表、读取、搜索和元数据', highRisk: false },
+  { key: 'filesystemWrite', title: '修改文件', description: '写入、编辑、复制和创建目录', highRisk: false },
+  { key: 'filesystemDestructive', title: '删除/移动', description: '删除或移动文件与目录；开发模式默认关闭', highRisk: true },
+  { key: 'gitRead', title: 'Git 读取', description: 'status、diff、log', highRisk: false },
+  { key: 'gitWrite', title: 'Git 写入', description: '受约束的 stage、unstage、branch、commit', highRisk: false },
+  { key: 'gitAdvanced', title: '高级 Git', description: '任意 git 参数；等同 Shell，需同时开启 Shell', highRisk: true },
+  { key: 'shell', title: 'Shell 命令', description: '高权限；不受允许目录边界约束', highRisk: true },
+  { key: 'fullAccess', title: '完整文件系统访问', description: '绕过允许目录边界', highRisk: true },
+];
 
 export type RuntimeSettings = {
   version: typeof SETTINGS_VERSION;
@@ -36,6 +53,7 @@ export const permissionPresets: Record<Exclude<PermissionPreset, 'custom'>, Perm
   safe: {
     filesystemRead: true,
     filesystemWrite: false,
+    filesystemDestructive: false,
     gitRead: true,
     gitWrite: false,
     gitAdvanced: false,
@@ -45,6 +63,7 @@ export const permissionPresets: Record<Exclude<PermissionPreset, 'custom'>, Perm
   developer: {
     filesystemRead: true,
     filesystemWrite: true,
+    filesystemDestructive: false,
     gitRead: true,
     gitWrite: true,
     gitAdvanced: false,
@@ -54,6 +73,7 @@ export const permissionPresets: Record<Exclude<PermissionPreset, 'custom'>, Perm
   unrestricted: {
     filesystemRead: true,
     filesystemWrite: true,
+    filesystemDestructive: true,
     gitRead: true,
     gitWrite: true,
     gitAdvanced: true,
@@ -108,12 +128,21 @@ const defaults: RuntimeSettings = {
   },
 };
 
-function parsePermissions(value: unknown, legacy: boolean): PermissionSettings {
+function parsePermissions(value: unknown, sourceVersion: number): PermissionSettings {
   if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error('Invalid permissions.');
   const input = value as Record<string, unknown>;
   const result = { ...permissionPresets.safe };
   for (const key of Object.keys(result) as Array<keyof PermissionSettings>) {
-    if (input[key] === undefined && legacy) continue;
+    if (input[key] === undefined) {
+      if (sourceVersion === 1) continue;
+      if (sourceVersion === 2 && key === 'filesystemDestructive') {
+        // Preserve prior "fully unrestricted" behavior while keeping ordinary
+        // developer/file-write configurations on the new safer default.
+        result.filesystemDestructive = input.filesystemWrite === true && input.fullAccess === true;
+        continue;
+      }
+      throw new Error('Invalid permission: ' + key);
+    }
     if (typeof input[key] !== 'boolean') throw new Error('Invalid permission: ' + key);
     result[key] = input[key];
   }
@@ -127,9 +156,9 @@ function load(): { settings: RuntimeSettings; migrated: boolean } {
     if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) throw new Error('Invalid settings.');
     const record = parsed as Record<string, unknown>;
     const version = record.version ?? 1;
-    if (version !== 1 && version !== SETTINGS_VERSION) throw new Error('Unsupported settings version.');
+    if (version !== 1 && version !== 2 && version !== SETTINGS_VERSION) throw new Error('Unsupported settings version.');
     const legacy = version === 1;
-    const permissions = parsePermissions(record.permissions, legacy);
+    const permissions = parsePermissions(record.permissions, Number(version));
     const filesystem = record.filesystem as { roots?: unknown } | undefined;
     const connection = record.connection as { tunnelId?: unknown } | undefined;
     if (!legacy && (!filesystem || typeof filesystem !== 'object' ||
@@ -144,7 +173,7 @@ function load(): { settings: RuntimeSettings; migrated: boolean } {
         filesystem: { roots: normalizeRoots(filesystem?.roots ?? (legacy ? record.roots ?? config.roots : undefined)) },
         connection: { tunnelId: typeof tunnelId === 'string' ? tunnelId.trim() || null : null },
       },
-      migrated: legacy,
+      migrated: version !== SETTINGS_VERSION,
     };
   } catch (error) {
     console.error('[chatx] failed to load settings; all operation permissions disabled:', error);

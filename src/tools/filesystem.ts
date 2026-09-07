@@ -687,6 +687,7 @@ export function registerFilesystemTools(server: McpServer): void {
     async ({ path: inputPath, recursive, force }) => {
       try {
         requirePermission('filesystemWrite', 'Filesystem write tools');
+        requirePermission('filesystemDestructive', 'Filesystem delete/move tools');
         const resolved = await assertPathAllowed(inputPath);
         await fs.rm(resolved, { recursive, force });
         return textResult({ path: resolved, deleted: true });
@@ -712,6 +713,7 @@ export function registerFilesystemTools(server: McpServer): void {
     async ({ source, destination, overwrite, create_parents }) => {
       try {
         requirePermission('filesystemWrite', 'Filesystem write tools');
+        requirePermission('filesystemDestructive', 'Filesystem delete/move tools');
         const src = await assertExistingPath(source);
         const dst = await assertPathAllowed(destination);
         const result = await safeMove(src, dst, overwrite, create_parents);

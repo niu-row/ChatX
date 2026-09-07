@@ -6,6 +6,7 @@ import { config } from './config.js';
 import {
   SETTINGS_VERSION,
   getRuntimeSettings,
+  permissionMetadata,
   saveTunnelId,
   settingsFilePath,
   updateRuntimeSettings,
@@ -166,6 +167,7 @@ export class TunnelDashboard {
         shellEnabled: runtime.permissions.shell,
         permissionPreset: runtime.permissionPreset,
         permissions: runtime.permissions,
+        permissionMetadata,
       },
       connection: {
         tunnelId: runtime.connection.tunnelId,

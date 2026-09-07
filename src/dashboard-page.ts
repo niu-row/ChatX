@@ -62,26 +62,16 @@ export const DASHBOARD_HTML = String.raw`<!doctype html>
 const $ = (id) => document.getElementById(id);
 let state = null;
 let busy = false;
-const permissionMeta = [
-  ['filesystemRead','读取文件','目录列表、读取、搜索和元数据'],
-  ['filesystemWrite','修改文件','写入、编辑、复制、移动和删除'],
-  ['gitRead','Git 读取','status、diff、log'],
-  ['gitWrite','Git 写入','受约束的 stage、unstage、branch、commit'],
-  ['gitAdvanced','高级 Git','任意 git 参数；等同 Shell，需同时开启 Shell'],
-  ['shell','Shell 命令','高权限；不受允许目录边界约束'],
-  ['fullAccess','完整文件系统访问','绕过允许目录边界']
-];
-
 function showError(message){$('error').hidden=!message;$('error').textContent=message||''}
-function renderPermissionRows(permissions){
+function renderPermissionRows(permissions,metadata){
   const host=$('permissionList');host.innerHTML='';
-  permissionMeta.forEach(function(meta){
+  (metadata||[]).forEach(function(meta){
     const row=document.createElement('label');row.className='perm';
-    const copy=document.createElement('span');const strong=document.createElement('strong');strong.textContent=meta[1];const small=document.createElement('small');small.textContent=meta[2];copy.append(strong,small);
-    const input=document.createElement('input');input.type='checkbox';input.checked=Boolean(permissions[meta[0]]);input.disabled=busy;input.dataset.permission=meta[0];
+    const copy=document.createElement('span');const strong=document.createElement('strong');strong.textContent=meta.title;const small=document.createElement('small');small.textContent=meta.description;copy.append(strong,small);
+    const input=document.createElement('input');input.type='checkbox';input.checked=Boolean(permissions[meta.key]);input.disabled=busy;input.dataset.permission=meta.key;
     input.addEventListener('change',async function(){
-      if((meta[0]==='fullAccess'||meta[0]==='gitAdvanced'||meta[0]==='shell')&&input.checked&&!confirm('这是高权限选项。确定启用？')){input.checked=false;return}
-      await updateSettings({[meta[0]]:input.checked});
+      if(meta.highRisk&&input.checked&&!confirm('这是高权限选项。确定启用？')){input.checked=false;return}
+      await updateSettings({[meta.key]:input.checked});
     });
     row.append(copy,input);host.append(row);
   });
@@ -94,7 +84,7 @@ function render(payload){
   $('keyFact').textContent=s.connection.runtimeKeySaved?'DPAPI 已保存':(s.connection.runtimeKeySupported?'未保存':'不支持持久化');
   $('rootsFact').textContent=s.policy.fullAccess?'全部路径':String(s.policy.roots.length)+' 个目录';
   $('rootsFact').title=s.policy.roots.join('; ');$('settingsVersion').textContent=String(s.settings.version);
-  $('preset').value=s.policy.permissionPreset;$('roots').value=s.policy.roots.join('\n');renderPermissionRows(s.policy.permissions||{});
+  $('preset').value=s.policy.permissionPreset;$('roots').value=s.policy.roots.join('\n');renderPermissionRows(s.policy.permissions||{},s.policy.permissionMetadata||[]);
   if(s.connection.tunnelId)$('tunnelId').value=s.connection.tunnelId;
   $('settingsFile').textContent='设置文件：'+s.connection.settingsFile;
   $('rememberKey').disabled=!s.connection.runtimeKeySupported||busy;$('clearKey').disabled=!s.connection.runtimeKeySaved||busy;

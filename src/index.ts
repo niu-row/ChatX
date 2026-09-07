@@ -1,5 +1,5 @@
 import { createServer } from 'node:http';
-import { timingSafeEqual } from 'node:crypto';
+import { createHmac, timingSafeEqual } from 'node:crypto';
 import { spawn } from 'node:child_process';
 import { createMcpHandler } from '@modelcontextprotocol/server';
 import { serveStdio } from '@modelcontextprotocol/server/stdio';
@@ -14,6 +14,20 @@ function tokenMatches(header: string | undefined): boolean {
   const supplied = Buffer.from(header.slice('Bearer '.length), 'utf8');
   const expected = Buffer.from(config.authToken, 'utf8');
   return supplied.length === expected.length && timingSafeEqual(supplied, expected);
+}
+
+const desktopSessionSecret = process.env.CHATX_DESKTOP_SESSION_SECRET?.trim() || null;
+
+function secretMatches(value: string | undefined): boolean {
+  if (!desktopSessionSecret || !value) return false;
+  const supplied = Buffer.from(value, 'utf8');
+  const expected = Buffer.from(desktopSessionSecret, 'utf8');
+  return supplied.length === expected.length && timingSafeEqual(supplied, expected);
+}
+
+function desktopProof(challenge: string | undefined): string | null {
+  if (!desktopSessionSecret || !challenge || challenge.length > 256) return null;
+  return createHmac('sha256', desktopSessionSecret).update(challenge, 'utf8').digest('hex');
 }
 
 function isLoopbackHost(host: string): boolean {
@@ -45,6 +59,8 @@ if (process.argv.includes('--stdio')) {
     const url = new URL(req.url ?? '/', `http://${req.headers.host ?? 'localhost'}`);
 
     if (url.pathname === '/healthz' || url.pathname === '/readyz') {
+      const challengeHeader = req.headers['x-chatx-desktop-challenge'];
+      const challenge = Array.isArray(challengeHeader) ? challengeHeader[0] : challengeHeader;
       res.writeHead(200, { 'content-type': 'application/json; charset=utf-8' });
       res.end(
         JSON.stringify({
@@ -52,6 +68,7 @@ if (process.argv.includes('--stdio')) {
           service: SERVER_NAME,
           version: SERVER_VERSION,
           mcp_endpoint: '/mcp',
+          desktop_proof: desktopProof(challenge),
         }),
       );
       return;
@@ -60,6 +77,15 @@ if (process.argv.includes('--stdio')) {
     if (isLoopbackHost(config.host)) {
       if (validateHost && !validateHost(req, res)) return;
       if (req.method === 'POST' && validateOrigin && !validateOrigin(req, res)) return;
+      if (desktopSessionSecret && url.pathname.startsWith('/api/')) {
+        const sessionHeader = req.headers['x-chatx-desktop-session'];
+        const session = Array.isArray(sessionHeader) ? sessionHeader[0] : sessionHeader;
+        if (!secretMatches(session)) {
+          res.writeHead(401, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' });
+          res.end(JSON.stringify({ error: 'desktop_session_unauthorized' }));
+          return;
+        }
+      }
       if (await dashboard.handle(req, res, url.pathname)) return;
     }
 

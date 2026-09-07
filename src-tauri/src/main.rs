@@ -14,13 +14,16 @@ use std::{
 #[cfg(windows)]
 use std::os::windows::process::CommandExt;
 
+use hmac::{Hmac, Mac};
 use serde_json::Value;
+use sha2::Sha256;
 use tauri::{
     menu::{Menu, MenuItem},
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
     Manager, State, WindowEvent,
 };
 use tauri_plugin_dialog::DialogExt;
+use uuid::Uuid;
 
 const BACKEND_BASE: &str = "http://127.0.0.1:3210";
 #[cfg(windows)]
@@ -36,13 +39,26 @@ const ALLOWED_API_PATHS: &[&str] = &[
     "/api/tunnel/key/clear",
 ];
 
-#[derive(Default)]
 struct BackendState {
     child: Mutex<Option<Child>>,
     log_path: Mutex<Option<PathBuf>>,
     quitting: AtomicBool,
     lifecycle: tokio::sync::Mutex<()>,
     recovery_attempted: AtomicBool,
+    session_secret: String,
+}
+
+impl Default for BackendState {
+    fn default() -> Self {
+        Self {
+            child: Mutex::new(None),
+            log_path: Mutex::new(None),
+            quitting: AtomicBool::new(false),
+            lifecycle: tokio::sync::Mutex::new(()),
+            recovery_attempted: AtomicBool::new(false),
+            session_secret: format!("{}{}", Uuid::new_v4().simple(), Uuid::new_v4().simple()),
+        }
+    }
 }
 
 fn project_root() -> Option<PathBuf> {
@@ -75,7 +91,17 @@ fn migrate_source_state(source_root: &Path, target: &Path) {
     }
 }
 
-async fn backend_is_healthy() -> bool {
+fn desktop_proof(secret: &str, challenge: &str) -> String {
+    let mut mac = Hmac::<Sha256>::new_from_slice(secret.as_bytes()).expect("HMAC accepts any key size");
+    mac.update(challenge.as_bytes());
+    mac.finalize()
+        .into_bytes()
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
+}
+
+async fn backend_is_healthy(session_secret: &str) -> bool {
     let client = match reqwest::Client::builder()
         .timeout(Duration::from_millis(900))
         .build()
@@ -83,15 +109,24 @@ async fn backend_is_healthy() -> bool {
         Ok(client) => client,
         Err(_) => return false,
     };
+    let challenge = Uuid::new_v4().simple().to_string();
+    let expected_proof = desktop_proof(session_secret, &challenge);
 
-    match client.get(format!("{BACKEND_BASE}/healthz")).send().await {
+    match client
+        .get(format!("{BACKEND_BASE}/healthz"))
+        .header("x-chatx-desktop-challenge", challenge)
+        .send()
+        .await
+    {
         Ok(response) if response.status().is_success() => response
             .json::<Value>()
             .await
             .ok()
-            .and_then(|body| body.get("service").and_then(Value::as_str).map(str::to_owned))
-            .as_deref()
-            == Some("chatx"),
+            .map(|body| {
+                body.get("service").and_then(Value::as_str) == Some("chatx")
+                    && body.get("desktop_proof").and_then(Value::as_str) == Some(expected_proof.as_str())
+            })
+            .unwrap_or(false),
         _ => false,
     }
 }
@@ -136,7 +171,7 @@ fn backend_log_tail(path: &Path) -> String {
     lines.join("\n")
 }
 
-fn spawn_backend(app: &tauri::AppHandle) -> Result<(Child, PathBuf), String> {
+fn spawn_backend(app: &tauri::AppHandle, session_secret: &str) -> Result<(Child, PathBuf), String> {
     let resource_dir = bundled_resource_dir(app);
     let use_bundle = resource_dir.is_some();
 
@@ -198,8 +233,10 @@ fn spawn_backend(app: &tauri::AppHandle) -> Result<(Child, PathBuf), String> {
     command
         .env_remove("CHATGPTX_HOST")
         .env_remove("CHATGPTX_PORT")
+        .env_remove("CHATX_DESKTOP_SESSION_SECRET")
         .env("CHATGPTX_HOST", "127.0.0.1")
-        .env("CHATGPTX_PORT", "3210");
+        .env("CHATGPTX_PORT", "3210")
+        .env("CHATX_DESKTOP_SESSION_SECRET", session_secret);
 
     if let Some(settings_dir) = settings_dir {
         command
@@ -226,7 +263,7 @@ fn spawn_backend(app: &tauri::AppHandle) -> Result<(Child, PathBuf), String> {
 }
 
 async fn ensure_backend_started(app: &tauri::AppHandle, state: &BackendState) -> Result<String, String> {
-    if backend_is_healthy().await {
+    if backend_is_healthy(&state.session_secret).await {
         return Ok("already-running".into());
     }
 
@@ -240,7 +277,7 @@ async fn ensure_backend_started(app: &tauri::AppHandle, state: &BackendState) ->
         };
 
         if !running {
-            let (child, log_path) = spawn_backend(app)?;
+            let (child, log_path) = spawn_backend(app, &state.session_secret)?;
             *state
                 .log_path
                 .lock()
@@ -251,7 +288,7 @@ async fn ensure_backend_started(app: &tauri::AppHandle, state: &BackendState) ->
     }
 
     for _ in 0..40 {
-        if backend_is_healthy().await {
+        if backend_is_healthy(&state.session_secret).await {
             return Ok(if spawned { "started" } else { "recovered" }.into());
         }
 
@@ -318,7 +355,7 @@ async fn clean_installed_runtime(app: &tauri::AppHandle) -> Result<(), String> {
             let quoted_directory = directory.to_string_lossy().replace('\'', "''");
             let output = Command::new("powershell.exe")
                 .args(["-NoLogo", "-NoProfile", "-NonInteractive", "-Command",
-                    &format!("& {{ {script} }} -InstallDir '{quoted_directory}'")])
+                    &format!("& {{ {script} }} -InstallDir '{quoted_directory}' -SkipDesktop")])
                 .creation_flags(CREATE_NO_WINDOW)
                 .output()
                 .map_err(|error| format!("无法清理残留进程：{error}"))?;
@@ -370,7 +407,7 @@ async fn ensure_backend(app: tauri::AppHandle, state: State<'_, BackendState>) -
     ensure_backend_impl(&app, &state).await
 }
 
-async fn send_backend_request(method: &str, path: &str, body: &Option<Value>) -> Result<Value, String> {
+async fn send_backend_request(method: &str, path: &str, body: &Option<Value>, session_secret: &str) -> Result<Value, String> {
     let client = reqwest::Client::builder()
         .timeout(Duration::from_secs(75))
         .build()
@@ -379,10 +416,15 @@ async fn send_backend_request(method: &str, path: &str, body: &Option<Value>) ->
     let empty = serde_json::json!({});
 
     let response = if method == "GET" {
-        client.get(url).send().await
+        client
+            .get(url)
+            .header("x-chatx-desktop-session", session_secret)
+            .send()
+            .await
     } else {
         client
             .post(url)
+            .header("x-chatx-desktop-session", session_secret)
             .header("content-type", "application/json")
             .header("origin", BACKEND_BASE)
             .header("sec-fetch-site", "same-origin")
@@ -428,15 +470,15 @@ async fn backend_request(
         return Err("只允许 GET 或 POST。".into());
     }
 
-    if !backend_is_healthy().await {
+    if !backend_is_healthy(&state.session_secret).await {
         ensure_backend_impl(&app, &state).await?;
     }
 
-    match send_backend_request(&method, &path, &body).await {
+    match send_backend_request(&method, &path, &body, &state.session_secret).await {
         Ok(value) => Ok(value),
-        Err(first_error) if !backend_is_healthy().await => {
+        Err(first_error) if !backend_is_healthy(&state.session_secret).await => {
             ensure_backend_impl(&app, &state).await?;
-            send_backend_request(&method, &path, &body)
+            send_backend_request(&method, &path, &body, &state.session_secret)
                 .await
                 .map_err(|second_error| format!("{first_error}\n后端自动恢复后重试仍失败：{second_error}"))
         }
@@ -500,6 +542,7 @@ fn stop_owned_backend(app: &tauri::AppHandle) {
         {
             let _ = client
                 .post(format!("{BACKEND_BASE}/api/tunnel/stop"))
+                .header("x-chatx-desktop-session", &state.session_secret)
                 .header("content-type", "application/json")
                 .header("origin", BACKEND_BASE)
                 .header("sec-fetch-site", "same-origin")

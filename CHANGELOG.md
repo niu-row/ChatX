@@ -2,7 +2,15 @@
 
 All notable changes to ChatX are documented in this file.
 
-## Unreleased
+## 0.2.1 - 2026-09-07
+
+- Authenticate the Tauri-owned local backend with a per-session HMAC challenge and require the session secret on desktop `/api/*` requests.
+- Split destructive filesystem operations (`fs_delete`, `fs_move`) from ordinary file writes; the developer preset keeps destructive access disabled by default.
+- Treat Advanced Git as Shell-equivalent and require Shell permission for `git_run` at both visibility and handler layers.
+- Lock bundled Node and tunnel-client versions plus SHA-256 hashes in `runtime-lock.json` and verify them before every desktop package build.
+- Add mandatory Authenticode signing support for distributable releases; `desktop:release` refuses to publish without a configured code-signing certificate and timestamp service.
+- Add version consistency checks across npm, Tauri, Cargo, and the MCP server.
+- Centralize permission labels/descriptions in the backend so desktop and browser consoles no longer maintain separate permission tables.
 
 - Validate restricted Git working-tree and metadata boundaries; reject path traversal/magic, disable external helpers, and isolate Git environment overrides.
 - Stage file moves with destination backup and rollback; reject self/ancestor moves and preserve data on copy/commit failures.

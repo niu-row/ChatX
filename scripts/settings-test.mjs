@@ -37,13 +37,14 @@ try {
   const credentials = await import(new URL('../dist/security/credential-store.js', import.meta.url));
 
   const migrated = settings.getRuntimeSettings();
-  assert.equal(migrated.version, 2);
+  assert.equal(migrated.version, 3);
+  assert.equal(migrated.permissions.filesystemDestructive, false);
   assert.equal(migrated.permissions.gitAdvanced, false);
   assert.equal(migrated.connection.tunnelId, 'tunnel_12345678');
   assert.deepEqual(migrated.filesystem.roots, [path.resolve(tempRoot)]);
 
   const persisted = JSON.parse(await fs.readFile(path.join(settingsDir, 'settings.json'), 'utf8'));
-  assert.equal(persisted.version, 2);
+  assert.equal(persisted.version, 3);
   assert.ok(Array.isArray(persisted.filesystem?.roots));
   assert.ok('permissionPreset' in persisted);
 
@@ -62,12 +63,14 @@ try {
   current = settings.getRuntimeSettings();
   assert.equal(current.permissionPreset, 'developer');
   assert.equal(current.permissions.gitWrite, true);
+  assert.equal(current.permissions.filesystemDestructive, false);
   assert.equal(current.permissions.gitAdvanced, false);
 
   settings.applyPermissionPreset('unrestricted');
   current = settings.getRuntimeSettings();
   assert.equal(current.permissionPreset, 'unrestricted');
   assert.equal(current.permissions.gitAdvanced, true);
+  assert.equal(current.permissions.filesystemDestructive, true);
   assert.equal(current.permissions.fullAccess, true);
 
   settings.updatePermissions({ shell: false });
