@@ -1,3 +1,4 @@
+import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 
@@ -16,10 +17,13 @@ for (const name of required) {
   if (!fs.existsSync(file)) throw new Error(`missing prepared runtime resource: ${file}`);
 }
 
+function sha256(file) {
+  return crypto.createHash('sha256').update(fs.readFileSync(file)).digest('hex');
+}
+
 const dcPackage = path.join(resourceDir, 'desktop-commander', 'node_modules', '@wonderwhy-er', 'desktop-commander', 'package.json');
 const dcEntry = path.join(resourceDir, 'desktop-commander', 'node_modules', '@wonderwhy-er', 'desktop-commander', 'dist', 'index.js');
-const ripgrep = path.join(resourceDir, 'desktop-commander', 'node_modules', '@vscode', 'ripgrep', 'bin', 'rg.exe');
-for (const file of [dcPackage, dcEntry, ripgrep]) {
+for (const file of [dcPackage, dcEntry]) {
   if (!fs.existsSync(file)) throw new Error(`Desktop Commander runtime resource missing: ${file}`);
 }
 
@@ -32,7 +36,19 @@ if (manifest.desktopCommander?.version !== installed.version) throw new Error('r
 if (!manifest.desktopCommander?.entry?.endsWith('/dist/index.js')) throw new Error('runtime manifest Desktop Commander entry is invalid.');
 if (manifest.desktopCommander?.launcher !== 'desktop-commander-launcher.mjs') throw new Error('runtime manifest launcher is invalid.');
 if (manifest.desktopCommander?.telemetryDisabledByEnv !== true) throw new Error('Desktop Commander telemetry kill-switch must be enabled by the ChatX launcher.');
-if (!manifest.desktopCommander?.ripgrep?.endsWith('/rg.exe')) throw new Error('runtime manifest ripgrep path is invalid.');
-if (!/^[0-9a-f]{64}$/i.test(manifest.desktopCommander?.ripgrepSha256 || '')) throw new Error('runtime manifest must record ripgrep SHA-256.');
+
+const ripgrepRelative = manifest.desktopCommander?.ripgrep;
+if (typeof ripgrepRelative !== 'string' || !ripgrepRelative.endsWith('/rg.exe')) {
+  throw new Error('runtime manifest ripgrep path is invalid.');
+}
+const ripgrep = path.resolve(resourceDir, ...ripgrepRelative.split('/'));
+const relativeCheck = path.relative(resourceDir, ripgrep);
+if (!relativeCheck || relativeCheck === '..' || relativeCheck.startsWith(`..${path.sep}`)) {
+  throw new Error(`runtime manifest ripgrep path escapes resources: ${ripgrepRelative}`);
+}
+if (!fs.existsSync(ripgrep)) throw new Error(`Desktop Commander ripgrep binary is missing: ${ripgrep}`);
+const expectedRipgrepHash = manifest.desktopCommander?.ripgrepSha256 || '';
+if (!/^[0-9a-f]{64}$/i.test(expectedRipgrepHash)) throw new Error('runtime manifest must record ripgrep SHA-256.');
+if (sha256(ripgrep) !== expectedRipgrepHash) throw new Error('bundled ripgrep SHA-256 does not match runtime manifest.');
 
 console.log(`installer runtime checks passed: Desktop Commander ${installed.version} + bundled ripgrep`);

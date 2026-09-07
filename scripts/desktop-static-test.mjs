@@ -43,13 +43,16 @@ requireText('prepare-desktop-bundle.mjs', prepare, '@wonderwhy-er/desktop-comman
 requireText('prepare-desktop-bundle.mjs', prepare, '--ignore-scripts');
 requireText('prepare-desktop-bundle.mjs', prepare, 'Desktop Commander ripgrep rebuild');
 requireText('prepare-desktop-bundle.mjs', prepare, "'@vscode/ripgrep'");
-requireText('prepare-desktop-bundle.mjs', prepare, "'rg.exe'");
+requireText('prepare-desktop-bundle.mjs', prepare, 'createRequire');
+requireText('prepare-desktop-bundle.mjs', prepare, 'rgPath');
+requireText('prepare-desktop-bundle.mjs', prepare, 'ripgrepRelative');
 requireText('prepare-desktop-bundle.mjs', prepare, 'desktop-commander-launcher.mjs');
 requireText('prepare-desktop-bundle.mjs', prepare, 'DesktopCommander-LICENSE.txt');
 requireText('prepare-desktop-bundle.mjs', prepare, 'npm_execpath');
 requireText('prepare-desktop-bundle.mjs', prepare, 'runNpm');
 rejectText('prepare-desktop-bundle.mjs', prepare, "run('Desktop Commander install', 'npm.cmd'");
 rejectText('prepare-desktop-bundle.mjs', prepare, "run('Desktop Commander ripgrep rebuild', 'npm.cmd'");
+rejectText('prepare-desktop-bundle.mjs', prepare, "desktop-commander/node_modules/@vscode/ripgrep/bin/rg.exe");
 
 requireText('desktop-commander-launcher.mjs', launcher, 'DESKTOP_COMMANDER_DISABLE_TELEMETRY');
 requireText('desktop-commander-launcher.mjs', launcher, 'USERPROFILE');

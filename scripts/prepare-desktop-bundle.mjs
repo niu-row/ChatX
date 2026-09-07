@@ -3,6 +3,8 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
+import { createRequire } from 'node:module';
+import { pathToFileURL } from 'node:url';
 
 const root = process.cwd();
 const resourceDir = path.join(root, 'src-tauri', 'resources');
@@ -61,6 +63,25 @@ function runNpm(label, args, options = {}) {
   // direct .cmd execution via spawnSync. Running npm-cli.js with the current
   // node executable also avoids cmd.exe quoting issues for paths with spaces.
   return run(label, process.execPath, [npmCli, ...args], options);
+}
+
+async function resolveRipgrepBinary(dcRoot) {
+  // @vscode/ripgrep changed packaging in 1.18: older releases downloaded to
+  // @vscode/ripgrep/bin/rg.exe, while newer releases expose a binary from a
+  // platform-specific optional package. Use the package's public rgPath export
+  // instead of assuming either internal layout.
+  const requireFromDc = createRequire(path.join(dcRoot, 'package.json'));
+  const entry = requireFromDc.resolve('@vscode/ripgrep');
+  const module = await import(pathToFileURL(entry).href);
+  const rgPath = module.rgPath ?? module.default?.rgPath;
+  if (typeof rgPath !== 'string' || !rgPath.trim()) {
+    throw new Error(`@vscode/ripgrep did not expose rgPath from ${entry}`);
+  }
+  const resolved = path.resolve(rgPath);
+  if (!fs.existsSync(resolved)) {
+    throw new Error(`@vscode/ripgrep resolved rgPath but the binary is missing: ${resolved}`);
+  }
+  return resolved;
 }
 
 requireLocked('Node version', process.version, runtimeLock.node.version);
@@ -136,9 +157,9 @@ runNpm('Desktop Commander install', [
   packageSpec,
 ]);
 
-// Desktop Commander requires ripgrep for start_search. Its own Docker build also
-// installs dependencies with scripts disabled and then explicitly rebuilds only
-// @vscode/ripgrep, avoiding unrelated package lifecycle scripts.
+// Desktop Commander 0.2.48 allows @vscode/ripgrep ^1.15.9. Rebuild supports
+// the legacy package that downloads rg in postinstall; newer 1.18+ packages
+// have no postinstall and resolve rg from a platform-specific optional package.
 runNpm('Desktop Commander ripgrep rebuild', [
   'rebuild',
   '--prefix', dcRoot,
@@ -150,13 +171,15 @@ runNpm('Desktop Commander ripgrep rebuild', [
 const dcPackageRoot = path.join(dcRoot, 'node_modules', '@wonderwhy-er', 'desktop-commander');
 const dcPackagePath = path.join(dcPackageRoot, 'package.json');
 const dcEntry = path.join(dcPackageRoot, 'dist', 'index.js');
-const ripgrep = path.join(dcRoot, 'node_modules', '@vscode', 'ripgrep', 'bin', 'rg.exe');
 if (!fs.existsSync(dcPackagePath) || !fs.existsSync(dcEntry)) {
   throw new Error('Desktop Commander package is incomplete after npm install.');
 }
-if (!fs.existsSync(ripgrep)) {
-  throw new Error(`Desktop Commander ripgrep binary is missing after npm rebuild: ${ripgrep}`);
+const ripgrep = await resolveRipgrepBinary(dcRoot);
+const ripgrepRelative = path.relative(resourceDir, ripgrep).split(path.sep).join('/');
+if (!ripgrepRelative || ripgrepRelative === '..' || ripgrepRelative.startsWith('../')) {
+  throw new Error(`Resolved ripgrep binary is outside the bundled resource directory: ${ripgrep}`);
 }
+
 const dcPackage = JSON.parse(fs.readFileSync(dcPackagePath, 'utf8'));
 requireLocked('Desktop Commander version', dcPackage.version, runtimeLock.desktopCommander.version);
 const dcLicense = path.join(dcPackageRoot, 'LICENSE');
@@ -180,7 +203,7 @@ const manifest = {
     entry: 'desktop-commander/node_modules/@wonderwhy-er/desktop-commander/dist/index.js',
     launcher: 'desktop-commander-launcher.mjs',
     telemetryDisabledByEnv: true,
-    ripgrep: 'desktop-commander/node_modules/@vscode/ripgrep/bin/rg.exe',
+    ripgrep: ripgrepRelative,
     ripgrepSha256: sha256(ripgrep),
     installLockSha256: fs.existsSync(dcInstallLock) ? sha256(dcInstallLock) : null,
     license: 'DesktopCommander-LICENSE.txt',
