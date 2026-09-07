@@ -7,8 +7,8 @@ if (process.platform !== 'win32') {
 }
 
 const args = new Set(process.argv.slice(2));
-const requireSigning = args.has('--require-signing') || process.env.CHATX_REQUIRE_SIGNING === '1';
 const publish = args.has('--publish');
+const requireSigning = publish || args.has('--require-signing') || process.env.CHATX_REQUIRE_SIGNING === '1';
 const certificateThumbprint = process.env.CHATX_WINDOWS_CERT_THUMBPRINT?.replace(/\s+/g, '') || '';
 const timestampUrl = process.env.CHATX_WINDOWS_TIMESTAMP_URL?.trim() || '';
 const tauriCli = path.resolve('node_modules', '@tauri-apps', 'cli', 'tauri.js');
@@ -17,7 +17,11 @@ const retryableLock = /(?:os error 32|another program is using this file|being u
 const signingConfig = path.resolve('src-tauri', '.chatx-signing.conf.json');
 
 if (requireSigning && !certificateThumbprint) {
-  throw new Error('Signed release requires CHATX_WINDOWS_CERT_THUMBPRINT. Import the Authenticode certificate first.');
+  throw new Error(
+    publish
+      ? 'Publishing a ChatX release requires CHATX_WINDOWS_CERT_THUMBPRINT. Import the Authenticode certificate first.'
+      : 'Signed release requires CHATX_WINDOWS_CERT_THUMBPRINT. Import the Authenticode certificate first.',
+  );
 }
 if (certificateThumbprint && !timestampUrl) {
   throw new Error('CHATX_WINDOWS_TIMESTAMP_URL is required when Authenticode signing is enabled.');
@@ -91,7 +95,7 @@ try {
   const installer = path.resolve('src-tauri', 'target', 'release', 'bundle', 'nsis', `ChatX_${pkg.version}_x64-setup.exe`);
   if (!fs.existsSync(installer)) throw new Error(`Expected NSIS installer was not created: ${installer}`);
 
-  if (certificateThumbprint || requireSigning) {
+  if (requireSigning) {
     const appSigner = verifyAuthenticode(appExe);
     const installerSigner = verifyAuthenticode(installer);
     console.log(`[chatx] Authenticode valid: app=${appSigner}, installer=${installerSigner}`);
@@ -107,10 +111,7 @@ try {
       if (/^ChatX-Setup-.*\.exe$/i.test(entry)) fs.rmSync(path.join(releaseDir, entry), { force: true });
     }
     fs.copyFileSync(installer, destination);
-    console.log(`[chatx] published ${certificateThumbprint ? 'signed' : 'unsigned'} installer: ${destination}`);
-    if (!certificateThumbprint) {
-      console.warn('[chatx] release is unsigned; this is intentional, but Windows may warn users before installation.');
-    }
+    console.log(`[chatx] published signed installer: ${destination}`);
   }
 } finally {
   fs.rmSync(signingConfig, { force: true });
