@@ -17,9 +17,14 @@ const temp = fs.mkdtempSync(path.join(os.tmpdir(), 'chatx-dc-smoke-'));
 const home = path.join(temp, 'dc-home');
 const sample = path.join(temp, 'sample.txt');
 const client = new Client({ name: 'chatx-bridge-smoke', version: '0.3.0' });
+const transportEnv = Object.fromEntries(
+  Object.entries(process.env).filter(([, value]) => typeof value === 'string'),
+);
+transportEnv.CHATX_TUNNEL_RUNTIME_KEY = 'chatx-secret-smoke';
 const transport = new StdioClientTransport({
   command: node,
   args: [launcher, home, entry, '--no-onboarding'],
+  env: transportEnv,
 });
 
 function textOf(result) {
@@ -42,6 +47,15 @@ try {
   for (const name of ['list_directory', 'read_file', 'write_file', 'start_search', 'get_more_search_results', 'start_process']) {
     assert.ok(names.has(name), `Desktop Commander tool missing: ${name}`);
   }
+
+  const escapedNode = `"${node.replace(/"/g, '\\"')}"`;
+  const secretProbe = await call('start_process', {
+    command: `${escapedNode} -e "console.log(process.env.CHATX_TUNNEL_RUNTIME_KEY || 'CHATX_KEY_STRIPPED')"`,
+    timeout_ms: 5000,
+  });
+  const secretProbeText = textOf(secretProbe);
+  assert.match(secretProbeText, /CHATX_KEY_STRIPPED/, 'Desktop Commander child process did not confirm Runtime Key stripping');
+  assert.doesNotMatch(secretProbeText, /chatx-secret-smoke/, 'Runtime API Key leaked into a Desktop Commander child process');
 
   await call('write_file', { path: sample, content: 'chatx-ripgrep-smoke\n' });
   const read = await call('read_file', { path: sample, offset: 0, length: 20 });
@@ -68,7 +82,7 @@ try {
   }
   assert.ok(found, 'Desktop Commander start_search completed without finding the smoke fixture; verify bundled ripgrep.');
 
-  console.log(`bridge smoke passed: ${listed.tools?.length ?? 0} Desktop Commander tools exposed`);
+  console.log(`bridge smoke passed: ${listed.tools?.length ?? 0} Desktop Commander tools exposed; Runtime Key isolated`);
 } finally {
   try { await client.close(); } catch {}
   fs.rmSync(temp, { recursive: true, force: true });
