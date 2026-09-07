@@ -11,10 +11,15 @@
 - Runtime API Keys remain compatible with the existing Windows DPAPI CurrentUser store.
 - Migrates the legacy `connection.tunnelId` setting from ChatX 0.2.1.
 - Treats tunnel-client `runtime_state=ready` and structured `ready/healthy` fields as an active connection.
+- Tunnel status failures and malformed JSON responses are now surfaced as runtime errors instead of being reported as stopped/unknown.
+- Reconnect now propagates unexpected failures when stopping an existing `chatx-local` runtime.
+- Status polling reads the bundled tunnel-client version from `runtime-manifest.json`; direct `--version` execution remains part of explicit diagnostics.
 - Bundles and verifies Desktop Commander's required Windows ripgrep binary.
 - Runs bundled Desktop Commander through an isolated ChatX HOME/USERPROFILE and disables its telemetry with the upstream environment kill-switch.
-- Added a real local stdio MCP bridge smoke test covering tool discovery, write/read, and content search.
+- Removes `CHATX_TUNNEL_RUNTIME_KEY` from the Desktop Commander launcher environment before loading the MCP server so Desktop Commander child processes do not inherit the Tunnel credential.
+- Added a real local stdio MCP bridge smoke test covering tool discovery, Runtime Key isolation, process execution, write/read, and content search.
 - Desktop packaging records the generated Desktop Commander dependency-lock hash and ripgrep SHA-256 in `runtime-manifest.json`.
+- `desktop:release` now requires a valid Authenticode certificate configuration and refuses to publish an unsigned installer; local `desktop:installer` builds may remain unsigned for development.
 
 ### Removed
 
