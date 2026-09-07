@@ -16,19 +16,17 @@ $ErrorActionPreference = 'Stop'
 function Get-OwnedRuntimeProcesses {
     param([string[]] $ExecutablePaths)
 
-    $names = @($ExecutablePaths | ForEach-Object { [IO.Path]::GetFileNameWithoutExtension($_) } | Select-Object -Unique)
+    # NSIS is a 32-bit process, so $SYSDIR\WindowsPowerShell may launch 32-bit
+    # PowerShell even on x64 Windows. System.Diagnostics.Process.Path is null for
+    # 64-bit targets in that environment. Win32_Process.ExecutablePath works
+    # cross-bitness, so use CIM for identity and Get-Process only for termination.
+    $names = @($ExecutablePaths | ForEach-Object { [IO.Path]::GetFileName($_) } | Select-Object -Unique)
+    $filter = ($names | ForEach-Object { "Name = '$($_.Replace("'", "''"))'" }) -join ' OR '
     $owned = @()
-    foreach ($process in @(Get-Process -Name $names -ErrorAction SilentlyContinue)) {
-        try {
-            $processPath = $process.Path
-        } catch {
-            $process.Dispose()
-            continue
-        }
-        if (-not $processPath) {
-            $process.Dispose()
-            continue
-        }
+    foreach ($candidate in @(Get-CimInstance -ClassName Win32_Process -Filter $filter -ErrorAction Stop)) {
+        $processPath = [string] $candidate.ExecutablePath
+        if (-not $processPath) { continue }
+
         $matched = $false
         foreach ($target in $ExecutablePaths) {
             if ([string]::Equals($processPath, $target, [StringComparison]::OrdinalIgnoreCase)) {
@@ -36,10 +34,15 @@ function Get-OwnedRuntimeProcesses {
                 break
             }
         }
-        if ($matched) {
+        if (-not $matched) { continue }
+
+        try {
+            $process = Get-Process -Id ([int] $candidate.ProcessId) -ErrorAction Stop
+            $process | Add-Member -NotePropertyName ChatXPath -NotePropertyValue $processPath -Force
             $owned += $process
-        } else {
-            $process.Dispose()
+        } catch {
+            # The process may have exited between the CIM query and Get-Process.
+            continue
         }
     }
     return $owned
@@ -70,14 +73,14 @@ try {
         # Stop the desktop first so it cannot restart Node/tunnel-client while
         # the installer is trying to replace their binaries.
         $running = @(Get-OwnedRuntimeProcesses -ExecutablePaths $processTargets | Sort-Object @{ Expression = {
-            if ([string]::Equals($_.Path, $desktopTarget, [StringComparison]::OrdinalIgnoreCase)) { 0 } else { 1 }
+            if ([string]::Equals($_.ChatXPath, $desktopTarget, [StringComparison]::OrdinalIgnoreCase)) { 0 } else { 1 }
         }})
         foreach ($process in $running) {
             try {
                 $null = $process.Handle
                 if (-not $process.HasExited) { $process.Kill() }
                 if (-not $process.WaitForExit(5000)) {
-                    throw "Process did not exit: $($process.Id) ($($process.Path))"
+                    throw "Process did not exit: $($process.Id) ($($process.ChatXPath))"
                 }
             } catch {
                 if (-not $process.HasExited) { throw }
@@ -117,7 +120,7 @@ try {
     } while ([DateTime]::UtcNow -lt $deadline)
 
     $remaining = @(Get-OwnedRuntimeProcesses -ExecutablePaths $processTargets)
-    $processSummary = @($remaining | ForEach-Object { "$($_.Id):$($_.Path)" })
+    $processSummary = @($remaining | ForEach-Object { "$($_.Id):$($_.ChatXPath)" })
     foreach ($process in $remaining) { $process.Dispose() }
     $details = @()
     if ($locked.Count -gt 0) { $details += "locked files: $($locked -join ', ')" }

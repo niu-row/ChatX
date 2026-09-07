@@ -32,6 +32,8 @@ assert.ok(installerHooks.indexOf('nsExec::ExecToLog') < installerHooks.indexOf('
 assert.match(stopRuntime, /chatx-desktop\.exe/);
 assert.match(stopRuntime, /chatgptx-backend\.mjs/);
 assert.match(stopRuntime, /FileShare\]::None/);
+assert.match(stopRuntime, /Get-CimInstance/);
+assert.match(stopRuntime, /ChatXPath/);
 assert.match(rust, /async fn restart_backend/);
 assert.match(rust, /restart_backend,/);
 assert.match(html, /id="restartBackend"/);

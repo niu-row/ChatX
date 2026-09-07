@@ -14,8 +14,10 @@ const installed = path.join(temp, 'installed');
 const unrelated = path.join(temp, 'unrelated');
 const children = [];
 const script = path.resolve('src-tauri/windows/stop-runtime.ps1');
+const powershell32 = path.join(process.env.WINDIR ?? 'C:\\Windows', 'SysWOW64', 'WindowsPowerShell', 'v1.0', 'powershell.exe');
+const installerPowerShell = await fs.access(powershell32).then(() => powershell32, () => 'powershell.exe');
 function cleanupRuntime(directory, timeoutSeconds = 20) {
-  return spawnSync('powershell.exe', ['-NoLogo', '-NoProfile', '-NonInteractive',
+  return spawnSync(installerPowerShell, ['-NoLogo', '-NoProfile', '-NonInteractive',
     '-ExecutionPolicy', 'Bypass', '-File', script, '-InstallDir', directory,
     '-TimeoutSeconds', String(timeoutSeconds)],
     { encoding: 'utf8', windowsHide: true, timeout: Math.max(10000, (timeoutSeconds + 8) * 1000) });
