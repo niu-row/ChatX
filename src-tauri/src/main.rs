@@ -1,629 +1,378 @@
 #![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
 
+use serde::{Deserialize, Serialize};
+use serde_json::{json, Value};
 use std::{
     fs,
     path::{Path, PathBuf},
-    process::{Child, Command, Stdio},
-    sync::{
-        atomic::{AtomicBool, Ordering},
-        Mutex,
-    },
-    time::Duration,
+    process::{Command, Output, Stdio},
+    sync::{atomic::{AtomicBool, Ordering}, Mutex},
+    time::{SystemTime, UNIX_EPOCH},
 };
-
-#[cfg(windows)]
-use std::os::windows::process::CommandExt;
-
-use hmac::{Hmac, Mac};
-use serde_json::Value;
-use sha2::Sha256;
 use tauri::{
     menu::{Menu, MenuItem},
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
     Manager, State, WindowEvent,
 };
-use tauri_plugin_dialog::DialogExt;
-use uuid::Uuid;
 
-const BACKEND_BASE: &str = "http://127.0.0.1:3210";
+#[cfg(windows)]
+use std::os::windows::process::CommandExt;
 #[cfg(windows)]
 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-const ALLOWED_API_PATHS: &[&str] = &[
-    "/healthz",
-    "/api/tunnel/status",
-    "/api/diagnostics",
-    "/api/invocations",
-    "/api/settings",
-    "/api/tunnel/connect",
-    "/api/tunnel/stop",
-    "/api/tunnel/key/clear",
-];
 
-struct BackendState {
-    child: Mutex<Option<Child>>,
-    log_path: Mutex<Option<PathBuf>>,
+const RUNTIME_ALIAS: &str = "chatx-local";
+const APP_VERSION: &str = env!("CARGO_PKG_VERSION");
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct Settings {
+    tunnel_id: String,
+    remember_key: bool,
+}
+
+#[derive(Default)]
+struct AppState {
+    logs: Mutex<Vec<String>>,
     quitting: AtomicBool,
-    lifecycle: tokio::sync::Mutex<()>,
-    recovery_attempted: AtomicBool,
-    session_secret: String,
 }
 
-impl Default for BackendState {
-    fn default() -> Self {
-        Self {
-            child: Mutex::new(None),
-            log_path: Mutex::new(None),
-            quitting: AtomicBool::new(false),
-            lifecycle: tokio::sync::Mutex::new(()),
-            recovery_attempted: AtomicBool::new(false),
-            session_secret: format!("{}{}", Uuid::new_v4().simple(), Uuid::new_v4().simple()),
+#[derive(Clone)]
+struct RuntimePaths {
+    root: PathBuf,
+    tunnel: PathBuf,
+    node: PathBuf,
+    desktop_commander: PathBuf,
+}
+
+fn timestamp() -> u64 {
+    SystemTime::now().duration_since(UNIX_EPOCH).map(|v| v.as_secs()).unwrap_or(0)
+}
+
+fn push_log(state: &AppState, message: impl Into<String>) {
+    let Ok(mut logs) = state.logs.lock() else { return; };
+    logs.push(format!("[{}] {}", timestamp(), message.into()));
+    if logs.len() > 300 {
+        let drain = logs.len() - 300;
+        logs.drain(0..drain);
+    }
+}
+
+fn state_dir(app: &tauri::AppHandle) -> Result<PathBuf, String> {
+    let dir = app.path().app_local_data_dir()
+        .map_err(|e| format!("无法定位 ChatX 数据目录：{e}"))?.join("state");
+    fs::create_dir_all(&dir).map_err(|e| format!("无法创建 ChatX 数据目录：{e}"))?;
+    Ok(dir)
+}
+
+fn settings_path(app: &tauri::AppHandle) -> Result<PathBuf, String> { Ok(state_dir(app)?.join("settings.json")) }
+fn secret_path(app: &tauri::AppHandle) -> Result<PathBuf, String> { Ok(state_dir(app)?.join("runtime-key.dpapi")) }
+
+fn load_settings(app: &tauri::AppHandle) -> Settings {
+    let Ok(path) = settings_path(app) else { return Settings::default(); };
+    let Ok(text) = fs::read_to_string(path) else { return Settings::default(); };
+    serde_json::from_str(&text).unwrap_or_default()
+}
+
+fn save_settings(app: &tauri::AppHandle, settings: &Settings) -> Result<(), String> {
+    let path = settings_path(app)?;
+    let temp = path.with_extension("json.tmp");
+    let text = serde_json::to_string_pretty(settings).map_err(|e| e.to_string())?;
+    fs::write(&temp, format!("{text}\n")).map_err(|e| format!("保存设置失败：{e}"))?;
+    fs::rename(&temp, &path).map_err(|e| format!("更新设置失败：{e}"))
+}
+
+fn resource_candidates(app: &tauri::AppHandle) -> Vec<PathBuf> {
+    let mut result = Vec::new();
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(parent) = exe.parent() { result.push(parent.to_path_buf()); }
+    }
+    if let Ok(resource_dir) = app.path().resource_dir() {
+        if !result.iter().any(|item| item == &resource_dir) { result.push(resource_dir); }
+    }
+    if let Ok(root) = std::env::var("CHATX_RESOURCE_DIR") { result.insert(0, PathBuf::from(root)); }
+    result
+}
+
+fn runtime_paths(app: &tauri::AppHandle) -> Result<RuntimePaths, String> {
+    for root in resource_candidates(app) {
+        let tunnel = root.join("tunnel-client.exe");
+        let node = root.join("node.exe");
+        let desktop_commander = root.join("desktop-commander").join("node_modules")
+            .join("@wonderwhy-er").join("desktop-commander").join("dist").join("index.js");
+        if tunnel.is_file() && node.is_file() && desktop_commander.is_file() {
+            return Ok(RuntimePaths { root, tunnel, node, desktop_commander });
         }
     }
+    Err("未找到完整运行组件。请重新安装 ChatX，或先运行 npm run desktop:prepare。".into())
 }
 
-fn project_root() -> Option<PathBuf> {
-    if let Ok(raw) = std::env::var("CHATGPTX_PROJECT_ROOT") {
-        let root = PathBuf::from(raw);
-        if root.join("package.json").is_file() {
-            return Some(root);
-        }
-    }
-
-    let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    manifest_dir
-        .parent()
-        .filter(|root| root.join("package.json").is_file())
-        .map(Path::to_path_buf)
-}
-
-fn migrate_source_state(source_root: &Path, target: &Path) {
-    let source = source_root.join(".chatgptx");
-    if !source.is_dir() {
-        return;
-    }
-    let _ = fs::create_dir_all(target);
-    for name in ["settings.json", "runtime-key.dpapi"] {
-        let from = source.join(name);
-        let to = target.join(name);
-        if from.is_file() && !to.exists() {
-            let _ = fs::copy(from, to);
-        }
-    }
-}
-
-fn desktop_proof(secret: &str, challenge: &str) -> String {
-    let mut mac = Hmac::<Sha256>::new_from_slice(secret.as_bytes()).expect("HMAC accepts any key size");
-    mac.update(challenge.as_bytes());
-    mac.finalize()
-        .into_bytes()
-        .iter()
-        .map(|byte| format!("{byte:02x}"))
-        .collect()
-}
-
-async fn backend_is_healthy(session_secret: &str) -> bool {
-    let client = match reqwest::Client::builder()
-        .timeout(Duration::from_millis(900))
-        .build()
-    {
-        Ok(client) => client,
-        Err(_) => return false,
-    };
-    let challenge = Uuid::new_v4().simple().to_string();
-    let expected_proof = desktop_proof(session_secret, &challenge);
-
-    match client
-        .get(format!("{BACKEND_BASE}/healthz"))
-        .header("x-chatx-desktop-challenge", challenge)
-        .send()
-        .await
-    {
-        Ok(response) if response.status().is_success() => response
-            .json::<Value>()
-            .await
-            .ok()
-            .map(|body| {
-                body.get("service").and_then(Value::as_str) == Some("chatx")
-                    && body.get("desktop_proof").and_then(Value::as_str) == Some(expected_proof.as_str())
-            })
-            .unwrap_or(false),
-        _ => false,
-    }
-}
-
-fn resolve_node() -> String {
-    std::env::var("CHATGPTX_NODE").unwrap_or_else(|_| {
-        if cfg!(windows) {
-            "node.exe".into()
-        } else {
-            "node".into()
-        }
-    })
-}
-
-fn bundled_resource_dir(app: &tauri::AppHandle) -> Option<PathBuf> {
-    let has_runtime = |dir: &Path| {
-        dir.join("chatgptx-backend.mjs").is_file() && dir.join("node.exe").is_file()
-    };
-
-    // Installed builds place bundled resources beside the desktop executable.
-    // Prefer that deterministic location before asking Tauri for its resource directory.
-    if let Ok(executable) = std::env::current_exe() {
-        if let Some(dir) = executable.parent() {
-            if has_runtime(dir) {
-                return Some(dir.to_path_buf());
-            }
-        }
-    }
-
-    app.path()
-        .resource_dir()
-        .ok()
-        .filter(|dir| has_runtime(dir))
-}
-
-fn backend_log_tail(path: &Path) -> String {
-    let Ok(text) = fs::read_to_string(path) else {
-        return String::new();
-    };
-    let mut lines = text.lines().rev().take(24).collect::<Vec<_>>();
-    lines.reverse();
-    lines.join("\n")
-}
-
-fn spawn_backend(app: &tauri::AppHandle, session_secret: &str) -> Result<(Child, PathBuf), String> {
-    let resource_dir = bundled_resource_dir(app);
-    let use_bundle = resource_dir.is_some();
-
-    let (node, entry, cwd, settings_dir, tunnel) = if let Some(resource_dir) = resource_dir {
-        let state_dir = app
-            .path()
-            .app_local_data_dir()
-            .map_err(|error| format!("无法定位 ChatX 本地数据目录：{error}"))?
-            .join("state");
-        fs::create_dir_all(&state_dir)
-            .map_err(|error| format!("无法创建 ChatX 本地数据目录：{error}"))?;
-        if let Some(root) = project_root() {
-            migrate_source_state(&root, &state_dir);
-        }
-        (
-            resource_dir.join("node.exe"),
-            resource_dir.join("chatgptx-backend.mjs"),
-            state_dir.clone(),
-            Some(state_dir),
-            Some(resource_dir.join("tunnel-client.exe")).filter(|path| path.is_file()),
-        )
-    } else {
-        let root = project_root().ok_or_else(|| {
-            "没有找到安装版后端资源，也无法定位源码目录。请重新安装 ChatX。".to_string()
-        })?;
-        let entry = root.join("dist").join("index.js");
-        if !entry.is_file() {
-            return Err("没有找到 dist/index.js。请先运行 npm run build。".into());
-        }
-        (PathBuf::from(resolve_node()), entry, root, None, None)
-    };
-
-    let log_dir = app
-        .path()
-        .app_local_data_dir()
-        .map_err(|error| format!("无法定位 ChatX 日志目录：{error}"))?;
-    fs::create_dir_all(&log_dir).map_err(|error| format!("无法创建 ChatX 日志目录：{error}"))?;
-    let log_path = log_dir.join("backend.log");
-    let log_file = fs::OpenOptions::new()
-        .create(true)
-        .write(true)
-        .truncate(true)
-        .open(&log_path)
-        .map_err(|error| format!("无法创建后端日志：{error}"))?;
-    let stderr_file = log_file
-        .try_clone()
-        .map_err(|error| format!("无法打开后端错误日志：{error}"))?;
-
-    let mut command = Command::new(node);
-    command
-        .arg(entry)
-        .current_dir(&cwd)
-        .stdin(Stdio::null())
-        .stdout(Stdio::from(log_file))
-        .stderr(Stdio::from(stderr_file));
-
-    // The desktop application owns its local endpoint. Do not inherit stale shell
-    // variables such as CHATGPTX_PORT from a terminal that launched the UI.
-    command
-        .env_remove("CHATGPTX_HOST")
-        .env_remove("CHATGPTX_PORT")
-        .env_remove("CHATX_DESKTOP_SESSION_SECRET")
-        .env("CHATGPTX_HOST", "127.0.0.1")
-        .env("CHATGPTX_PORT", "3210")
-        .env("CHATX_DESKTOP_SESSION_SECRET", session_secret);
-
-    if let Some(settings_dir) = settings_dir {
-        command
-            .env_remove("CHATGPTX_SETTINGS_DIR")
-            .env_remove("CHATGPTX_ROOTS")
-            .env("CHATGPTX_SETTINGS_DIR", &settings_dir)
-            .env("CHATGPTX_ROOTS", &settings_dir);
-    }
-    if let Some(tunnel) = tunnel {
-        command
-            .env_remove("TUNNEL_CLIENT_PATH")
-            .env("TUNNEL_CLIENT_PATH", tunnel);
-    } else if use_bundle {
-        command.env_remove("TUNNEL_CLIENT_PATH");
-    }
-
+fn command_output(command: &mut Command) -> Result<Output, String> {
+    command.stdin(Stdio::null());
     #[cfg(windows)]
     command.creation_flags(CREATE_NO_WINDOW);
-
-    let child = command
-        .spawn()
-        .map_err(|error| format!("启动 ChatX 后端失败：{error}"))?;
-    Ok((child, log_path))
+    command.output().map_err(|e| format!("启动进程失败：{e}"))
 }
 
-async fn ensure_backend_started(app: &tauri::AppHandle, state: &BackendState) -> Result<String, String> {
-    if backend_is_healthy(&state.session_secret).await {
-        return Ok("already-running".into());
-    }
+fn run_tunnel(paths: &RuntimePaths, args: &[String], runtime_key: Option<&str>) -> Result<Output, String> {
+    let mut command = Command::new(&paths.tunnel);
+    command.args(args);
+    if let Some(key) = runtime_key { command.env("CHATX_TUNNEL_RUNTIME_KEY", key); }
+    command_output(&mut command)
+}
 
-    let mut spawned = false;
-    {
-        let mut guard = state.child.lock().map_err(|_| "后端状态锁已损坏。".to_string())?;
-        let running = if let Some(child) = guard.as_mut() {
-            child.try_wait().map_err(|error| error.to_string())?.is_none()
-        } else {
-            false
-        };
+fn output_text(output: &Output) -> String {
+    let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+    if stdout.is_empty() { stderr } else if stderr.is_empty() { stdout } else { format!("{stdout}\n{stderr}") }
+}
 
-        if !running {
-            let (child, log_path) = spawn_backend(app, &state.session_secret)?;
-            *state
-                .log_path
-                .lock()
-                .map_err(|_| "后端日志状态锁已损坏。".to_string())? = Some(log_path);
-            *guard = Some(child);
-            spawned = true;
-        }
-    }
+fn parse_json_output(output: &Output) -> Option<Value> { serde_json::from_slice::<Value>(&output.stdout).ok() }
 
-    for _ in 0..40 {
-        if backend_is_healthy(&state.session_secret).await {
-            return Ok(if spawned { "started" } else { "recovered" }.into());
-        }
+fn executable_version(path: &Path) -> String {
+    let mut command = Command::new(path);
+    command.arg("--version");
+    match command_output(&mut command) { Ok(output) => output_text(&output), Err(error) => error }
+}
 
-        let exit_status = {
-            let mut guard = state.child.lock().map_err(|_| "后端状态锁已损坏。".to_string())?;
-            match guard.as_mut() {
-                Some(child) => child.try_wait().map_err(|error| error.to_string())?,
-                None => None,
-            }
-        };
+#[cfg(windows)]
+fn protect_secret(secret: &str, target: &Path) -> Result<(), String> {
+    let script = r#"$b=[Text.Encoding]::UTF8.GetBytes($env:CHATX_SECRET);$p=[Security.Cryptography.ProtectedData]::Protect($b,$null,[Security.Cryptography.DataProtectionScope]::CurrentUser);[IO.File]::WriteAllText($env:CHATX_SECRET_FILE,[Convert]::ToBase64String($p))"#;
+    let mut command = Command::new("powershell.exe");
+    command.args(["-NoLogo", "-NoProfile", "-NonInteractive", "-Command", script])
+        .env("CHATX_SECRET", secret).env("CHATX_SECRET_FILE", target);
+    let output = command_output(&mut command)?;
+    if output.status.success() { Ok(()) } else { Err(format!("保存 Runtime Key 失败：{}", output_text(&output))) }
+}
 
-        if let Some(status) = exit_status {
-            let log_path = state
-                .log_path
-                .lock()
-                .ok()
-                .and_then(|value| value.clone());
-            let tail = log_path
-                .as_deref()
-                .map(backend_log_tail)
-                .unwrap_or_default();
-            let code = status
-                .code()
-                .map(|value| value.to_string())
-                .unwrap_or_else(|| "unknown".into());
-            let suffix = if tail.is_empty() {
-                String::new()
-            } else {
-                format!("\n\n后端日志：\n{tail}")
-            };
-            return Err(format!("ChatX 后端启动后立即退出（exit code {code}）。{suffix}"));
-        }
+#[cfg(not(windows))]
+fn protect_secret(_secret: &str, _target: &Path) -> Result<(), String> { Err("安全保存 Runtime Key 当前仅支持 Windows。".into()) }
 
-        tokio::time::sleep(Duration::from_millis(150)).await;
-    }
+#[cfg(windows)]
+fn unprotect_secret(target: &Path) -> Result<String, String> {
+    let script = r#"$s=[IO.File]::ReadAllText($env:CHATX_SECRET_FILE);$p=[Convert]::FromBase64String($s);$b=[Security.Cryptography.ProtectedData]::Unprotect($p,$null,[Security.Cryptography.DataProtectionScope]::CurrentUser);[Console]::Out.Write([Text.Encoding]::UTF8.GetString($b))"#;
+    let mut command = Command::new("powershell.exe");
+    command.args(["-NoLogo", "-NoProfile", "-NonInteractive", "-Command", script]).env("CHATX_SECRET_FILE", target);
+    let output = command_output(&mut command)?;
+    if !output.status.success() { return Err(format!("读取已保存 Runtime Key 失败：{}", output_text(&output))); }
+    Ok(String::from_utf8_lossy(&output.stdout).to_string())
+}
 
-    let tail = state
-        .log_path
-        .lock()
-        .ok()
-        .and_then(|value| value.clone())
-        .as_deref()
-        .map(backend_log_tail)
-        .unwrap_or_default();
-    let suffix = if tail.is_empty() {
-        String::new()
+#[cfg(not(windows))]
+fn unprotect_secret(_target: &Path) -> Result<String, String> { Err("安全读取 Runtime Key 当前仅支持 Windows。".into()) }
+
+fn load_runtime_key(app: &tauri::AppHandle, supplied: &str) -> Result<String, String> {
+    if !supplied.trim().is_empty() { return Ok(supplied.trim().to_string()); }
+    let path = secret_path(app)?;
+    if !path.is_file() { return Err("请输入 Runtime API Key，或先保存一个 Runtime Key。".into()); }
+    let value = unprotect_secret(&path)?;
+    if value.trim().is_empty() { return Err("已保存的 Runtime Key 为空。".into()); }
+    Ok(value)
+}
+
+fn quote_mcp_path(path: &Path) -> String {
+    let value = path.to_string_lossy().replace('\\', "/").replace('"', "\\\"");
+    format!("\"{value}\"")
+}
+
+fn mcp_command(paths: &RuntimePaths) -> String {
+    format!("{} {} --no-onboarding", quote_mcp_path(&paths.node), quote_mcp_path(&paths.desktop_commander))
+}
+
+fn stop_runtime(app: &tauri::AppHandle, state: Option<&AppState>) -> Result<Value, String> {
+    let paths = runtime_paths(app)?;
+    let args = vec!["runtimes".into(), "stop".into(), RUNTIME_ALIAS.into(), "--json".into()];
+    let output = run_tunnel(&paths, &args, None)?;
+    if let Some(state) = state { push_log(state, format!("停止 Tunnel runtime: {}", output_text(&output))); }
+    if output.status.success() {
+        Ok(parse_json_output(&output).unwrap_or_else(|| json!({"state":"stopped"})))
     } else {
-        format!("\n\n后端日志：\n{tail}")
-    };
-    Err(format!("ChatX 后端已经启动，但 6 秒内没有通过 /healthz。{suffix}"))
+        let text = output_text(&output);
+        if text.contains("not found") || text.contains("No runtime") || text.contains("stopped") {
+            Ok(json!({"state":"stopped"}))
+        } else { Err(format!("停止 Tunnel 失败：{text}")) }
+    }
 }
 
-
-async fn clean_installed_runtime(app: &tauri::AppHandle) -> Result<(), String> {
-    let directory = bundled_resource_dir(app).ok_or_else(|| {
-        "未找到本安装目录的运行组件。源码模式请手动停止对应后端，避免终止其他 Node 进程。".to_string()
-    })?;
-    let app = app.clone();
-    tauri::async_runtime::spawn_blocking(move || {
-        stop_owned_backend(&app);
-        #[cfg(windows)]
-        {
-            let script = include_str!("../windows/stop-runtime.ps1");
-            let quoted_directory = directory.to_string_lossy().replace('\'', "''");
-            let output = Command::new("powershell.exe")
-                .args(["-NoLogo", "-NoProfile", "-NonInteractive", "-Command",
-                    &format!("& {{ {script} }} -InstallDir '{quoted_directory}' -SkipDesktop")])
-                .creation_flags(CREATE_NO_WINDOW)
-                .output()
-                .map_err(|error| format!("无法清理残留进程：{error}"))?;
-            if !output.status.success() {
-                return Err(format!("清理残留进程失败：{}\n{}",
-                    String::from_utf8_lossy(&output.stdout),
-                    String::from_utf8_lossy(&output.stderr)));
-            }
-            Ok(())
+fn runtime_status(paths: &RuntimePaths) -> (String, Option<Value>, String) {
+    let args = vec!["runtimes".into(), "status".into(), RUNTIME_ALIAS.into(), "--json".into()];
+    match run_tunnel(paths, &args, None) {
+        Ok(output) if output.status.success() => {
+            let parsed = parse_json_output(&output);
+            let state = parsed.as_ref().and_then(|v| v.get("runtime_state")).and_then(Value::as_str).unwrap_or("running").to_string();
+            (state, parsed, String::new())
         }
-        #[cfg(not(windows))]
-        {
-            let _ = directory;
-            Err("残留进程清理目前仅支持 Windows 安装版。".into())
-        }
-    }).await.map_err(|error| format!("清理任务失败：{error}"))?
+        Ok(output) => ("stopped".into(), None, output_text(&output)),
+        Err(error) => ("error".into(), None, error),
+    }
 }
 
-async fn ensure_backend_impl(app: &tauri::AppHandle, state: &BackendState) -> Result<String, String> {
-    // Serialize startup/recovery across polling requests and the repair button.
-    let _operation = state.lifecycle.lock().await;
-    match ensure_backend_started(app, state).await {
-        Ok(result) => Ok(result),
-        Err(first_error) => {
-            // One automatic attempt per desktop session; do not kill/restart on every poll.
-            if state.recovery_attempted.swap(true, Ordering::SeqCst)
-                || bundled_resource_dir(app).is_none() {
-                return Err(first_error);
-            }
-            clean_installed_runtime(app).await
-                .map_err(|error| format!("{first_error}\n{error}"))?;
-            ensure_backend_started(app, state).await
-                .map_err(|error| format!("{first_error}\n清理残留进程后仍无法启动：{error}"))
+fn manifest(paths: &RuntimePaths) -> Value {
+    fs::read_to_string(paths.root.join("runtime-manifest.json")).ok()
+        .and_then(|text| serde_json::from_str::<Value>(&text).ok()).unwrap_or_else(|| json!({}))
+}
+
+#[tauri::command]
+fn get_status(app: tauri::AppHandle, state: State<'_, AppState>) -> Result<Value, String> {
+    let settings = load_settings(&app);
+    let secret_saved = secret_path(&app)?.is_file();
+    match runtime_paths(&app) {
+        Ok(paths) => {
+            let (runtime_state, runtime, last_error) = runtime_status(&paths);
+            let logs = state.logs.lock().map(|v| v.clone()).unwrap_or_default();
+            Ok(json!({
+                "service":{"name":"ChatX","version":APP_VERSION},
+                "configured":!settings.tunnel_id.is_empty(),
+                "tunnelId":settings.tunnel_id,
+                "rememberKey":settings.remember_key,
+                "runtimeKeySaved":secret_saved,
+                "runtimeState":runtime_state,
+                "runtime":runtime,
+                "lastError":last_error,
+                "tunnelVersion":executable_version(&paths.tunnel),
+                "desktopCommander":manifest(&paths).get("desktopCommander").cloned().unwrap_or_else(|| json!({"version":"unknown"})),
+                "mcpCommand":mcp_command(&paths),
+                "logs":logs
+            }))
         }
+        Err(error) => Ok(json!({
+            "service":{"name":"ChatX","version":APP_VERSION},
+            "configured":!settings.tunnel_id.is_empty(),
+            "tunnelId":settings.tunnel_id,
+            "rememberKey":settings.remember_key,
+            "runtimeKeySaved":secret_saved,
+            "runtimeState":"unavailable",
+            "lastError":error,
+            "logs":state.logs.lock().map(|v| v.clone()).unwrap_or_default()
+        }))
     }
 }
 
 #[tauri::command]
-async fn restart_backend(app: tauri::AppHandle, state: State<'_, BackendState>) -> Result<String, String> {
-    let _operation = state.lifecycle.lock().await;
-    state.recovery_attempted.store(true, Ordering::SeqCst);
-    clean_installed_runtime(&app).await?;
-    ensure_backend_started(&app, &state).await?;
-    Ok("残留进程已清理，后端已重启。请重新连接 Tunnel。".into())
+fn connect_tunnel(app: tauri::AppHandle, state: State<'_, AppState>, tunnel_id: String, runtime_key: String, remember_key: bool) -> Result<Value, String> {
+    let tunnel_id = tunnel_id.trim().to_string();
+    if !tunnel_id.starts_with("tunnel_") { return Err("Tunnel ID 应以 tunnel_ 开头。".into()); }
+    let key = load_runtime_key(&app, &runtime_key)?;
+    let secret = secret_path(&app)?;
+    if remember_key {
+        protect_secret(&key, &secret)?;
+    } else if secret.exists() {
+        fs::remove_file(&secret).map_err(|e| format!("清除旧 Runtime Key 失败：{e}"))?;
+    }
+    save_settings(&app, &Settings { tunnel_id: tunnel_id.clone(), remember_key })?;
+    let paths = runtime_paths(&app)?;
+    let profiles = state_dir(&app)?.join("tunnel-profiles");
+    fs::create_dir_all(&profiles).map_err(|e| format!("创建 Tunnel profile 目录失败：{e}"))?;
+    let _ = stop_runtime(&app, None);
+    let args = vec![
+        "runtimes".into(), "connect".into(), "--alias".into(), RUNTIME_ALIAS.into(),
+        "--tunnel-id".into(), tunnel_id,
+        "--runtime-api-key".into(), "env:CHATX_TUNNEL_RUNTIME_KEY".into(),
+        "--profile-dir".into(), profiles.to_string_lossy().into_owned(),
+        "--mcp-command".into(), mcp_command(&paths), "--json".into()
+    ];
+    push_log(&state, "正在启动 Secure MCP Tunnel → Desktop Commander");
+    let output = run_tunnel(&paths, &args, Some(&key))?;
+    let text = output_text(&output);
+    push_log(&state, format!("Tunnel connect: {text}"));
+    if !output.status.success() { return Err(format!("启动 Tunnel 失败：{text}")); }
+    get_status(app, state)
 }
 
 #[tauri::command]
-async fn ensure_backend(app: tauri::AppHandle, state: State<'_, BackendState>) -> Result<String, String> {
-    ensure_backend_impl(&app, &state).await
-}
-
-async fn send_backend_request(method: &str, path: &str, body: &Option<Value>, session_secret: &str) -> Result<Value, String> {
-    let client = reqwest::Client::builder()
-        .timeout(Duration::from_secs(75))
-        .build()
-        .map_err(|error| error.to_string())?;
-    let url = format!("{BACKEND_BASE}{path}");
-    let empty = serde_json::json!({});
-
-    let response = if method == "GET" {
-        client
-            .get(url)
-            .header("x-chatx-desktop-session", session_secret)
-            .send()
-            .await
-    } else {
-        client
-            .post(url)
-            .header("x-chatx-desktop-session", session_secret)
-            .header("content-type", "application/json")
-            .header("origin", BACKEND_BASE)
-            .header("sec-fetch-site", "same-origin")
-            .json(body.as_ref().unwrap_or(&empty))
-            .send()
-            .await
-    }
-    .map_err(|error| format!("无法连接 ChatX 后端：{error}"))?;
-
-    let status = response.status();
-    let text = response
-        .text()
-        .await
-        .map_err(|error| format!("读取后端响应失败：{error}"))?;
-    let parsed = serde_json::from_str::<Value>(&text)
-        .map_err(|error| format!("后端返回了无效 JSON（HTTP {status}）：{error}"))?;
-
-    if !status.is_success() {
-        let message = parsed
-            .get("error")
-            .and_then(Value::as_str)
-            .unwrap_or("后端请求失败");
-        return Err(format!("{message}（HTTP {status}）"));
-    }
-
-    Ok(parsed)
+fn stop_tunnel(app: tauri::AppHandle, state: State<'_, AppState>) -> Result<Value, String> {
+    stop_runtime(&app, Some(state.inner()))?;
+    get_status(app, state)
 }
 
 #[tauri::command]
-async fn backend_request(
-    app: tauri::AppHandle,
-    state: State<'_, BackendState>,
-    method: String,
-    path: String,
-    body: Option<Value>,
-) -> Result<Value, String> {
-    if !ALLOWED_API_PATHS.contains(&path.as_str()) {
-        return Err(format!("桌面控制台不允许访问此后端路径：{path}"));
-    }
+fn clear_saved_key(app: tauri::AppHandle, state: State<'_, AppState>) -> Result<Value, String> {
+    let path = secret_path(&app)?;
+    if path.exists() { fs::remove_file(path).map_err(|e| format!("清除 Runtime Key 失败：{e}"))?; }
+    let mut settings = load_settings(&app);
+    settings.remember_key = false;
+    save_settings(&app, &settings)?;
+    push_log(&state, "已清除保存的 Runtime Key");
+    get_status(app, state)
+}
 
-    let method = method.to_ascii_uppercase();
-    if method != "GET" && method != "POST" {
-        return Err("只允许 GET 或 POST。".into());
-    }
-
-    if !backend_is_healthy(&state.session_secret).await {
-        ensure_backend_impl(&app, &state).await?;
-    }
-
-    match send_backend_request(&method, &path, &body, &state.session_secret).await {
-        Ok(value) => Ok(value),
-        Err(first_error) if !backend_is_healthy(&state.session_secret).await => {
-            ensure_backend_impl(&app, &state).await?;
-            send_backend_request(&method, &path, &body, &state.session_secret)
-                .await
-                .map_err(|second_error| format!("{first_error}\n后端自动恢复后重试仍失败：{second_error}"))
+#[tauri::command]
+fn run_diagnostics(app: tauri::AppHandle) -> Result<Value, String> {
+    let mut checks = Vec::new();
+    match runtime_paths(&app) {
+        Ok(paths) => {
+            checks.push(json!({"name":"tunnel-client","ok":true,"detail":executable_version(&paths.tunnel)}));
+            checks.push(json!({"name":"Node.js","ok":paths.node.is_file(),"detail":paths.node.to_string_lossy()}));
+            checks.push(json!({"name":"Desktop Commander","ok":paths.desktop_commander.is_file(),"detail":paths.desktop_commander.to_string_lossy()}));
+            checks.push(json!({"name":"MCP command","ok":true,"detail":mcp_command(&paths)}));
+            let (runtime_state, runtime, error) = runtime_status(&paths);
+            checks.push(json!({"name":"Tunnel runtime","ok":runtime_state=="running","detail":if error.is_empty(){runtime.map(|v|v.to_string()).unwrap_or(runtime_state)}else{error}}));
         }
-        Err(error) => Err(error),
+        Err(error) => checks.push(json!({"name":"Bundled runtime","ok":false,"detail":error}))
     }
+    let settings = load_settings(&app);
+    let saved = secret_path(&app)?.is_file();
+    checks.push(json!({"name":"Tunnel ID","ok":settings.tunnel_id.starts_with("tunnel_"),"detail":settings.tunnel_id}));
+    checks.push(json!({"name":"Runtime Key","ok":saved,"detail":if saved{"DPAPI saved"}else{"not saved; enter it when connecting"}}));
+    Ok(json!({"checks":checks}))
 }
 
 #[tauri::command]
-async fn pick_folders(app: tauri::AppHandle) -> Result<Vec<String>, String> {
-    let picked = app.dialog().file().blocking_pick_folders();
-    let Some(items) = picked else {
-        return Ok(Vec::new());
-    };
-
-    items
-        .into_iter()
-        .map(|item| {
-            item.simplified()
-                .into_path()
-                .map(|path| path.to_string_lossy().into_owned())
-                .map_err(|error| format!("无法读取所选目录：{error}"))
-        })
-        .collect()
+fn open_logs(app: tauri::AppHandle) -> Result<(), String> {
+    open::that(state_dir(&app)?).map_err(|e| format!("打开数据目录失败：{e}"))
 }
 
 #[tauri::command]
 fn open_external(url: String) -> Result<(), String> {
-    const ALLOWED: &[&str] = &[
-        "https://platform.openai.com/settings/organization/tunnels",
-        "https://platform.openai.com/settings/organization/api-keys",
-        "https://developers.openai.com/api/docs/guides/secure-mcp-tunnels",
-        "https://chatgpt.com/plugins",
-        "https://help.openai.com/en/articles/12584461-developer-mode-and-full-mcp-connectors-in-chatgpt-beta",
+    const ALLOWED_PREFIXES: &[&str] = &[
+        "https://platform.openai.com/", "https://developers.openai.com/", "https://chatgpt.com/",
+        "https://github.com/openai/tunnel-client", "https://github.com/wonderwhy-er/DesktopCommanderMCP"
     ];
-    if !ALLOWED.contains(&url.as_str()) {
-        return Err("不允许打开未列入白名单的外部地址。".into());
-    }
-    open::that(url).map_err(|error| format!("打开浏览器失败：{error}"))
+    if !ALLOWED_PREFIXES.iter().any(|prefix| url.starts_with(prefix)) { return Err("不允许打开未列入白名单的外部地址。".into()); }
+    open::that(url).map_err(|e| format!("打开浏览器失败：{e}"))
 }
 
 fn show_main_window(app: &tauri::AppHandle) {
     if let Some(window) = app.get_webview_window("main") {
-        let _ = window.show();
-        let _ = window.unminimize();
-        let _ = window.set_focus();
+        let _ = window.show(); let _ = window.unminimize(); let _ = window.set_focus();
     }
 }
 
-fn stop_owned_backend(app: &tauri::AppHandle) {
-    let state = app.state::<BackendState>();
-    let mut guard = match state.child.lock() {
-        Ok(guard) => guard,
-        Err(_) => return,
-    };
-
-    if let Some(child) = guard.as_mut() {
-        // Stop the tunnel first so a forceful Windows child termination does not orphan tunnel-client.
-        if let Ok(client) = reqwest::blocking::Client::builder()
-            .timeout(Duration::from_secs(2))
-            .build()
-        {
-            let _ = client
-                .post(format!("{BACKEND_BASE}/api/tunnel/stop"))
-                .header("x-chatx-desktop-session", &state.session_secret)
-                .header("content-type", "application/json")
-                .header("origin", BACKEND_BASE)
-                .header("sec-fetch-site", "same-origin")
-                .body("{}")
-                .send();
-        }
-        let _ = child.kill();
-        let _ = child.wait();
-    }
-    *guard = None;
-}
+fn stop_on_exit(app: &tauri::AppHandle) { let _ = stop_runtime(app, None); }
 
 fn main() {
     let app = tauri::Builder::default()
-        .plugin(tauri_plugin_dialog::init())
-        .manage(BackendState::default())
+        .manage(AppState::default())
         .setup(|app| {
             let show_item = MenuItem::with_id(app, "show", "打开 ChatX", true, None::<&str>)?;
+            let stop_item = MenuItem::with_id(app, "stop", "停止连接", true, None::<&str>)?;
             let quit_item = MenuItem::with_id(app, "quit", "退出 ChatX", true, None::<&str>)?;
-            let menu = Menu::with_items(app, &[&show_item, &quit_item])?;
-
-            let mut tray = TrayIconBuilder::with_id("chatgptx-tray")
-                .tooltip("ChatX")
-                .menu(&menu)
-                .show_menu_on_left_click(false)
+            let menu = Menu::with_items(app, &[&show_item, &stop_item, &quit_item])?;
+            let mut tray = TrayIconBuilder::with_id("chatx-tray")
+                .tooltip("ChatX").menu(&menu).show_menu_on_left_click(false)
                 .on_menu_event(|app, event| match event.id().as_ref() {
                     "show" => show_main_window(app),
-                    "quit" => {
-                        app.state::<BackendState>()
-                            .quitting
-                            .store(true, Ordering::SeqCst);
-                        app.exit(0);
-                    }
+                    "stop" => { let state = app.state::<AppState>(); let _ = stop_runtime(app, Some(state.inner())); }
+                    "quit" => { app.state::<AppState>().quitting.store(true, Ordering::SeqCst); stop_on_exit(app); app.exit(0); }
                     _ => {}
                 })
                 .on_tray_icon_event(|tray, event| {
-                    if let TrayIconEvent::Click {
-                        button: MouseButton::Left,
-                        button_state: MouseButtonState::Up,
-                        ..
-                    } = event
-                    {
+                    if let TrayIconEvent::Click { button:MouseButton::Left, button_state:MouseButtonState::Up, .. } = event {
                         show_main_window(tray.app_handle());
                     }
                 });
-
-            if let Some(icon) = app.default_window_icon() {
-                tray = tray.icon(icon.clone());
-            }
+            if let Some(icon) = app.default_window_icon() { tray = tray.icon(icon.clone()); }
             tray.build(app)?;
             Ok(())
         })
         .on_window_event(|window, event| {
-            if window.label() != "main" {
-                return;
-            }
-            if let WindowEvent::CloseRequested { api, .. } = event {
-                let quitting = window
-                    .app_handle()
-                    .state::<BackendState>()
-                    .quitting
-                    .load(Ordering::SeqCst);
-                if !quitting {
-                    api.prevent_close();
-                    let _ = window.hide();
+            if window.label() == "main" {
+                if let WindowEvent::CloseRequested { api, .. } = event {
+                    let quitting = window.app_handle().state::<AppState>().quitting.load(Ordering::SeqCst);
+                    if !quitting { api.prevent_close(); let _ = window.hide(); }
                 }
             }
         })
-        .invoke_handler(tauri::generate_handler![
-            ensure_backend,
-            restart_backend,
-            backend_request,
-            pick_folders,
-            open_external,
-        ])
-        .build(tauri::generate_context!())
-        .expect("failed to build ChatX desktop application");
-
-    app.run(|app_handle, event| {
-        if matches!(event, tauri::RunEvent::Exit) {
-            stop_owned_backend(app_handle);
-        }
-    });
+        .invoke_handler(tauri::generate_handler![get_status, connect_tunnel, stop_tunnel, clear_saved_key, run_diagnostics, open_logs, open_external])
+        .build(tauri::generate_context!()).expect("failed to build ChatX desktop application");
+    app.run(|app_handle, event| { if matches!(event, tauri::RunEvent::Exit) { stop_on_exit(app_handle); } });
 }

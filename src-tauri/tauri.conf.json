@@ -34,12 +34,13 @@
       "icons/icon.ico"
     ],
     "resources": {
-      "resources/chatgptx-backend.mjs": "chatgptx-backend.mjs",
       "resources/node.exe": "node.exe",
       "resources/tunnel-client.exe": "tunnel-client.exe",
       "resources/runtime-manifest.json": "runtime-manifest.json",
       "resources/tunnel-client-LICENSE.txt": "tunnel-client-LICENSE.txt",
-      "resources/tunnel-client-NOTICE.txt": "tunnel-client-NOTICE.txt"
+      "resources/tunnel-client-NOTICE.txt": "tunnel-client-NOTICE.txt",
+      "resources/DesktopCommander-LICENSE.txt": "DesktopCommander-LICENSE.txt",
+      "resources/desktop-commander": "desktop-commander"
     },
     "windows": {
       "nsis": {

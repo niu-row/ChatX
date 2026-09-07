@@ -3,358 +3,114 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; style-src 'self'; script-src 'self'; connect-src 'self' ipc: http://ipc.localhost">
   <title>ChatX</title>
   <link rel="stylesheet" href="./app.css">
 </head>
 <body>
-<div class="app-shell">
-  <aside class="sidebar">
-    <div class="brand">
-      <div class="brand-mark">X</div>
-      <div>
-        <strong>ChatX</strong>
-        <span>Local MCP Console</span>
+  <div class="shell">
+    <aside class="sidebar">
+      <div class="brand">
+        <div class="brand-mark">X</div>
+        <div><strong>ChatX</strong><span>Local Bridge</span></div>
       </div>
-    </div>
-
-    <nav class="nav" aria-label="主导航">
-      <button class="nav-item active" data-page="overview" type="button"><span class="nav-icon">⌂</span><span>概览</span></button>
-      <button class="nav-item" data-page="connection" type="button"><span class="nav-icon">↗</span><span>连接</span></button>
-      <button class="nav-item" data-page="access" type="button"><span class="nav-icon">◇</span><span>权限</span></button>
-      <button class="nav-item" data-page="diagnostics" type="button"><span class="nav-icon">●</span><span>诊断</span></button>
-      <button class="nav-item" data-page="invocations" type="button"><span class="nav-icon">≡</span><span>调用日志</span></button>
-      <button class="nav-item" data-page="guide" type="button"><span class="nav-icon">?</span><span>使用教程</span></button>
-    </nav>
-
-    <div class="sidebar-foot">
-      <div class="backend-chip"><span class="status-dot" id="sidebarDot"></span><span id="sidebarStatus">正在检查…</span></div>
-      <div class="sidebar-note">仅连接本机 ChatX 后端</div>
-    </div>
-  </aside>
-
-  <main class="main">
-    <header class="topbar">
-      <div>
-        <h1 id="pageTitle">概览</h1>
-        <p id="pageSubtitle">查看连接、权限和本地服务状态。</p>
+      <nav>
+        <button class="nav active" data-page="overview">概览</button>
+        <button class="nav" data-page="connection">连接</button>
+        <button class="nav" data-page="diagnostics">诊断</button>
+        <button class="nav" data-page="logs">运行日志</button>
+      </nav>
+      <div class="sidebar-status">
+        <span id="sidebarDot" class="dot warn"></span>
+        <span id="sidebarStatus">正在检查…</span>
       </div>
-      <button id="openGuide" class="ghost-button" type="button">使用教程</button>
-    </header>
+    </aside>
 
-    <div class="error-banner" id="error" hidden></div>
+    <main>
+      <header>
+        <div><h1 id="pageTitle">概览</h1><p id="pageSubtitle">ChatGPT → Secure MCP Tunnel → Desktop Commander</p></div>
+        <div class="header-actions"><button id="refresh" class="ghost">刷新</button></div>
+      </header>
 
-    <section class="page active" data-page-panel="overview">
-      <div class="hero-card">
-        <div>
-          <div class="kicker">LOCAL MCP</div>
-          <h2 id="heroTitle">正在检查 ChatX…</h2>
-          <p id="heroCopy">桌面控制台会自动连接或启动本机 MCP 后端。</p>
-        </div>
-        <div class="hero-actions">
-          <button class="primary" id="heroConnect" type="button">连接 Tunnel</button>
-          <button class="secondary" id="heroDiagnose" type="button">运行诊断</button>
-        </div>
-      </div>
+      <div id="error" class="error" hidden></div>
 
-      <div class="metric-grid">
-        <div class="metric"><span>MCP 服务</span><strong id="service">-</strong></div>
-        <div class="metric"><span>Secure Tunnel</span><strong id="tunnel">-</strong></div>
-        <div class="metric"><span>权限模式</span><strong id="presetFact">-</strong></div>
-        <div class="metric"><span>允许目录</span><strong id="rootsFact">-</strong></div>
-      </div>
-
-      <div class="section-grid overview-grid">
-        <section class="panel">
-          <div class="panel-title">
-            <div><span class="kicker">NEXT STEP</span><h3>快速开始</h3></div>
-            <button class="text-button" data-go-page="guide" type="button">查看完整教程</button>
+      <section class="page active" data-page-panel="overview">
+        <div class="hero card">
+          <div>
+            <span class="eyebrow">LOCAL MCP BRIDGE</span>
+            <h2 id="heroTitle">正在检查连接</h2>
+            <p id="heroCopy">ChatX 只负责启动 Secure MCP Tunnel；文件、搜索、编辑和终端能力由 Desktop Commander 提供。</p>
           </div>
-          <div class="quick-steps">
-            <button class="quick-step" data-go-page="connection" type="button"><span class="step-index">1</span><span><strong>填写 Tunnel 凭据</strong><small>获取 Tunnel ID 和 Runtime Key</small></span><span class="step-state" id="stepConnection">未配置</span></button>
-            <button class="quick-step" data-go-page="access" type="button"><span class="step-index">2</span><span><strong>选择允许目录</strong><small>只授权 ChatGPT 需要访问的位置</small></span><span class="step-state" id="stepRoots">未配置</span></button>
-            <button class="quick-step" data-go-page="connection" type="button"><span class="step-index">3</span><span><strong>启动 Secure Tunnel</strong><small>连接后 ChatGPT 即可调用本机 MCP</small></span><span class="step-state" id="stepTunnel">未连接</span></button>
+          <div class="hero-actions">
+            <button id="heroConnect" class="primary">配置连接</button>
+            <button id="heroStop" class="secondary">停止</button>
           </div>
-        </section>
-
-        <section class="panel">
-          <div class="panel-title"><div><span class="kicker">SECURITY</span><h3>当前安全状态</h3></div></div>
-          <div class="summary-list">
-            <div><span>Runtime Key</span><strong id="keyFact">-</strong></div>
-            <div><span>设置版本</span><strong id="settingsVersion">-</strong></div>
-            <div><span>完整文件系统</span><strong id="fullAccessFact">-</strong></div>
-            <div><span>Shell</span><strong id="shellFact">-</strong></div>
-          </div>
-        </section>
-      </div>
-    </section>
-
-    <section class="page" data-page-panel="connection">
-      <div class="content-narrow">
-        <section class="panel">
-          <div class="panel-title">
-            <div><span class="kicker">SECURE TUNNEL</span><h3>连接到 OpenAI</h3><p>只需要 Tunnel ID 和 Runtime API Key。</p></div>
-            <span class="connection-badge" id="connectionBadge">未连接</span>
-          </div>
-
-          <div class="form-stack">
-            <label class="field">
-              <span>Tunnel ID</span>
-              <div class="field-action">
-                <input id="tunnelId" autocomplete="off" spellcheck="false" placeholder="tunnel_...">
-                <button id="getTunnelId" class="secondary nowrap" type="button">获取 Tunnel ID ↗</button>
-              </div>
-              <small>在 OpenAI Platform 的 Tunnels 页面创建或复制。</small>
-            </label>
-
-            <label class="field">
-              <span>Runtime API Key</span>
-              <div class="field-action">
-                <input id="apiKey" type="password" autocomplete="off" spellcheck="false" placeholder="输入 Runtime API Key">
-                <button id="getRuntimeKey" class="secondary nowrap" type="button">获取 Runtime Key ↗</button>
-              </div>
-              <small id="keyHelp">密钥不会写入 settings.json 或日志。</small>
-            </label>
-          </div>
-
-          <div class="option-row">
-            <label class="checkline"><input id="rememberKey" type="checkbox"><span><strong>安全保存 Runtime Key</strong><small>使用 Windows DPAPI（CurrentUser）加密。</small></span></label>
-            <button id="clearKey" class="danger subtle-danger" type="button">清除已保存 Key</button>
-          </div>
-
-          <div class="action-bar">
-            <button class="primary" id="connect" type="button">连接并启动</button>
-            <button class="secondary" id="stop" type="button">停止 Tunnel</button>
-          </div>
-          <p class="fine-print">连接状态以 tunnel-client 的 /readyz 为准。Tunnel discovery 会显式使用 JSON。</p>
-        </section>
-      </div>
-    </section>
-
-    <section class="page" data-page-panel="access">
-      <div class="section-grid access-grid">
-        <section class="panel">
-          <div class="panel-title"><div><span class="kicker">ACCESS MODE</span><h3>权限模式</h3><p>通常选择“开发”即可，不需要逐项配置。</p></div></div>
-          <div class="preset-row">
-            <select id="preset">
-              <option value="safe">安全 — 只读</option>
-              <option value="developer">开发 — 文件/Git 写入，删除/移动关闭</option>
-              <option value="unrestricted">完全开放 — 高风险</option>
-              <option value="custom">自定义</option>
-            </select>
-            <button id="applyPreset" class="secondary" type="button">应用</button>
-          </div>
-
-          <div class="preset-help">
-            <div><strong>安全</strong><span>读取文件与 Git，不允许修改。</span></div>
-            <div><strong>开发</strong><span>允许文件和常规 Git 修改，Shell 仍关闭。</span></div>
-            <div><strong>完全开放</strong><span>启用 Shell、完整文件系统与高级 Git。</span></div>
-          </div>
-
-          <details class="advanced-box">
-            <summary>高级权限</summary>
-            <div id="permissionList" class="permission-list"></div>
-            <p class="fine-print warning-note">Shell 命令不受允许目录沙箱约束；高级 Git 可借 Git 配置执行外部程序，因此必须同时开启 Shell。</p>
-          </details>
-        </section>
-
-        <section class="panel">
-          <div class="panel-title roots-title">
-            <div><span class="kicker">ALLOWED FOLDERS</span><h3>允许目录</h3><p>ChatGPT 只能访问这里列出的目录，除非开启“完整文件系统”。</p></div>
-            <button id="chooseFolders" class="primary compact" type="button">＋ 选择文件夹</button>
-          </div>
-          <div id="rootList" class="root-list"></div>
-        </section>
-      </div>
-    </section>
-
-    <section class="page" data-page-panel="diagnostics">
-      <div class="section-grid diagnostics-grid">
-        <section class="panel">
-          <div class="panel-title">
-            <div><span class="kicker">HEALTH CHECK</span><h3>诊断</h3><p>检查 MCP、Tunnel、Git、允许目录和安全存储。</p></div>
-            <button id="diagnose" class="primary compact" type="button">运行诊断</button>
-          </div>
-          <div id="diagnostics" class="diagnostics"><div class="empty-state">尚未运行诊断。</div></div>
-          <div class="guide-explain">
-            <h3>后端无法启动或连接卡住？</h3>
-            <p>清理本安装目录的 Node 和 Tunnel 进程并重启后端。当前连接和正在执行的任务会中断，设置与已保存的 Key 会保留。</p>
-            <button id="restartBackend" class="danger" type="button">清理残留并重启后端</button>
-            <p id="restartStatus" role="status" aria-live="polite"></p>
-          </div>
-        </section>
-
-        <section class="panel log-panel">
-          <div class="panel-title"><div><span class="kicker">ACTIVITY</span><h3>运行日志</h3><p>只显示当前进程内的 Tunnel 与诊断日志。</p></div></div>
-          <div class="log" id="log">正在启动桌面控制台…</div>
-        </section>
-      </div>
-    </section>
-
-    <section class="page" data-page-panel="invocations">
-      <div class="content-narrow">
-        <section class="panel">
-          <div class="panel-title invocation-title">
-            <div><span class="kicker">MCP ACTIVITY</span><h3>调用日志</h3><p>查看最近的 MCP 工具调用。日志只记录工具名、时间、结果和耗时，不记录参数或文件内容。</p></div>
-            <div class="inline-actions invocation-actions">
-              <label class="compact-select"><span>最近</span><select id="invocationLimit"><option value="20">20 条</option><option value="50" selected>50 条</option><option value="100">100 条</option><option value="200">200 条</option><option value="500">500 条</option></select></label>
-              <button id="refreshInvocations" class="secondary compact" type="button">刷新</button>
-            </div>
-          </div>
-          <div class="invocation-summary"><span id="invocationCount">0 条调用</span><span>进程重启后清空</span></div>
-          <div class="invocation-table-wrap">
-            <table class="invocation-table">
-              <thead><tr><th>时间</th><th>工具</th><th>结果</th><th>耗时</th></tr></thead>
-              <tbody id="invocationRows"><tr><td colspan="4" class="empty-cell">尚无调用记录。</td></tr></tbody>
-            </table>
-          </div>
-        </section>
-      </div>
-    </section>
-
-    <section class="page" data-page-panel="guide">
-      <div class="content-narrow guide-wrap">
-        <div class="guide-intro">
-          <span class="kicker">GETTING STARTED</span>
-          <h2>ChatX 使用教程</h2>
-          <p>先理解连接原理，再完成安装、授权和 ChatGPT 端的使用。正常配置一次后，日常只需要启动 ChatX。</p>
         </div>
 
-        <section class="guide-block">
-          <div class="guide-block-title"><span class="kicker">HOW IT WORKS</span><h3>工作原理</h3></div>
-          <div class="flow-diagram" aria-label="ChatX 工作原理">
-            <div class="flow-node"><strong>ChatGPT</strong><span>发起工具调用</span></div>
-            <div class="flow-arrow">→</div>
-            <div class="flow-node"><strong>OpenAI Secure Tunnel</strong><span>安全转发 MCP 流量</span></div>
-            <div class="flow-arrow">→</div>
-            <div class="flow-node"><strong>ChatX</strong><span>127.0.0.1:3210/mcp</span></div>
-            <div class="flow-arrow">→</div>
-            <div class="flow-node"><strong>你的电脑</strong><span>文件 / Git / Shell</span></div>
-          </div>
-          <div class="guide-explain">
-            <p><strong>ChatX 本身只在本机监听。</strong> Node MCP 后端监听 <code>127.0.0.1:3210</code>，不会直接把本地端口暴露到公网。</p>
-            <p><strong>tunnel-client 主动建立安全连接。</strong> Tunnel ID 用来指定要连接的 Secure MCP Tunnel，Runtime API Key 用来授权 tunnel-client 建立这条连接。</p>
-            <p><strong>权限最终由本机 ChatX 执行。</strong> 即使 ChatGPT 请求读取某个文件，ChatX 仍会检查“允许目录”和文件/Git/Shell 权限。关闭某个权限后，相应调用会在本机被拒绝。</p>
-            <p><strong>桌面版只是控制层。</strong> Tauri 负责窗口、托盘、目录选择和启动后台组件；真正的 MCP 工具仍由本地后端执行。关闭主窗口只会隐藏到托盘，不会中断 Tunnel。</p>
-          </div>
-        </section>
+        <div class="facts">
+          <article class="card fact"><span>Secure MCP Tunnel</span><strong id="tunnelFact">—</strong><small id="tunnelVersion">—</small></article>
+          <article class="card fact"><span>Desktop Commander</span><strong id="dcFact">—</strong><small id="dcVersion">—</small></article>
+          <article class="card fact"><span>Runtime Key</span><strong id="keyFact">—</strong><small>Windows DPAPI / 本次输入</small></article>
+        </div>
 
-        <section class="guide-block">
-          <div class="guide-block-title"><span class="kicker">FIRST SETUP</span><h3>第一次配置</h3></div>
+        <div class="card architecture">
+          <h3>当前链路</h3>
+          <div class="flow">
+            <div><b>ChatGPT</b><span>Connector</span></div><i>→</i>
+            <div><b>Secure MCP Tunnel</b><span>OpenAI</span></div><i>→</i>
+            <div><b>Desktop Commander</b><span>stdio MCP</span></div><i>→</i>
+            <div><b>本机</b><span>Files / Shell / Process</span></div>
+          </div>
+          <p class="note">Desktop Commander 是高权限本地自动化工具。终端命令可以访问当前 Windows 用户可访问的资源；ChatX 不额外模拟一套 Git、文件或 Shell 权限。</p>
+        </div>
+      </section>
 
-          <div class="guide-step">
-            <div class="guide-number">1</div>
-            <div>
-              <h3>获取并填写 Tunnel ID</h3>
-              <p>打开 OpenAI Platform 的 Tunnels 页面，创建或选择一个 Secure MCP Tunnel，然后把以 <code>tunnel_</code> 开头的 Tunnel ID 直接粘贴到下面。这里与“连接”页面完全同步，不需要来回切换。</p>
-              <div class="guide-credential-row">
-                <input id="guideTunnelIdInput" autocomplete="off" spellcheck="false" placeholder="tunnel_...">
-                <button class="secondary nowrap" id="guideOpenTunnelPage" type="button">打开 Tunnels 页面 ↗</button>
-              </div>
+      <section class="page" data-page-panel="connection">
+        <div class="grid two">
+          <div class="card form-card">
+            <span class="eyebrow">OPENAI SECURE MCP TUNNEL</span>
+            <h2>连接 ChatGPT</h2>
+            <label>Tunnel ID<input id="tunnelId" autocomplete="off" placeholder="tunnel_..."></label>
+            <label>Runtime API Key<input id="runtimeKey" type="password" autocomplete="off" placeholder="已保存时可留空"></label>
+            <label class="check"><input id="rememberKey" type="checkbox" checked><span>使用 Windows DPAPI 保存 Runtime Key</span></label>
+            <div class="actions">
+              <button id="connect" class="primary">连接并启动</button>
+              <button id="stop" class="secondary">停止连接</button>
+              <button id="clearKey" class="ghost danger">清除已保存 Key</button>
             </div>
           </div>
-
-          <div class="guide-step">
-            <div class="guide-number">2</div>
-            <div>
-              <h3>获取并填写 Runtime API Key</h3>
-              <p>创建一个给 Tunnel 使用的 Runtime API Key，复制后直接粘贴到下面。建议使用受限 Key，只给 Tunnel 所需权限。这里输入的 Key 同样会同步到“连接”页面。</p>
-              <div class="guide-credential-row">
-                <input id="guideApiKeyInput" type="password" autocomplete="off" spellcheck="false" placeholder="输入 Runtime API Key">
-                <button class="secondary nowrap" id="guideOpenRuntimeKeyPage" type="button">打开 API Keys 页面 ↗</button>
-              </div>
-              <label class="guide-remember"><input id="guideRememberKey" type="checkbox"><span><strong>安全保存 Runtime Key</strong><small>使用 Windows DPAPI（CurrentUser）加密；不会写入 settings.json 或调用日志。</small></span></label>
+          <div class="card detail-card">
+            <h3>本地 MCP</h3>
+            <dl>
+              <div><dt>Backend</dt><dd>Desktop Commander 0.2.48</dd></div>
+              <div><dt>Transport</dt><dd>stdio</dd></div>
+              <div><dt>Tunnel alias</dt><dd><code>chatx-local</code></dd></div>
+              <div><dt>Access</dt><dd>Desktop Commander 默认本机能力</dd></div>
+            </dl>
+            <p id="mcpCommand" class="mono-block">—</p>
+            <div class="link-row">
+              <button class="link-button" data-url="https://platform.openai.com/settings/organization/tunnels">OpenAI Tunnels</button>
+              <button class="link-button" data-url="https://github.com/wonderwhy-er/DesktopCommanderMCP">Desktop Commander</button>
             </div>
           </div>
+        </div>
+      </section>
 
-          <div class="guide-step">
-            <div class="guide-number">3</div>
-            <div><h3>选择权限模式</h3><p>日常代码项目建议使用“开发”模式。它允许文件和常规 Git 修改，但默认关闭 Shell、完整文件系统和高级 Git。需要更高权限时再单独开启。</p><button class="secondary" data-go-page="access" type="button">打开权限设置</button></div>
-          </div>
+      <section class="page" data-page-panel="diagnostics">
+        <div class="card">
+          <div class="section-head"><div><span class="eyebrow">DIAGNOSTICS</span><h2>运行环境检查</h2></div><button id="runDiagnostics" class="primary">开始诊断</button></div>
+          <div id="diagnostics" class="diagnostics"><p class="muted">点击“开始诊断”检查 Tunnel、Node、Desktop Commander 和本地 runtime。</p></div>
+        </div>
+      </section>
 
-          <div class="guide-step">
-            <div class="guide-number">4</div>
-            <div><h3>选择允许目录</h3><p>点击“选择文件夹”，添加 ChatGPT 真正需要访问的项目目录，例如 <code>E:\Source\AI\chatgptx</code>。建议按项目授权，不要为了方便长期开启“完整文件系统访问”。</p><button class="secondary" data-go-page="access" type="button">选择允许目录</button></div>
-          </div>
-
-          <div class="guide-step">
-            <div class="guide-number">5</div>
-            <div>
-              <div class="guide-step-heading"><div><h3>连接并运行诊断</h3><p>上面的 Tunnel ID 和 Runtime API Key 填好后，可以直接在教程里启动。连接页仍然保留，两个页面显示和操作的是同一套连接配置。</p></div><span class="connection-badge" id="guideConnectionBadge">未连接</span></div>
-              <div class="inline-actions">
-                <button class="primary" id="guideConnect" type="button">连接并启动</button>
-                <button class="secondary" id="guideStop" type="button">停止 Tunnel</button>
-                <button class="secondary" data-go-page="diagnostics" type="button">查看诊断</button>
-              </div>
-            </div>
-          </div>
-        </section>
-
-        <section class="guide-block">
-          <div class="guide-block-title"><span class="kicker">CHATGPT SETUP</span><h3>在 ChatGPT 开启开发者模式并添加 ChatX</h3></div>
-          <div class="guide-explain">
-            <p><strong>先确认套餐和权限。</strong> 当前完整 MCP（包含写入/修改操作）主要面向 Business、Enterprise 和 Edu 的开发者模式；Pro 可在开发者模式连接自定义 MCP，但目前以读取/fetch 能力为主。受工作空间管理的账号还需要管理员授予相应权限。</p>
-            <p><strong>1. 开启开发者模式。</strong> 打开 ChatGPT 设置，进入 <code>Apps → Advanced Settings</code> 开启 Developer mode；部分工作区当前也可能在 <code>Security and login</code> 中显示该开关。工作空间管理员还可能需要先在 <code>Workspace Settings → Permissions &amp; Roles</code> 中允许 Connected Data Developer mode / Create custom MCP connectors。不同账号的入口可能因灰度发布略有不同。</p>
-            <p><strong>2. 打开 Plugins / Apps 创建页。</strong> 进入 ChatGPT Plugins，点击 <code>＋</code> 创建 developer-mode app。应用名称填写 <code>chatx</code>，这样聊天里就可以清楚地以 <code>@chatx</code> 识别它。</p>
-            <p><strong>3. Connection 选择 Tunnel。</strong> 不要填写本机的 <code>127.0.0.1:3210</code>。选择 <code>Tunnel</code>，从列表选择 ChatX 正在使用的 Tunnel；如果列表里没有，也可以直接粘贴 <code>tunnel_...</code>。本地 MCP 不需要暴露公网。</p>
-            <p><strong>4. 扫描工具并创建。</strong> 点击 <code>Scan Tools</code>，确认能够扫描到 ChatX 的工具（例如 <code>server_info</code>、文件、Git、Shell 工具），然后点击 Create。创建完成后，它会出现在 <code>Settings → Apps → Enabled Apps</code>，开发版通常会带 <code>Dev</code> 标记。</p>
-            <p><strong>5. 如果 Tunnel 看不到。</strong> 检查 Tunnel 是否关联到了当前 ChatGPT workspace，而不仅仅是 Platform organization；创建应用的账号还需要 Tunnels Read + Use 权限。ChatX 桌面端也必须保持 Tunnel 为 <strong>running</strong>。</p>
-          </div>
-          <div class="inline-actions">
-            <button class="primary" id="guideChatGPTPlugins" type="button">打开 ChatGPT Plugins ↗</button>
-            <button class="secondary" id="guideDeveloperModeDocs" type="button">开发者模式说明 ↗</button>
-          </div>
-          <p class="fine-print">ChatGPT 的 Apps / Plugins / Developer mode 界面仍在迭代，名称和入口可能变化。若你更新了 ChatX 的工具定义，已发布应用不会自动采用新工具；需要在 ChatGPT 端刷新/审核应用工具。</p>
-        </section>
-
-        <section class="guide-block">
-          <div class="guide-block-title"><span class="kicker">USE IN CHATGPT</span><h3>在 ChatGPT 里怎么使用</h3></div>
-          <div class="guide-explain">
-            <p>确保 ChatX 正在运行，并且 Secure Tunnel 状态为 <strong>running</strong>。如果 ChatGPT 中已经添加了你的 ChatX 连接器，就可以在对话中直接调用它。</p>
-            <p>你当前的用法就是最直接的一种：在消息中写 <code>@chatx</code>，然后说明要操作的本地文件、Git 仓库或命令。</p>
-          </div>
-          <div class="chat-examples">
-            <div><span>查看项目</span><code>@chatx 列出 E:\Source\AI\chatgptx 的目录结构</code></div>
-            <div><span>读取文件</span><code>@chatx 读取 package.json，解释每个 npm script 是做什么的</code></div>
-            <div><span>修改代码</span><code>@chatx 修改这个项目的 Tauri 界面，然后运行测试</code></div>
-            <div><span>检查 Git</span><code>@chatx 看一下当前 git diff，告诉我这次改了什么</code></div>
-            <div><span>运行命令</span><code>@chatx 在项目目录运行 npm test</code></div>
-          </div>
-          <p class="fine-print">“运行命令”需要 Shell 权限；写文件需要“修改文件”；Git 提交等写操作需要 Git 写入。权限不足时，ChatX 会拒绝对应调用，而不是自动扩大权限。</p>
-        </section>
-
-        <section class="guide-block">
-          <div class="guide-block-title"><span class="kicker">DAILY USE</span><h3>日常使用方式</h3></div>
-          <div class="guide-explain">
-            <p><strong>启动：</strong>安装后直接从开始菜单或桌面快捷方式打开 ChatX，不会出现 CMD 窗口。</p>
-            <p><strong>最小化：</strong>点击系统最小化按钮会正常进入 Windows 任务栏。</p>
-            <p><strong>关闭窗口：</strong>点击右上角关闭不会退出程序，而是隐藏到系统托盘，Tunnel 和本地 MCP 继续运行。</p>
-            <p><strong>恢复：</strong>左键点击托盘中的 ChatX 图标，或右键选择“打开 ChatX”。</p>
-            <p><strong>真正退出：</strong>右键托盘图标选择“退出 ChatX”。这时桌面程序才会关闭自己启动的 Tunnel 和本地后端。</p>
-          </div>
-        </section>
-
-        <section class="guide-block">
-          <div class="guide-block-title"><span class="kicker">TROUBLESHOOTING</span><h3>常见问题</h3></div>
-          <div class="faq-list">
-            <details><summary>ChatGPT 说无法访问某个目录</summary><p>先检查“权限 → 允许目录”。目标文件必须位于已授权目录内，除非你明确开启了“完整文件系统访问”。</p></details>
-            <details><summary>可以读文件，但不能修改</summary><p>检查当前权限模式是否为“安全”。切换到“开发”，或在高级权限里开启“修改文件”。</p></details>
-            <details><summary>不能运行 npm / python / 其他命令</summary><p>Shell 默认关闭，因为它不受允许目录沙箱约束。只有确实需要执行本机命令时再开启 Shell。</p></details>
-            <details><summary>Tunnel 一直无法连接</summary><p>确认 Tunnel ID、Runtime API Key 是否匹配，运行“诊断”查看 tunnel-client 和 readyz 状态。也可以重新创建受限 Runtime Key 后再连接。</p></details>
-            <details><summary>点关闭后为什么进程还在</summary><p>这是设计行为：关闭窗口等同于隐藏到托盘。要彻底退出，请使用托盘菜单中的“退出 ChatX”。</p></details>
-          </div>
-        </section>
-
-        <section class="guide-tip">
-          <strong>推荐配置</strong>
-          <p>日常开发：使用“开发”模式 + 明确的项目允许目录；Runtime Key 用 DPAPI 保存；Shell、完整文件系统和高级 Git 默认保持关闭，需要时临时打开。</p>
-        </section>
-      </div>
-    </section>
-
-    <footer id="settingsFile">ChatX Desktop</footer>
-  </main>
-</div>
-<script src="./app.js"></script>
+      <section class="page" data-page-panel="logs">
+        <div class="card">
+          <div class="section-head"><div><span class="eyebrow">RUNTIME LOG</span><h2>ChatX 运行日志</h2></div><div class="actions"><button id="openLogs" class="ghost">打开数据目录</button><button id="copyLogs" class="ghost">复制</button></div></div>
+          <pre id="logs">尚无日志。</pre>
+          <p class="muted">这里只记录 ChatX/Tunnel 生命周期。MCP 工具执行由 Desktop Commander 直接处理。</p>
+        </div>
+      </section>
+    </main>
+  </div>
+  <script src="./app.js"></script>
 </body>
 </html>

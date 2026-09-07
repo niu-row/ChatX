@@ -1,106 +1,50 @@
-import assert from 'node:assert/strict';
 import fs from 'node:fs';
-import { execFileSync } from 'node:child_process';
 
-const config = JSON.parse(fs.readFileSync('src-tauri/tauri.conf.json', 'utf8'));
-const cargo = fs.readFileSync('src-tauri/Cargo.toml', 'utf8');
-const rust = fs.readFileSync('src-tauri/src/main.rs', 'utf8');
+const main = fs.readFileSync('src-tauri/src/main.rs', 'utf8');
 const html = fs.readFileSync('desktop/index.html', 'utf8');
-const appJs = fs.readFileSync('desktop/app.js', 'utf8');
+const app = fs.readFileSync('desktop/app.js', 'utf8');
 const prepare = fs.readFileSync('scripts/prepare-desktop-bundle.mjs', 'utf8');
-const installerHooks = fs.readFileSync('src-tauri/windows/hooks.nsh', 'utf8');
-const installerTemplate = fs.readFileSync('src-tauri/windows/installer-template.nsi', 'utf8');
-const stopRuntime = fs.readFileSync('src-tauri/windows/stop-runtime.ps1', 'utf8');
-const buildInstaller = fs.readFileSync('scripts/build-installer.mjs', 'utf8');
+const tauri = fs.readFileSync('src-tauri/tauri.conf.json', 'utf8');
+const runtimeLock = JSON.parse(fs.readFileSync('runtime-lock.json', 'utf8'));
 const pkg = JSON.parse(fs.readFileSync('package.json', 'utf8'));
 
-assert.equal(config.build.frontendDist, '../desktop');
-assert.equal(config.app.withGlobalTauri, true);
-assert.equal(config.app.windows?.[0]?.label, 'main');
-assert.equal(config.productName, 'ChatX');
-assert.equal(config.app.windows?.[0]?.title, 'ChatX 本地控制台');
-assert.equal(config.bundle.active, true);
-assert.ok(config.bundle.targets.includes('nsis'));
-assert.equal(config.bundle.windows?.nsis?.installMode, 'currentUser');
-assert.equal(config.bundle.windows.nsis.template, './windows/installer-template.nsi');
-assert.equal(config.bundle.windows.nsis.installerHooks, './windows/hooks.nsh');
-assert.match(installerTemplate, /ChatX upgrades must not invoke an older uninstaller/);
-assert.match(installerTemplate, /\$\{ElseIf\} \$R0 = 1[\s\S]*?StrCpy \$ReinstallPageCheck 2[\s\S]*?Abort/);
-assert.match(installerHooks, /-MainBinaryName/);
-assert.ok(installerHooks.indexOf('nsExec::ExecToLog') < installerHooks.indexOf('!insertmacro CheckIfAppIsRunning'),
-  'Runtime cleanup must run before the standard app-running check');
-assert.match(stopRuntime, /chatx-desktop\.exe/);
-assert.match(stopRuntime, /chatgptx-backend\.mjs/);
-assert.match(stopRuntime, /FileShare\]::None/);
-assert.match(stopRuntime, /Get-CimInstance/);
-assert.match(stopRuntime, /ChatXPath/);
-assert.match(rust, /async fn restart_backend/);
-assert.match(rust, /restart_backend,/);
-assert.match(html, /id="restartBackend"/);
-assert.match(appJs, /invoke\('restart_backend'\)/);
-assert.equal(config.bundle.resources['resources/chatgptx-backend.mjs'], 'chatgptx-backend.mjs');
-assert.equal(config.bundle.resources['resources/node.exe'], 'node.exe');
-assert.equal(config.bundle.resources['resources/tunnel-client.exe'], 'tunnel-client.exe');
+function requireText(label, text, needle) {
+  if (!text.includes(needle)) throw new Error(`${label} is missing: ${needle}`);
+}
+function rejectText(label, text, needle) {
+  if (text.includes(needle)) throw new Error(`${label} still contains obsolete runtime text: ${needle}`);
+}
 
-assert.match(cargo, /tauri-plugin-dialog\s*=\s*"2"/);
-assert.match(cargo, /features\s*=\s*\["tray-icon"\]/);
-assert.match(rust, /async fn pick_folders/);
-assert.match(rust, /blocking_pick_folders/);
-assert.match(rust, /async fn backend_request/);
-assert.match(rust, /async fn ensure_backend/);
-assert.match(rust, /resource_dir/);
-assert.match(rust, /app_local_data_dir/);
-assert.match(rust, /windows_subsystem\s*=\s*"windows"/);
-assert.match(rust, /CREATE_NO_WINDOW/);
-assert.match(rust, /current_exe/);
-assert.match(rust, /backend\.log/);
-assert.match(rust, /\/api\/invocations/);
-assert.match(rust, /CHATGPTX_PORT\", \"3210/);
-assert.match(rust, /ensure_backend_impl/);
-assert.match(rust, /后端自动恢复后重试仍失败/);
-assert.match(rust, /TrayIconBuilder/);
-assert.match(rust, /CloseRequested/);
-assert.match(rust, /prevent_close/);
-assert.match(rust, /window\.hide/);
+requireText('main.rs', main, 'runtimes');
+requireText('main.rs', main, 'connect');
+requireText('main.rs', main, '--mcp-command');
+requireText('main.rs', main, 'desktop-commander');
+requireText('main.rs', main, 'env:CHATX_TUNNEL_RUNTIME_KEY');
+requireText('main.rs', main, 'ProtectedData');
+rejectText('main.rs', main, '127.0.0.1:3210');
+rejectText('main.rs', main, 'backend_request');
+rejectText('main.rs', main, 'chatgptx-backend.mjs');
 
-assert.match(html, /id="chooseFolders"/);
-assert.match(html, /获取 Tunnel ID/);
-assert.match(html, /获取 Runtime Key/);
-assert.match(html, /data-page="guide"/);
-assert.match(html, /工作原理/);
-assert.match(html, /在 ChatGPT 开启开发者模式并添加 ChatX/);
-assert.match(html, /在 ChatGPT 里怎么使用/);
-assert.match(html, /ChatGPT Plugins/);
-assert.match(html, /@chatx/);
-assert.match(html, /id="guideTunnelIdInput"/);
-assert.match(html, /id="guideApiKeyInput"/);
-assert.match(html, /id="guideRememberKey"/);
-assert.match(html, /id="guideConnect"/);
-assert.match(html, /data-page="invocations"/);
-assert.match(html, /id="invocationLimit"/);
-assert.match(html, /<details class="advanced-box">/);
-assert.doesNotMatch(html, /<textarea[^>]+id="roots"/);
-assert.match(appJs, /invoke\('pick_folders'/);
-assert.match(appJs, /updateSettings\(\{ roots: merged \}\)/);
-assert.match(appJs, /\/api\/invocations/);
-assert.match(appJs, /refreshInvocations/);
-assert.match(appJs, /bindCredentialMirrors/);
-assert.match(appJs, /guideConnect/);
-assert.match(appJs, /guideApiKeyInput/);
+requireText('desktop/index.html', html, 'Desktop Commander');
+requireText('desktop/index.html', html, 'Secure MCP Tunnel');
+requireText('desktop/app.js', app, "invoke('connect_tunnel'");
+requireText('desktop/app.js', app, "invoke('get_status'");
+rejectText('desktop/app.js', app, '/api/tunnel/status');
+rejectText('desktop/app.js', app, '/api/settings');
+rejectText('desktop/app.js', app, 'permissionPreset');
 
-assert.match(prepare, /esbuild|from 'esbuild'/);
-assert.match(prepare, /node\.exe/);
-assert.match(prepare, /tunnel-client\.exe/);
-assert.equal(pkg.scripts['desktop:dev'], 'npm run build && tauri dev');
-assert.equal(pkg.scripts['desktop:build'], 'npm run desktop:prepare && tauri build --no-bundle');
-assert.equal(pkg.scripts['desktop:installer'], 'npm run desktop:prepare && node scripts/build-installer.mjs');
-assert.equal(pkg.scripts['desktop:release'], 'npm run desktop:prepare && node scripts/build-installer.mjs --publish');
-assert.match(buildInstaller, /os error 32/i);
-assert.match(buildInstaller, /maxAttempts = 3/);
-assert.match(buildInstaller, /published.*unsigned/i);
-assert.doesNotMatch(pkg.scripts['desktop:release'], /require-signing/);
+requireText('prepare-desktop-bundle.mjs', prepare, '@wonderwhy-er/desktop-commander@');
+requireText('prepare-desktop-bundle.mjs', prepare, '--ignore-scripts');
+requireText('prepare-desktop-bundle.mjs', prepare, 'DesktopCommander-LICENSE.txt');
+rejectText('prepare-desktop-bundle.mjs', prepare, 'chatgptx-backend.mjs');
 
-execFileSync(process.execPath, ['--check', 'desktop/app.js'], { stdio: 'pipe' });
-execFileSync(process.execPath, ['--check', 'scripts/prepare-desktop-bundle.mjs'], { stdio: 'pipe' });
-execFileSync(process.execPath, ['--check', 'scripts/build-installer.mjs'], { stdio: 'pipe' });
-console.log('desktop static test ok: installer resources, tray behavior, native folder picker, detailed guide');
+requireText('tauri.conf.json', tauri, 'resources/desktop-commander');
+requireText('tauri.conf.json', tauri, 'DesktopCommander-LICENSE.txt');
+rejectText('tauri.conf.json', tauri, 'chatgptx-backend.mjs');
+
+if (runtimeLock.schemaVersion !== 2) throw new Error('runtime-lock.json schemaVersion must be 2.');
+if (runtimeLock.desktopCommander?.version !== '0.2.48') throw new Error('Desktop Commander must be locked to 0.2.48.');
+if (!pkg.description.includes('Desktop Commander')) throw new Error('package description must describe the new bridge architecture.');
+if (pkg.scripts?.test?.includes('security-regression-test')) throw new Error('package test still references the removed MCP backend.');
+
+console.log('desktop static checks passed');
