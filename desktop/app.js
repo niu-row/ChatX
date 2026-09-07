@@ -83,7 +83,8 @@ function render(s) {
   $('logs').textContent = logs.length ? logs.join('\n') : '尚无日志。';
   $('logs').scrollTop = $('logs').scrollHeight;
 
-  showError(s.lastError && s.runtimeState === 'error' ? s.lastError : '');
+  const hasRuntimeError = ['error', 'unavailable'].includes(String(s.runtimeState || '').toLowerCase());
+  showError(s.lastError && hasRuntimeError ? s.lastError : '');
 }
 
 async function refresh() {
