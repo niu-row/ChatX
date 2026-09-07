@@ -209,6 +209,11 @@ fn mcp_command(paths: &RuntimePaths, dc_home: &Path) -> String {
     )
 }
 
+fn runtime_not_running(text: &str) -> bool {
+    let text = text.to_ascii_lowercase();
+    text.contains("not found") || text.contains("no runtime") || text.contains("stopped")
+}
+
 fn stop_runtime(app: &tauri::AppHandle, state: Option<&AppState>) -> Result<Value, String> {
     let paths = runtime_paths(app)?;
     let args = vec!["runtimes".into(), "stop".into(), RUNTIME_ALIAS.into(), "--json".into()];
@@ -218,7 +223,7 @@ fn stop_runtime(app: &tauri::AppHandle, state: Option<&AppState>) -> Result<Valu
         Ok(parse_json_output(&output).unwrap_or_else(|| json!({"state":"stopped"})))
     } else {
         let text = output_text(&output);
-        if text.contains("not found") || text.contains("No runtime") || text.contains("stopped") {
+        if runtime_not_running(&text) {
             Ok(json!({"state":"stopped"}))
         } else { Err(format!("停止 Tunnel 失败：{text}")) }
     }
@@ -245,7 +250,14 @@ fn runtime_status(paths: &RuntimePaths) -> (String, bool, Option<Value>, String)
             let active = parsed.as_ref().map(runtime_payload_active).unwrap_or(false);
             (state, active, parsed, String::new())
         }
-        Ok(output) => ("stopped".into(), false, None, output_text(&output)),
+        Ok(output) => {
+            let text = output_text(&output);
+            if runtime_not_running(&text) {
+                ("stopped".into(), false, None, String::new())
+            } else {
+                ("error".into(), false, None, text)
+            }
+        }
         Err(error) => ("error".into(), false, None, error),
     }
 }
@@ -311,7 +323,7 @@ fn connect_tunnel(app: tauri::AppHandle, state: State<'_, AppState>, tunnel_id: 
     let dc_home = desktop_commander_home(&app)?;
     fs::create_dir_all(&profiles).map_err(|e| format!("创建 Tunnel profile 目录失败：{e}"))?;
     fs::create_dir_all(&dc_home).map_err(|e| format!("创建 Desktop Commander 数据目录失败：{e}"))?;
-    let _ = stop_runtime(&app, None);
+    stop_runtime(&app, None)?;
     let args = vec![
         "runtimes".into(), "connect".into(), "--alias".into(), RUNTIME_ALIAS.into(),
         "--tunnel-id".into(), tunnel_id,
