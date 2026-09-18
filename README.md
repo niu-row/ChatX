@@ -1,6 +1,6 @@
 # ChatX
 
-ChatX 是一个 Windows 桌面桥接程序，用来把 ChatGPT 的 Secure MCP Tunnel 连接到本机的 Desktop Commander MCP。
+ChatX 是一个 Windows / macOS 桌面桥接程序，用来把 ChatGPT 的 Secure MCP Tunnel 连接到本机的 Desktop Commander MCP。
 
 当前架构：
 
@@ -24,12 +24,12 @@ ChatX 不再实现自己的 Filesystem、Git、Shell 或 MCP HTTP Server。文�
 
 ## 0.3.0 运行组件
 
-Windows 安装包固定打包：
+Windows x64 和 macOS Apple Silicon（M1/M2/M3/M4）构建固定打包：
 
 - OpenAI `tunnel-client`
 - Node.js
 - Desktop Commander 0.2.48 的官方 GitHub Release MCPB
-- MCPB 内随包提供的 Windows `ripgrep`
+- MCPB 内随包提供的当前平台 `ripgrep`
 
 Desktop Commander 通过 stdio 启动，不要求最终用户安装 Node、npm、ripgrep 或 Desktop Commander。
 
@@ -53,7 +53,7 @@ Desktop Commander 通过 stdio 启动，不要求最终用户安装 Node、npm�
 - Tunnel ID，例如 `tunnel_...`
 - Runtime API Key
 
-可选择使用 Windows DPAPI（CurrentUser）保存 Runtime Key。明文 Key 不写入 `settings.json`。
+Windows 可选择使用 DPAPI（CurrentUser）保存 Runtime Key。macOS 当前采用 session-only 模式，每次建立连接时输入 Runtime Key；明文 Key 不写入 `settings.json`。
 
 点击“连接并启动”后，ChatX 调用：
 
@@ -89,7 +89,7 @@ DESKTOP_COMMANDER_DISABLE_TELEMETRY=1
 
 `CHATX_TUNNEL_RUNTIME_KEY` 只用于 tunnel-client 身份验证。ChatX 的 Desktop Commander launcher 会在加载 MCP server 之前从进程环境中删除该变量，避免 Desktop Commander 以及它启动的 Shell/子进程继承 Runtime API Key。
 
-Desktop Commander 仍然是高权限本地自动化工具。它可以读取和修改文件，并执行终端命令。其 `allowedDirectories` 和 command blocklist 属于防误操作 guardrail，不是 OS sandbox；终端命令能够以当前 Windows 用户身份启动其他程序。如需强隔离，应使用 VM、dev container 或独立机器。
+Desktop Commander 仍然是高权限本地自动化工具。它可以读取和修改文件，并执行终端命令。其 `allowedDirectories` 和 command blocklist 属于防误操作 guardrail，不是 OS sandbox；终端命令能够以当前登录用户身份启动其他程序。如需强隔离，应使用 VM、dev container 或独立机器。
 
 ## 从 0.2.1 升级
 
@@ -105,8 +105,8 @@ connection.tunnelId
 
 要求：
 
-- Windows x64
-- Node 版本必须匹配 `runtime-lock.json`
+- Windows x64 或 macOS Apple Silicon（darwin-arm64）
+- Node 构建输入必须匹配对应平台 runtime lock
 - 已安装/可定位锁定版本的 OpenAI tunnel-client
 - Rust/Tauri 构建环境
 - 可访问锁定的 Desktop Commander GitHub Release，或准备好对应 MCPB 本地文件
@@ -150,13 +150,13 @@ npm run desktop:dev
 npm run desktop:build
 ```
 
-构建 NSIS 安装包：
+构建本机安装包（Windows 为 NSIS；macOS arm64 为 app + DMG）：
 
-```powershell
+```bash
 npm run desktop:installer
 ```
 
-`desktop:installer` 可用于本地开发安装包；未配置证书时允许生成 unsigned installer，Windows 可能显示 Unknown Publisher / SmartScreen 提示。
+在 M1 Mac 上，产物位于 `src-tauri/target/release/bundle/macos/` 和 `src-tauri/target/release/bundle/dmg/`。当前 macOS 本地包尚未配置 Developer ID notarization，仅用于本机开发/测试。Windows 本地安装包仍允许 unsigned build。
 
 正式发布到 `release/` 必须配置 Authenticode 证书和时间戳服务：
 
@@ -201,7 +201,7 @@ Runtime API Key 只通过环境变量引用传给 tunnel-client：
 --runtime-api-key env:CHATX_TUNNEL_RUNTIME_KEY
 ```
 
-如果选择记住密钥，ChatX 在 Windows 上通过 DPAPI CurrentUser 加密保存；Tunnel ID 可以保存在普通 JSON 设置中。Desktop Commander launcher 会删除继承到 MCP 进程的 `CHATX_TUNNEL_RUNTIME_KEY`，避免其继续传播到工具启动的子进程。
+如果选择记住密钥，ChatX 在 Windows 上通过 DPAPI CurrentUser 加密保存；macOS 当前不持久化 Runtime Key。Tunnel ID 可以保存在普通 JSON 设置中。Desktop Commander launcher 会删除继承到 MCP 进程的 `CHATX_TUNNEL_RUNTIME_KEY`，避免其继续传播到工具启动的子进程。
 
 Desktop Commander 的构建输入使用 `runtime-lock.json` 中锁定的 GitHub Release MCPB。ChatX 在解包前验证整个 release asset 的大小和 SHA-256，因此包内 `dist`、生产依赖和 ripgrep 都由同一个已锁定 artifact 决定。
 
@@ -213,3 +213,23 @@ Desktop Commander 的构建输入使用 `runtime-lock.json` 中锁定的 GitHub 
 - Desktop Commander: `wonderwhy-er/DesktopCommanderMCP`
 
 Desktop Commander 使用 MIT License。ChatX 安装资源中保留其 LICENSE。
+
+
+## macOS Apple Silicon 快速开始
+
+在 M1/M2/M3/M4 Mac 上安装 Node.js 24 和 Rust/Tauri 构建环境后：
+
+```bash
+npm ci
+npm test
+npm run desktop:verify
+npm run desktop:dev
+```
+
+`desktop:verify` 会下载并校验锁定的 Node.js arm64、OpenAI tunnel-client arm64 和 Desktop Commander MCPB，然后执行真实 stdio MCP smoke test。需要生成本机 DMG 时运行：
+
+```bash
+npm run desktop:installer
+```
+
+macOS 版本当前不会持久化 Runtime API Key；每次连接时输入即可。
