@@ -1,0 +1,28 @@
+{
+  "schemaVersion": 3,
+  "platform": "darwin-arm64",
+  "node": {
+    "version": "v24.16.0",
+    "archive": "node-v24.16.0-darwin-arm64.tar.gz",
+    "archiveRoot": "node-v24.16.0-darwin-arm64",
+    "archiveUrl": "https://nodejs.org/dist/v24.16.0/node-v24.16.0-darwin-arm64.tar.gz",
+    "archiveSha256": "39189dab4eeb15706c424af0ac08a3044c9e48f7db12a7d77f6b7aafc7dd5df6"
+  },
+  "tunnelClient": {
+    "version": "0.0.14+0f870e50a973fa820d4c409000059e181e8d242b (git sha: 0f870e50a973fa820d4c409000059e181e8d242b)",
+    "releaseTag": "v0.0.14",
+    "releaseAsset": "tunnel-client-v0.0.14-darwin-arm64.zip",
+    "releaseUrl": "https://github.com/openai/tunnel-client/releases/download/v0.0.14/tunnel-client-v0.0.14-darwin-arm64.zip",
+    "size": 26771198,
+    "sha256": "b540493c5bdbcdbb755700c8e2e16597e28b1569e425007e0f73111047bd6a64"
+  },
+  "desktopCommander": {
+    "version": "0.2.48",
+    "sourceCommit": "ea8e9a47440ccffefede7060e0ddb490540f414d",
+    "releaseTag": "v0.2.48",
+    "releaseAsset": "desktop-commander-0.2.48.mcpb",
+    "releaseUrl": "https://github.com/wonderwhy-er/DesktopCommanderMCP/releases/download/v0.2.48/desktop-commander-0.2.48.mcpb",
+    "size": 53423074,
+    "sha256": "f261fc8e93f5b43ad077a73211acc97108072e892092f88f49fb4acf2e97ead7"
+  }
+}
