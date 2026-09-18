@@ -4,6 +4,8 @@
 
 ### Changed
 
+- Added native macOS Apple Silicon (`darwin-arm64`) development and local packaging support, including locked Node.js and OpenAI tunnel-client arm64 release artifacts, platform-specific Tauri resources, and cross-platform Desktop Commander smoke tests.
+- macOS Runtime API Keys are session-only for now; Windows DPAPI behavior is unchanged.
 - Replaced the custom ChatX MCP backend with bundled Desktop Commander 0.2.48.
 - ChatX now launches OpenAI `tunnel-client` directly with a local stdio MCP command.
 - Removed the localhost `127.0.0.1:3210/mcp` runtime path and the custom Filesystem/Git/Shell MCP tool implementation.
