@@ -49,7 +49,7 @@
         <div class="facts">
           <article class="card fact"><span>Secure MCP Tunnel</span><strong id="tunnelFact">—</strong><small id="tunnelVersion">—</small></article>
           <article class="card fact"><span>Desktop Commander</span><strong id="dcFact">—</strong><small id="dcVersion">—</small></article>
-          <article class="card fact"><span>Runtime Key</span><strong id="keyFact">—</strong><small>Windows DPAPI / 本次输入</small></article>
+          <article class="card fact"><span>Runtime Key</span><strong id="keyFact">—</strong><small id="keyStorageHint">安全存储 / 本次输入</small></article>
         </div>
 
         <div class="card architecture">
@@ -60,7 +60,7 @@
             <div><b>Desktop Commander</b><span>stdio MCP</span></div><i>→</i>
             <div><b>本机</b><span>Files / Shell / Process</span></div>
           </div>
-          <p class="note">Desktop Commander 是高权限本地自动化工具。终端命令可以访问当前 Windows 用户可访问的资源；ChatX 不额外模拟一套 Git、文件或 Shell 权限。</p>
+          <p class="note">Desktop Commander 是高权限本地自动化工具。终端命令可以访问当前登录用户可访问的资源；ChatX 不额外模拟一套 Git、文件或 Shell 权限。</p>
         </div>
       </section>
 
@@ -71,7 +71,7 @@
             <h2>连接 ChatGPT</h2>
             <label>Tunnel ID<input id="tunnelId" autocomplete="off" placeholder="tunnel_..."></label>
             <label>Runtime API Key<input id="runtimeKey" type="password" autocomplete="off" placeholder="已保存时可留空"></label>
-            <label class="check"><input id="rememberKey" type="checkbox" checked><span>使用 Windows DPAPI 保存 Runtime Key</span></label>
+            <label class="check"><input id="rememberKey" type="checkbox" checked><span id="rememberKeyText">安全保存 Runtime Key</span></label>
             <div class="actions">
               <button id="connect" class="primary">连接并启动</button>
               <button id="stop" class="secondary">停止连接</button>
