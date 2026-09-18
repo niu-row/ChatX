@@ -3,9 +3,10 @@ import fs from 'node:fs';
 import path from 'node:path';
 
 const resourceDir = path.resolve('src-tauri', 'resources');
+const executable = (name) => process.platform === 'win32' ? `${name}.exe` : name;
 const required = [
-  'node.exe',
-  'tunnel-client.exe',
+  executable('node'),
+  executable('tunnel-client'),
   'desktop-commander-launcher.mjs',
   'runtime-manifest.json',
   'tunnel-client-LICENSE.txt',
@@ -31,7 +32,9 @@ for (const file of [dcPackage, dcBundleManifest, dcEntry, dcLicense]) {
 }
 
 const manifest = JSON.parse(fs.readFileSync(path.join(resourceDir, 'runtime-manifest.json'), 'utf8'));
-const locked = JSON.parse(fs.readFileSync('runtime-lock.json', 'utf8'));
+const platform = `${process.platform}-${process.arch}`;
+const lockFile = platform === 'win32-x64' ? 'runtime-lock.json' : `runtime-lock.${platform}.json`;
+const locked = JSON.parse(fs.readFileSync(lockFile, 'utf8'));
 const installed = JSON.parse(fs.readFileSync(dcPackage, 'utf8'));
 const bundleManifest = JSON.parse(fs.readFileSync(dcBundleManifest, 'utf8'));
 
