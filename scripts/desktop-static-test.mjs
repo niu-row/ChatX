@@ -9,6 +9,9 @@ const installerRuntime = fs.readFileSync('scripts/installer-runtime-test.mjs', '
 const launcher = fs.readFileSync('scripts/desktop-commander-launcher.mjs', 'utf8');
 const bridge = fs.readFileSync('scripts/bridge-smoke-test.mjs', 'utf8');
 const tauri = fs.readFileSync('src-tauri/tauri.conf.json', 'utf8');
+const tauriWindows = fs.readFileSync('src-tauri/tauri.windows.conf.json', 'utf8');
+const tauriMacos = fs.readFileSync('src-tauri/tauri.macos.conf.json', 'utf8');
+const macRuntimeLock = JSON.parse(fs.readFileSync('runtime-lock.darwin-arm64.json', 'utf8'));
 const runtimeLock = JSON.parse(fs.readFileSync('runtime-lock.json', 'utf8'));
 const pkg = JSON.parse(fs.readFileSync('package.json', 'utf8'));
 
@@ -52,11 +55,16 @@ requireText('desktop/app.js', app, "['error', 'unavailable'].includes");
 rejectText('desktop/app.js', app, '/api/tunnel/status');
 rejectText('desktop/app.js', app, 'permissionPreset');
 
+requireText('prepare-desktop-bundle.mjs', prepare, "supportedPlatforms = new Set(['win32-x64', 'darwin-arm64'])");
 requireText('prepare-desktop-bundle.mjs', prepare, 'runtimeLock.schemaVersion !== 3');
 requireText('prepare-desktop-bundle.mjs', prepare, 'DESKTOP_COMMANDER_MCPB_PATH');
 requireText('prepare-desktop-bundle.mjs', prepare, 'Desktop Commander MCPB SHA-256');
 requireText('prepare-desktop-bundle.mjs', prepare, 'releaseUrl');
 requireText('prepare-desktop-bundle.mjs', prepare, 'Expand-Archive');
+requireText('prepare-desktop-bundle.mjs', prepare, "'/usr/bin/unzip'");
+requireText('prepare-desktop-bundle.mjs', prepare, "'/usr/bin/tar'");
+requireText('prepare-desktop-bundle.mjs', prepare, 'node.archiveSha256');
+requireText('prepare-desktop-bundle.mjs', prepare, 'tunnel.releaseAsset');
 requireText('prepare-desktop-bundle.mjs', prepare, "const dcRoot = path.join(resourceDir, 'desktop-commander');");
 requireText('prepare-desktop-bundle.mjs', prepare, "entry: 'desktop-commander/dist/index.js'");
 requireText('prepare-desktop-bundle.mjs', prepare, 'locked-github-release');
@@ -102,9 +110,15 @@ requireText('bridge-smoke-test.mjs', bridge, 'CHATX_KEY_STRIPPED');
 requireText('bridge-smoke-test.mjs', bridge, 'chatx-ripgrep-smoke');
 rejectText('bridge-smoke-test.mjs', bridge, "node_modules', '@wonderwhy-er', 'desktop-commander'");
 
-requireText('tauri.conf.json', tauri, 'resources/desktop-commander');
-requireText('tauri.conf.json', tauri, 'desktop-commander-launcher.mjs');
+requireText('tauri.windows.conf.json', tauriWindows, 'resources/desktop-commander');
+requireText('tauri.windows.conf.json', tauriWindows, 'resources/node.exe');
+requireText('tauri.macos.conf.json', tauriMacos, 'resources/desktop-commander');
+requireText('tauri.macos.conf.json', tauriMacos, 'resources/node');
+requireText('tauri.macos.conf.json', tauriMacos, 'resources/cloudflared');
 rejectText('tauri.conf.json', tauri, 'chatgptx-backend.mjs');
+if (macRuntimeLock.platform !== 'darwin-arm64') throw new Error('macOS runtime lock must target darwin-arm64.');
+if (!/^[0-9a-f]{64}$/i.test(macRuntimeLock.node?.archiveSha256 ?? '')) throw new Error('macOS Node archive SHA-256 must be locked.');
+if (!/^[0-9a-f]{64}$/i.test(macRuntimeLock.tunnelClient?.sha256 ?? '')) throw new Error('macOS tunnel-client archive SHA-256 must be locked.');
 
 if (runtimeLock.schemaVersion !== 3) throw new Error('runtime-lock.json schemaVersion must be 3.');
 if (runtimeLock.desktopCommander?.version !== '0.2.48') throw new Error('Desktop Commander must be locked to 0.2.48.');
