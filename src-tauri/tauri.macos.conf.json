@@ -1,0 +1,21 @@
+{
+  "bundle": {
+    "targets": ["app", "dmg"],
+    "icon": ["icons/icon.png", "icons/128x128.png", "icons/128x128@2x.png"],
+    "resources": {
+      "resources/node": "node",
+      "resources/tunnel-client": "tunnel-client",
+      "resources/cloudflared": "cloudflared",
+      "resources/cloudflared-manifest.json": "cloudflared-manifest.json",
+      "resources/desktop-commander-launcher.mjs": "desktop-commander-launcher.mjs",
+      "resources/runtime-manifest.json": "runtime-manifest.json",
+      "resources/tunnel-client-LICENSE.txt": "tunnel-client-LICENSE.txt",
+      "resources/tunnel-client-NOTICE.txt": "tunnel-client-NOTICE.txt",
+      "resources/DesktopCommander-LICENSE.txt": "DesktopCommander-LICENSE.txt",
+      "resources/desktop-commander": "desktop-commander"
+    },
+    "macOS": {
+      "minimumSystemVersion": "12.0"
+    }
+  }
+}
