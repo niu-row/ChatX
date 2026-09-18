@@ -68,6 +68,17 @@ fn state_dir(app: &tauri::AppHandle) -> Result<PathBuf, String> {
 fn settings_path(app: &tauri::AppHandle) -> Result<PathBuf, String> { Ok(state_dir(app)?.join("settings.json")) }
 fn secret_path(app: &tauri::AppHandle) -> Result<PathBuf, String> { Ok(state_dir(app)?.join("runtime-key.dpapi")) }
 
+fn runtime_key_saved(app: &tauri::AppHandle) -> bool {
+    #[cfg(windows)]
+    { secret_path(app).map(|path| path.is_file()).unwrap_or(false) }
+    #[cfg(not(windows))]
+    { let _ = app; false }
+}
+
+fn runtime_binary_name(base: &str) -> String {
+    if cfg!(windows) { format!("{base}.exe") } else { base.to_string() }
+}
+
 fn load_settings(app: &tauri::AppHandle) -> Settings {
     let Ok(path) = settings_path(app) else { return Settings::default(); };
     let Ok(text) = fs::read_to_string(&path) else { return Settings::default(); };
@@ -87,7 +98,7 @@ fn load_settings(app: &tauri::AppHandle) -> Settings {
         .map(str::trim)
         .filter(|value| !value.is_empty());
     let Some(tunnel_id) = tunnel_id else { return Settings::default(); };
-    let remember_key = secret_path(app).map(|secret| secret.is_file()).unwrap_or(false);
+    let remember_key = runtime_key_saved(app);
     let migrated = Settings { tunnel_id: tunnel_id.to_string(), remember_key };
     let _ = save_settings(app, &migrated);
     migrated
@@ -115,8 +126,8 @@ fn resource_candidates(app: &tauri::AppHandle) -> Vec<PathBuf> {
 
 fn runtime_paths(app: &tauri::AppHandle) -> Result<RuntimePaths, String> {
     for root in resource_candidates(app) {
-        let tunnel = root.join("tunnel-client.exe");
-        let node = root.join("node.exe");
+        let tunnel = root.join(runtime_binary_name("tunnel-client"));
+        let node = root.join(runtime_binary_name("node"));
         let launcher = root.join("desktop-commander-launcher.mjs");
         let desktop_commander = root.join("desktop-commander").join("dist").join("index.js");
         if tunnel.is_file() && node.is_file() && launcher.is_file() && desktop_commander.is_file() {
@@ -281,7 +292,7 @@ fn manifest(paths: &RuntimePaths) -> Value {
 #[tauri::command]
 fn get_status(app: tauri::AppHandle, state: State<'_, AppState>) -> Result<Value, String> {
     let settings = load_settings(&app);
-    let secret_saved = secret_path(&app)?.is_file();
+    let secret_saved = runtime_key_saved(&app);
     match runtime_paths(&app) {
         Ok(paths) => {
             let dc_home = desktop_commander_home(&app)?;
@@ -304,6 +315,8 @@ fn get_status(app: tauri::AppHandle, state: State<'_, AppState>) -> Result<Value
                 "tunnelId":settings.tunnel_id,
                 "rememberKey":settings.remember_key,
                 "runtimeKeySaved":secret_saved,
+                "keyStorage":if cfg!(windows) {"Windows DPAPI"} else {"session only"},
+                "platform":format!("{}-{}", std::env::consts::OS, std::env::consts::ARCH),
                 "runtimeState":runtime_state,
                 "runtimeActive":runtime_active,
                 "runtime":runtime,
@@ -320,6 +333,8 @@ fn get_status(app: tauri::AppHandle, state: State<'_, AppState>) -> Result<Value
             "tunnelId":settings.tunnel_id,
             "rememberKey":settings.remember_key,
             "runtimeKeySaved":secret_saved,
+            "keyStorage":if cfg!(windows) {"Windows DPAPI"} else {"session only"},
+            "platform":format!("{}-{}", std::env::consts::OS, std::env::consts::ARCH),
             "runtimeState":"unavailable",
             "runtimeActive":false,
             "lastError":error,
@@ -335,6 +350,9 @@ fn connect_tunnel(app: tauri::AppHandle, state: State<'_, AppState>, tunnel_id: 
     let key = load_runtime_key(&app, &runtime_key)?;
     let secret = secret_path(&app)?;
     if remember_key {
+        #[cfg(not(windows))]
+        return Err("macOS 当前使用仅本次会话的 Runtime Key；请取消“记住 Runtime Key”后连接。".into());
+        #[cfg(windows)]
         protect_secret(&key, &secret)?;
     } else if secret.exists() {
         fs::remove_file(&secret).map_err(|e| format!("清除旧 Runtime Key 失败：{e}"))?;
@@ -395,9 +413,9 @@ fn run_diagnostics(app: tauri::AppHandle) -> Result<Value, String> {
         Err(error) => checks.push(json!({"name":"Bundled runtime","ok":false,"detail":error}))
     }
     let settings = load_settings(&app);
-    let saved = secret_path(&app)?.is_file();
+    let saved = runtime_key_saved(&app);
     checks.push(json!({"name":"Tunnel ID","ok":settings.tunnel_id.starts_with("tunnel_"),"detail":settings.tunnel_id}));
-    checks.push(json!({"name":"Runtime Key","ok":saved,"detail":if saved{"DPAPI saved"}else{"not saved; enter it when connecting"}}));
+    checks.push(json!({"name":"Runtime Key","ok":if cfg!(windows){saved}else{true},"detail":if saved{"DPAPI saved"}else if cfg!(windows){"not saved; enter it when connecting"}else{"session only; enter it when connecting"}}));
     Ok(json!({"checks":checks}))
 }
 
