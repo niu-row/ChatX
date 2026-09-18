@@ -69,10 +69,14 @@ function render(s) {
   $('dcFact').textContent = unavailable ? 'Unavailable' : 'Bundled';
   $('dcVersion').textContent = `v${s.desktopCommander?.version || 'unknown'}`;
   $('keyFact').textContent = s.runtimeKeySaved ? '已保存' : '未保存';
+  const sessionOnly = s.keyStorage === 'session only';
+  $('keyStorageHint').textContent = sessionOnly ? 'macOS：仅本次输入' : 'Windows DPAPI / 本次输入';
+  $('rememberKeyText').textContent = sessionOnly ? 'macOS 当前不保存 Runtime Key' : '使用 Windows DPAPI 保存 Runtime Key';
 
   if (s.tunnelId && document.activeElement !== $('tunnelId')) $('tunnelId').value = s.tunnelId;
-  $('rememberKey').checked = Boolean(s.rememberKey || s.runtimeKeySaved);
-  $('runtimeKey').placeholder = s.runtimeKeySaved ? '已使用 Windows DPAPI 保存，可留空' : '输入 Runtime API Key';
+  $('rememberKey').disabled = sessionOnly;
+  $('rememberKey').checked = sessionOnly ? false : Boolean(s.rememberKey || s.runtimeKeySaved);
+  $('runtimeKey').placeholder = s.runtimeKeySaved ? '已安全保存，可留空' : '输入 Runtime API Key';
   $('clearKey').disabled = busy || !s.runtimeKeySaved;
   $('connect').disabled = busy || unavailable || running;
   $('stop').disabled = busy || !running;
