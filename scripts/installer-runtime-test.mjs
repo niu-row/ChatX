@@ -60,7 +60,8 @@ const bundledLicense = path.join(resourceDir, 'DesktopCommander-LICENSE.txt');
 if (sha256(bundledLicense) !== sha256(dcLicense)) throw new Error('Desktop Commander bundled LICENSE does not match the locked MCPB asset.');
 
 const ripgrepRelative = manifest.desktopCommander?.ripgrep;
-if (typeof ripgrepRelative !== 'string' || !/(?:^|\\/)rg(?:-[^/]+)?(?:\\.exe)?$/i.test(ripgrepRelative)) {
+const ripgrepBase = typeof ripgrepRelative === 'string' ? path.basename(ripgrepRelative) : '';
+if (!/^rg(?:-[^/]+)?(?:\.exe)?$/i.test(ripgrepBase)) {
   throw new Error('runtime manifest ripgrep path is invalid.');
 }
 const ripgrep = path.resolve(resourceDir, ...ripgrepRelative.split('/'));
