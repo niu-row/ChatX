@@ -6,7 +6,7 @@ import { Client } from '@modelcontextprotocol/client';
 import { StdioClientTransport } from '@modelcontextprotocol/client/stdio';
 
 const resourceDir = path.resolve('src-tauri', 'resources');
-const node = path.join(resourceDir, 'node.exe');
+const node = path.join(resourceDir, process.platform === 'win32' ? 'node.exe' : 'node');
 const launcher = path.join(resourceDir, 'desktop-commander-launcher.mjs');
 const entry = path.join(resourceDir, 'desktop-commander', 'dist', 'index.js');
 for (const file of [node, launcher, entry]) {
