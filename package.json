@@ -19,7 +19,7 @@
     "test:bridge": "node scripts/bridge-smoke-test.mjs",
     "test:runtime": "npm run test:installer && npm run test:bridge",
     "test:version": "node scripts/version-consistency-test.mjs",
-    "test": "node scripts/version-consistency-test.mjs && node scripts/desktop-static-test.mjs"
+    "test": "node scripts/version-consistency-test.mjs && node scripts/desktop-static-test.mjs && node scripts/connection-ui-test.mjs && node scripts/call-history-ui-test.mjs"
   },
   "dependencies": {
     "@modelcontextprotocol/node": "^2.0.0",

@@ -22,6 +22,8 @@ Desktop Commander
 
 ChatX 不再实现自己的 Filesystem、Git、Shell 或 MCP HTTP Server。文件读写、搜索、编辑和命令执行由 Desktop Commander 提供；ChatX 只负责桌面 UI、运行组件打包、Tunnel 配置、启动/停止、诊断和日志。
 
+ChatX 通过启动器关闭 Desktop Commander 的聊天内文件预览和配置编辑模板：工具列表不包含 UI 关联元数据，资源与资源模板列表为空，旧 UI 资源地址不可读取。26 个 MCP 工具及其返回结果保持不变。适配在启动时生效，不修改锁定的上游 MCPB 内容。
+
 ## 0.3.0 运行组件
 
 Windows x64 和 macOS Apple Silicon（M1/M2/M3/M4）构建固定打包：
@@ -53,7 +55,7 @@ Desktop Commander 通过 stdio 启动，不要求最终用户安装 Node、npm�
 - Tunnel ID，例如 `tunnel_...`
 - Runtime API Key
 
-Windows 可选择使用 DPAPI（CurrentUser）保存 Runtime Key。macOS 当前采用 session-only 模式，每次建立连接时输入 Runtime Key；明文 Key 不写入 `settings.json`。
+Windows 可选择使用 DPAPI（CurrentUser）保存 Runtime Key。macOS 可勾选保存到系统钥匙串，下次连接时 Runtime Key 可留空；明文 Key 不写入 `settings.json`。
 
 点击“连接并启动”后，ChatX 调用：
 
@@ -67,6 +69,10 @@ tunnel-client runtimes connect
 
 Tunnel runtime 由 OpenAI tunnel-client 管理。ChatX 使用 `runtimes status` 获取结构化状态，并以 `ready` / `healthy` 等字段判断连接是否可用；使用 `runtimes stop` 停止连接。状态命令的真实失败或无法解析的 JSON 会作为 runtime error 显示，不会伪装成普通 stopped 状态。
 
+连接成功后，ChatX 默认开启“断线自动重连”。后台监控不依赖窗口页面轮询：连续检测到 runtime 不再可用后，会重新执行同一 Tunnel 连接，并对连续失败使用 2 / 5 / 10 / 20 / 30 秒退避。Runtime Key 只保留在当前 ChatX 进程内存或既有安全存储中，不写入明文设置。手动“停止连接”、托盘“停止连接”或退出 ChatX 会取消重连意图并清除会话内 Runtime Key。
+
+macOS 提供独立“权限中心”。点击“一次触发全部授权”会集中访问 Desktop、Documents、Downloads，并在存在已保存 Runtime Key 时验证钥匙串访问，从而把可请求的系统权限集中在一个流程里处理。macOS TCC 不允许应用静默替用户授予所有隐私权限，因此系统仍可能按安全类别显示确认；“完全磁盘访问”必须由用户在系统设置中手动开启，权限中心提供直达入口。
+
 ## Desktop Commander 本地状态
 
 ChatX bundled Desktop Commander 不使用用户独立安装 Desktop Commander 的配置目录。
@@ -78,6 +84,8 @@ ChatX launcher 会把它的 HOME/USERPROFILE 指向 ChatX 自己的数据目录�
 ```
 
 因此单独安装的 Desktop Commander 与 ChatX bundled instance 不会共用 `config.json`。
+
+ChatX 的“调用记录”页直接读取这个隔离 HOME 下 Desktop Commander 自己维护的 `tool-history.jsonl`，显示最近的工具名、成功/失败、耗时、参数和返回摘要，并支持工具/状态筛选、50/100/200/500/1000 条显示数量、清空，以及当前筛选范围的成功率、平均耗时和 P95 耗时统计。调用参数和结果可能包含本机路径、命令或文件内容，因此详情默认折叠，记录不会作为 ChatX telemetry 上传。
 
 ChatX 同时设置 Desktop Commander 官方支持的硬关闭开关：
 
@@ -156,7 +164,7 @@ npm run desktop:build
 npm run desktop:installer
 ```
 
-在 M1 Mac 上，产物位于 `src-tauri/target/release/bundle/macos/` 和 `src-tauri/target/release/bundle/dmg/`。当前 macOS 本地包尚未配置 Developer ID notarization，仅用于本机开发/测试。Windows 本地安装包仍允许 unsigned build。
+在 M1 Mac 上，产物位于 `src-tauri/target/release/bundle/macos/` 和 `src-tauri/target/release/bundle/dmg/`。当前 macOS 本地包尚未配置 Developer ID notarization，仅用于本机开发/测试。macOS 本地构建固定使用 ad-hoc `signingIdentity = "-"`，确保 codesign identifier 与 `CFBundleIdentifier` 都是 `com.chatgptx.local`；这是 macOS Local Network/NECP 正确匹配“本地网络”授权所必需的。Windows 本地安装包仍允许 unsigned build。
 
 正式发布到 `release/` 必须配置 Authenticode 证书和时间戳服务：
 
@@ -201,7 +209,7 @@ Runtime API Key 只通过环境变量引用传给 tunnel-client：
 --runtime-api-key env:CHATX_TUNNEL_RUNTIME_KEY
 ```
 
-如果选择记住密钥，ChatX 在 Windows 上通过 DPAPI CurrentUser 加密保存；macOS 当前不持久化 Runtime Key。Tunnel ID 可以保存在普通 JSON 设置中。Desktop Commander launcher 会删除继承到 MCP 进程的 `CHATX_TUNNEL_RUNTIME_KEY`，避免其继续传播到工具启动的子进程。
+如果选择记住密钥，ChatX 在 Windows 上通过 DPAPI CurrentUser 加密保存；macOS 使用系统钥匙串保存。Tunnel ID 可以保存在普通 JSON 设置中。Desktop Commander launcher 会删除继承到 MCP 进程的 `CHATX_TUNNEL_RUNTIME_KEY`，避免其继续传播到工具启动的子进程。
 
 Desktop Commander 的构建输入使用 `runtime-lock.json` 中锁定的 GitHub Release MCPB。ChatX 在解包前验证整个 release asset 的大小和 SHA-256，因此包内 `dist`、生产依赖和 ripgrep 都由同一个已锁定 artifact 决定。
 
@@ -232,4 +240,8 @@ npm run desktop:dev
 npm run desktop:installer
 ```
 
-macOS 版本当前不会持久化 Runtime API Key；每次连接时输入即可。
+macOS 版本可勾选“使用 macOS 钥匙串保存 Runtime Key”。保存后，下次连接可留空；点击“清除已保存密钥”可移除。系统提示钥匙串访问时，请允许 ChatX 读取。
+
+macOS 15+ 的“本地网络”权限会结合应用代码身份匹配。ChatX 的本地 app/DMG 构建通过 `src-tauri/tauri.macos.conf.json` 固定使用 ad-hoc signing identity `-`，使签名 identifier 与 Bundle ID `com.chatgptx.local` 保持一致；`src-tauri/Info.plist` 同时提供 `NSLocalNetworkUsageDescription`。正式发布时应改用稳定的 Apple Development / Developer ID 身份并完成 notarization，不应继续使用 ad-hoc 签名。
+
+macOS 启动时会从系统账户信息恢复真实用户主目录，避免从 Desktop Commander 等隔离环境启动时继承错误的 `HOME`，导致数据目录重复嵌套或弹出“找不到钥匙串”。此修复不重置系统钥匙串，也不修改其搜索列表。

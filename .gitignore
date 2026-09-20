@@ -9,4 +9,5 @@ src-tauri/target*/
 src-tauri/resources/
 src-tauri/gen/schemas/
 .tools/
+.chatx-local-signing.json
 release/

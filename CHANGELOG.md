@@ -4,12 +4,15 @@
 
 ### Changed
 
+- Added a macOS permission center that can proactively trigger Desktop/Documents/Downloads and saved-Keychain access in one flow, with a direct System Settings entry for Full Disk Access where macOS requires manual approval.
+- Added background Secure MCP Tunnel auto-reconnect with connection intent tracking, session-only in-memory Runtime Key reuse, manual-stop cancellation, and bounded reconnect backoff.
 - Added native macOS Apple Silicon (`darwin-arm64`) development and local packaging support, including locked Node.js and OpenAI tunnel-client arm64 release artifacts, platform-specific Tauri resources, and cross-platform Desktop Commander smoke tests.
-- macOS Runtime API Keys are session-only for now; Windows DPAPI behavior is unchanged.
+- macOS local app/DMG builds now use ad-hoc signing identity `-` so the codesign identifier stays aligned with `com.chatgptx.local`; the package step verifies that identity and the Local Network usage description to prevent NECP/Local Network permission regressions.
+- macOS Runtime API Keys can be stored in the system Keychain; Windows DPAPI behavior is unchanged.
 - Replaced the custom ChatX MCP backend with bundled Desktop Commander 0.2.48.
 - ChatX now launches OpenAI `tunnel-client` directly with a local stdio MCP command.
 - Removed the localhost `127.0.0.1:3210/mcp` runtime path and the custom Filesystem/Git/Shell MCP tool implementation.
-- Simplified the desktop UI to connection status, Runtime Key handling, diagnostics, and lifecycle logs.
+- Simplified the desktop UI to connection status, Runtime Key handling, diagnostics, lifecycle logs, and a read-only Desktop Commander tool-call history view with filtering, selectable 50/100/200/500/1000-row limits, aggregate latency/success statistics, details, and local clearing.
 - Runtime API Keys remain compatible with the existing Windows DPAPI CurrentUser store.
 - Migrates the legacy `connection.tunnelId` setting from ChatX 0.2.1.
 - Treats tunnel-client `runtime_state=ready` and structured `ready/healthy` fields as an active connection.
@@ -27,7 +30,7 @@
 ### Removed
 
 - ChatX permission presets and duplicated Filesystem/Git/Shell permissions.
-- ChatX MCP invocation log UI; tool execution now happens directly inside Desktop Commander.
+- Legacy custom-backend MCP invocation logging; tool execution history now comes from Desktop Commander's isolated local tool-history.jsonl.
 - Legacy MCP backend smoke/settings/security/performance test suite.
 
 ## 0.2.1 - 2026-09-07

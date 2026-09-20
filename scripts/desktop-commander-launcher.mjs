@@ -25,4 +25,42 @@ process.env.USERPROFILE = home;
 process.env.DESKTOP_COMMANDER_DISABLE_TELEMETRY = '1';
 
 process.argv = [process.execPath, entry, ...serverArgs];
+
+// Keep the locked upstream package intact. Adapt its registered MCP handlers
+// before connecting stdio so ChatX exposes tools without embedded UI resources.
+// Upstream's preview A/B flag is not a reliable off switch and still lists UI.
+const dist = path.dirname(entry);
+await import(pathToFileURL(path.join(dist, 'bootstrap.js')).href);
+const sdk = path.join(dist, '..', 'node_modules', '@modelcontextprotocol', 'sdk', 'dist', 'esm');
+const { Server } = await import(pathToFileURL(path.join(sdk, 'server', 'index.js')).href);
+const types = await import(pathToFileURL(path.join(sdk, 'types.js')).href);
+const originalSetRequestHandler = Server.prototype.setRequestHandler;
+Server.prototype.setRequestHandler = function (schema, handler) {
+  if (schema === types.ListToolsRequestSchema) {
+    const upstream = handler;
+    handler = async (...args) => {
+      const result = await upstream(...args);
+      return { ...result, tools: result.tools.map((tool) => {
+        const meta = { ...tool._meta };
+        delete meta.ui;
+        delete meta['ui/resourceUri'];
+        for (const key of ['openai/outputTemplate', 'openai/widgetAccessible']) delete meta[key];
+        const { _meta, ...rest } = tool;
+        return Object.keys(meta).length ? { ...rest, _meta: meta } : rest;
+      }) };
+    };
+  } else if (schema === types.ListResourcesRequestSchema) {
+    handler = async () => ({ resources: [] });
+  } else if (schema === types.ListResourceTemplatesRequestSchema) {
+    handler = async () => ({ resourceTemplates: [] });
+  } else if (schema === types.ReadResourceRequestSchema) {
+    handler = async () => { throw new types.McpError(-32002, 'ChatX does not expose UI resources.'); };
+  }
+  return originalSetRequestHandler.call(this, schema, handler);
+};
+try {
+  await import(pathToFileURL(path.join(dist, 'server.js')).href);
+} finally {
+  Server.prototype.setRequestHandler = originalSetRequestHandler;
+}
 await import(pathToFileURL(entry).href);

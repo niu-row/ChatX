@@ -17,6 +17,9 @@
         <button class="nav active" data-page="overview">概览</button>
         <button class="nav" data-page="connection">连接</button>
         <button class="nav" data-page="diagnostics">诊断</button>
+        <button class="nav" data-page="permissions">权限中心</button>
+        <button class="nav" data-page="calls">调用记录</button>
+        <button class="nav" data-page="settings">设置</button>
         <button class="nav" data-page="logs">运行日志</button>
       </nav>
       <div class="sidebar-status">
@@ -99,6 +102,85 @@
         <div class="card">
           <div class="section-head"><div><span class="eyebrow">DIAGNOSTICS</span><h2>运行环境检查</h2></div><button id="runDiagnostics" class="primary">开始诊断</button></div>
           <div id="diagnostics" class="diagnostics"><p class="muted">点击“开始诊断”检查 Tunnel、Node、Desktop Commander 和本地 runtime。</p></div>
+        </div>
+      </section>
+
+      <section class="page" data-page-panel="calls">
+        <div class="card">
+          <div class="section-head">
+            <div><span class="eyebrow">MCP TOOL CALLS</span><h2>调用记录</h2></div>
+            <div class="actions"><button id="refreshCalls" class="ghost">刷新</button><button id="clearCalls" class="ghost danger">清空记录</button></div>
+          </div>
+          <div class="call-filters">
+            <label>工具<select id="callToolFilter"><option value="">全部工具</option></select></label>
+            <label>状态<select id="callStatusFilter"><option value="">全部状态</option><option value="success">成功</option><option value="error">失败</option></select></label>
+            <label>显示<select id="callLimit"><option value="50">50 条</option><option value="100">100 条</option><option value="200" selected>200 条</option><option value="500">500 条</option><option value="1000">1000 条</option></select></label>
+            <span id="callHistorySummary" class="muted">尚未加载。</span>
+          </div>
+          <div class="call-stats">
+            <article><span>匹配调用</span><strong id="callStatCount">—</strong></article>
+            <article><span>成功率</span><strong id="callStatSuccess">—</strong></article>
+            <article><span>平均耗时</span><strong id="callStatAvg">—</strong></article>
+            <article><span>P95 耗时</span><strong id="callStatP95">—</strong></article>
+          </div>
+          <div id="callHistory" class="call-history"><p class="muted">正在读取调用记录…</p></div>
+          <p class="muted call-history-note">调用参数和返回结果可能包含本机路径、命令或文件内容；详情默认折叠，数据仅从 ChatX 本机隔离目录读取。</p>
+        </div>
+      </section>
+
+      <section class="page" data-page-panel="permissions">
+        <div class="card permission-card">
+          <div class="section-head">
+            <div><span class="eyebrow">PRIVACY & ACCESS</span><h2>权限中心</h2></div>
+            <button id="authorizeAllPermissions" class="primary">一次触发全部授权</button>
+          </div>
+          <p class="permission-intro">集中触发 ChatX / Desktop Commander 常用的 macOS 文件夹与钥匙串权限。macOS 仍可能按安全类别依次显示系统确认，但授权会集中在这里完成，而不是等到实际调用时再临时弹出。</p>
+          <div id="permissionList" class="permission-list"><p class="muted">正在读取权限信息…</p></div>
+          <div class="permission-manual">
+            <div>
+              <strong>完全磁盘访问</strong>
+              <p id="fullDiskAccessHint">macOS 不允许应用静默授予该权限；需要在系统设置中手动打开。</p>
+            </div>
+            <button id="openFullDiskAccess" class="ghost">打开系统设置</button>
+          </div>
+        </div>
+      </section>
+
+      <section class="page" data-page-panel="settings">
+        <div class="card settings-card">
+          <div class="section-head">
+            <div><span class="eyebrow">CONNECTIVITY</span><h2>Tunnel 连接</h2></div>
+            <span id="reconnectStatus" class="setting-status">正在读取…</span>
+          </div>
+          <div class="setting-row">
+            <div class="setting-copy">
+              <strong>断线自动重连</strong>
+              <p>连接意外掉线后，ChatX 会在后台检测并自动重新启动 Secure MCP Tunnel；窗口隐藏到托盘后也会继续工作。</p>
+              <small>连续失败时使用 2 / 5 / 10 / 20 / 30 秒退避。手动“停止连接”会立即取消后续重连。</small>
+            </div>
+            <label class="switch" title="断线自动重连">
+              <input id="autoReconnect" type="checkbox" aria-label="断线自动重连">
+              <span class="switch-ui"></span>
+            </label>
+          </div>
+        </div>
+
+        <div class="card settings-card">
+          <div class="section-head">
+            <div><span class="eyebrow">POWER</span><h2>电源与合盖</h2></div>
+            <span id="clamshellStatus" class="setting-status">正在读取…</span>
+          </div>
+          <div class="setting-row">
+            <div class="setting-copy">
+              <strong>合盖后保持运行</strong>
+              <p>开启后，macOS 将禁止系统睡眠；合上 MacBook 屏幕后，ChatX Tunnel 和本机任务仍可继续运行。</p>
+              <small>需要管理员授权。由 ChatX 开启时，退出或异常终止后会自动恢复原来的睡眠状态；合盖放入包中可能导致过热或快速耗电。</small>
+            </div>
+            <label class="switch" title="合盖后保持运行">
+              <input id="clamshellAwake" type="checkbox" aria-label="合盖后保持运行">
+              <span class="switch-ui"></span>
+            </label>
+          </div>
         </div>
       </section>
 

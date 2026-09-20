@@ -43,6 +43,17 @@ async function call(name, args = {}) {
 try {
   await client.connect(transport);
   const listed = await client.listTools();
+  assert.equal(listed.tools.length, 26, 'Removing UI must preserve the tool set');
+  for (const tool of listed.tools) {
+    for (const key of ['ui', 'ui/resourceUri', 'openai/outputTemplate', 'openai/widgetAccessible']) {
+      assert.equal(tool._meta?.[key], undefined, `${tool.name} still advertises UI: ${key}`);
+    }
+  }
+  assert.deepEqual((await client.listResources()).resources, []);
+  assert.deepEqual((await client.listResourceTemplates()).resourceTemplates, []);
+  for (const uri of ['ui://desktop-commander/file-preview', 'ui://desktop-commander/config-editor']) {
+    await assert.rejects(client.readResource({ uri }), /ChatX does not expose UI resources/);
+  }
   const names = new Set((listed.tools ?? []).map((tool) => tool.name));
   for (const name of ['list_directory', 'read_file', 'write_file', 'start_search', 'get_more_search_results', 'start_process']) {
     assert.ok(names.has(name), `Desktop Commander tool missing: ${name}`);
