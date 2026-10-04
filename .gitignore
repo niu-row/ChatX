@@ -11,3 +11,15 @@ src-tauri/gen/schemas/
 .tools/
 .chatx-local-signing.json
 release/
+
+android-monitor/.gradle/
+android-monitor/.idea/
+android-monitor/local.properties
+android-monitor/**/build/
+relay-protocol/target/
+relay-server/target/
+
+.chatx-current*.png
+.chatx-ui*.xml
+.phone-now.*
+.install-switch.xml

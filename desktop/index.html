@@ -19,6 +19,7 @@
         <button class="nav" data-page="diagnostics">诊断</button>
         <button class="nav" data-page="permissions">权限中心</button>
         <button class="nav" data-page="calls">调用记录</button>
+        <button class="nav" data-page="monitor">手机连接</button>
         <button class="nav" data-page="settings">设置</button>
         <button class="nav" data-page="logs">运行日志</button>
       </nav>
@@ -53,6 +54,14 @@
           <article class="card fact"><span>Secure MCP Tunnel</span><strong id="tunnelFact">—</strong><small id="tunnelVersion">—</small></article>
           <article class="card fact"><span>Desktop Commander</span><strong id="dcFact">—</strong><small id="dcVersion">—</small></article>
           <article class="card fact"><span>Runtime Key</span><strong id="keyFact">—</strong><small id="keyStorageHint">安全存储 / 本次输入</small></article>
+        </div>
+
+        <div class="card mcp-live-card">
+          <div class="section-head compact">
+            <div><span class="eyebrow">LIVE MCP</span><h3>当前执行</h3></div>
+            <span id="mcpLiveStatus" class="setting-status off">IDLE</span>
+          </div>
+          <div id="mcpLiveCalls" class="mcp-live-calls"><p class="muted">当前没有正在执行的 MCP 指令。</p></div>
         </div>
 
         <div class="card architecture">
@@ -128,6 +137,90 @@
         </div>
       </section>
 
+      <section class="page" data-page-panel="monitor">
+        <div class="card settings-card monitor-card">
+          <div class="section-head">
+            <div><span class="eyebrow">MOBILE CONNECTION</span><h2>手机连接</h2></div>
+            <span id="monitorStatus" class="setting-status">正在读取…</span>
+          </div>
+          <div class="setting-row">
+            <div class="setting-copy">
+              <strong>Direct WSS Monitor</strong>
+              <p>手机在 LAN、IPv6 或 Tailscale 下直接通过 WSS 连接本机；公网时自动切换到 ChatX Relay。</p>
+              <small>所有 Snapshot 均使用设备独立密钥进行 AES-256-GCM 端到端加密，Direct 与 Relay 使用同一协议。</small>
+            </div>
+            <label class="switch" title="手机监控">
+              <input id="monitorEnabled" type="checkbox" aria-label="手机监控">
+              <span class="switch-ui"></span>
+            </label>
+          </div>
+          <div class="monitor-controls">
+            <label>监听端口<input id="monitorPort" type="number" min="1024" max="65535" value="18432"></label>
+            <button id="saveMonitor" class="secondary">应用设置</button>
+          </div>
+          <div class="monitor-facts">
+            <article><span>监听地址</span><code id="monitorBind">—</code></article>
+            <article><span>TLS 指纹 SHA-256</span><code id="monitorFingerprint">—</code></article>
+            <article><span>协议 / 加密</span><strong id="monitorProtocol">WSS · E2EE</strong></article>
+          </div>
+          <div class="monitor-actions">
+            <button id="createMonitorPairing" class="primary">添加手机</button>
+          </div>
+          <div class="monitor-devices-wrap">
+            <div class="section-head compact">
+              <div><strong>已配对设备</strong><small>每台设备拥有独立 Direct / Relay 凭据与 E2EE Key，可单独删除。</small></div>
+            </div>
+            <div id="monitorDevices" class="monitor-devices"><p class="muted">暂无已配对设备。</p></div>
+          </div>
+          <div id="monitorPairing" class="monitor-pairing" hidden>
+            <div class="section-head compact">
+              <div><strong>添加手机</strong><small>扫码后自动选择 LAN / IPv6 / Tailscale / ChatX Relay 路径。</small></div>
+              <button id="copyMonitorPairing" class="ghost">复制</button>
+            </div>
+            <div id="monitorPairingQr" class="monitor-pairing-qr"></div>
+            <pre id="monitorPairingPayload"></pre>
+            <p class="muted">二维码中的一次性配对码 5 分钟后过期，并且成功使用一次后立即失效。</p>
+          </div>
+        </div>
+
+        <div class="card settings-card relay-card">
+          <div class="section-head">
+            <div><span class="eyebrow">CHATX RELAY</span><h2>公网连接</h2></div>
+            <span id="relayStatus" class="setting-status">正在读取…</span>
+          </div>
+          <div class="setting-row">
+            <div class="setting-copy">
+              <strong>WSS Relay</strong>
+              <p>Desktop 与 Android 都只主动连接 Relay 的 443；Relay 只路由加密帧，不读取 Monitor 内容。</p>
+              <small>LAN / IPv6 / Tailscale 可直连时优先使用 Direct WSS，公网自动切换 Relay。</small>
+            </div>
+            <label class="switch" title="ChatX Relay">
+              <input id="relayEnabled" type="checkbox" aria-label="ChatX Relay">
+              <span class="switch-ui"></span>
+            </label>
+          </div>
+          <div class="network-form relay-form">
+            <label class="network-grow">Relay URL
+              <input id="relayBaseUrl" type="text" placeholder="https://relay.example.com">
+            </label>
+          </div>
+          <div class="network-facts">
+            <article><span>Desktop 注册</span><strong id="relayRegistrationFact">—</strong></article>
+            <article><span>WSS Session</span><strong id="relaySessionFact">—</strong></article>
+            <article><span>Desktop ID</span><code id="relayDesktopFact">—</code></article>
+            <article><span>最近心跳</span><strong id="relayHeartbeatFact">—</strong></article>
+            <article><span>最近错误</span><code id="relayErrorFact">—</code></article>
+          </div>
+          <p class="network-note muted">一次性注册凭据属于 Relay 部署层，不在日常界面中显示。首次注册时由 ChatX 从管理员预配的受限存储中读取一次，注册成功后仅使用保存在系统安全存储中的 Desktop Credential。</p>
+          <div class="network-actions">
+            <button id="testRelay" class="secondary">测试 Relay</button>
+            <button id="registerRelay" class="secondary">注册此电脑</button>
+            <button id="saveRelay" class="primary">应用 Relay 设置</button>
+            <span id="relayTestResult" class="muted"></span>
+          </div>
+        </div>
+      </section>
+
       <section class="page" data-page-panel="permissions">
         <div class="card permission-card">
           <div class="section-head">
@@ -163,6 +256,38 @@
               <span class="switch-ui"></span>
             </label>
           </div>
+        </div>
+
+        <div class="card settings-card network-card">
+          <div class="section-head">
+            <div><span class="eyebrow">TUNNEL NETWORK</span><h2>Tunnel 网络</h2></div>
+            <span id="networkStatus" class="setting-status">正在读取…</span>
+          </div>
+          <div class="network-form">
+            <label>代理模式
+              <select id="proxyMode">
+                <option value="direct">Direct · 直连</option>
+                <option value="system">System · macOS / Windows 系统代理</option>
+                <option value="manual">Manual · 手动代理</option>
+              </select>
+            </label>
+            <label class="network-grow">手动代理地址
+              <input id="proxyUrl" type="text" placeholder="http://127.0.0.1:7890">
+            </label>
+          </div>
+          <div class="network-facts">
+            <article><span>系统代理</span><code id="systemProxyFact">—</code></article>
+            <article><span>配置有效代理</span><code id="effectiveProxyFact">—</code></article>
+            <article><span>Runtime 实际路由</span><code id="runtimeProxyFact">—</code></article>
+            <article><span>Control Plane</span><strong id="controlPlaneFact">—</strong></article>
+          </div>
+          <p id="controlPlaneReason" class="network-detail muted">尚无 Control Plane 诊断信息。</p>
+          <div class="network-actions">
+            <button id="testNetwork" class="secondary">测试网络</button>
+            <button id="saveNetwork" class="primary">应用网络设置</button>
+            <span id="networkTestResult" class="muted"></span>
+          </div>
+          <p class="network-note muted">Direct 会显式清除 Tunnel 进程继承的 HTTP/SOCKS 代理变量；System 会在“应用网络设置”时重新读取当前系统显式代理并重启正在运行的 Tunnel；Manual 直接把代理地址注入 tunnel-client。PAC 自动代理暂不支持。TUN 模式仍由系统路由层接管。</p>
         </div>
 
         <div class="card settings-card">

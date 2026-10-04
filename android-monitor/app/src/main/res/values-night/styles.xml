@@ -1,0 +1,11 @@
+<resources>
+    <style name="Theme.ChatXMonitor" parent="@android:style/Theme.Material.NoActionBar">
+        <item name="android:fontFamily">sans</item>
+        <item name="android:windowActionModeOverlay">true</item>
+        <item name="android:windowLightStatusBar">false</item>
+        <item name="android:navigationBarColor">@color/cx_surface</item>
+        <item name="android:statusBarColor">@color/cx_bg</item>
+        <item name="android:windowBackground">@color/cx_bg</item>
+        <item name="android:colorAccent">@color/cx_primary</item>
+    </style>
+</resources>

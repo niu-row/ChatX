@@ -51,6 +51,27 @@ function run(label, command, args, options = {}) {
 }
 
 async function download(url, target, label) {
+  if (process.platform === 'darwin') {
+    const partial = `${target}.part`;
+    run(
+      `${label} download`,
+      '/usr/bin/curl',
+      [
+        '--location',
+        '--fail',
+        '--retry', '5',
+        '--retry-delay', '2',
+        '--retry-all-errors',
+        '--connect-timeout', '20',
+        '--continue-at', '-',
+        '--output', partial,
+        url,
+      ],
+      { timeout: 300_000 },
+    );
+    fs.renameSync(partial, target);
+    return;
+  }
   const response = await fetch(url, { redirect: 'follow' });
   if (!response.ok) throw new Error(`${label} download failed: HTTP ${response.status} ${response.statusText}`);
   fs.writeFileSync(target, Buffer.from(await response.arrayBuffer()));

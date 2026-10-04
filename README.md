@@ -109,6 +109,14 @@ connection.tunnelId
 
 并迁移到新的精简设置格式。旧版 `runtime-key.dpapi` 使用的 DPAPI CurrentUser + Base64 格式保持兼容，因此已保存 Runtime Key 可以继续使用。
 
+## Tunnel 网络与公网 Relay
+
+桌面端“设置”页提供 Tunnel `Direct / System / Manual` 三种代理模式。`Direct` 会显式清除 ChatX 启动 `tunnel-client` 时继承到的 HTTP/SOCKS 代理变量；`System` 会在点击“应用网络设置”时读取当前 macOS / Windows 显式系统代理并固定为本次运行路由；`Manual` 支持 `http://`、`https://`、`socks5://`、`socks5h://` 的 `host:port` 地址。当前不保存代理账号密码，也不解析 PAC 自动代理脚本。
+
+手机公网 Monitor Relay 由 ChatX 的统一 `relay` 设置管理。macOS 会生成并维护 `~/Library/LaunchAgents/com.chatx.relay.plist`，使用 SSH reverse forwarding 把配置的公网端口映射到本机 Monitor HTTPS 端口。旧的 `state/monitor-relay.json` 仅用于一次迁移，不再作为独立配置源。Relay 状态会持续显示 LaunchAgent 进程、SSH 端口、公网 Monitor 端口和最近错误。
+
+Tunnel 健康状态同时参考本地 runtime `ready/health` 和 control-plane poll 日志。连续 poll 异常依次进入 `suspect` / `down`，恢复时通过 `poller recovered; polling operational` 回到 `healthy`，避免仅凭本地 `/readyz` 将上游断线误判成正常。
+
 ## 开发
 
 要求：
@@ -124,6 +132,34 @@ connection.tunnelId
 ```powershell
 npm ci
 ```
+
+### ChatX 隔离 HOME 与本机工具链
+
+ChatX bundled Desktop Commander 会把 `HOME` / `USERPROFILE` 指向自己的隔离目录。通过 ChatX MCP 执行开发命令时，不能假设 `~/.cargo`、`~/.gradle` 或 `~/Library/Android` 属于真实登录用户；否则会误报 Rust、Java、Android SDK 或 Gradle 不存在。
+
+仓库统一使用 `scripts/dev-toolchain.mjs` 恢复 OS 账户真实主目录（Node `os.userInfo().homedir`），并从真实 HOME 定位 Cargo/Rustup、Android Studio JDK、Android SDK 和 Gradle 缓存。先运行：
+
+```bash
+npm run dev:doctor
+```
+
+完整本机验证使用：
+
+```bash
+npm run test:local-full
+```
+
+也可以分别运行 `npm run test:rust:check`、`npm run test:rust` 和 `npm run test:android:gradle`。Android 验证会执行 `lintDebug` + unit tests，并优先复用真实用户 `~/.gradle` 中已解包的 Gradle；如果只有 `wrapper/dists/.../manual/gradle-*-bin.zip`，会解包到 `~/.gradle/chatx-toolchains/` 后直接运行，避免因为隔离 HOME 或重复网络下载导致误判。`test:local-full` 最后还会执行 `git diff --check`。
+
+如需显式覆盖真实主目录，可设置 `CHATX_REAL_HOME`；通常不需要手工配置。
+
+### Tunnel Proxy 与手机公网 Relay
+
+桌面“设置”页提供 Tunnel 网络模式：`Direct`、`System`、`Manual`。`Direct` 会显式移除 ChatX 启动 `tunnel-client` 时继承的 HTTP/SOCKS 代理环境变量；`System` 在用户点击“应用网络设置”时读取当前 OS 显式代理并固定为本次运行配置；`Manual` 支持无认证的 `http://`、`https://`、`socks5://`、`socks5h://` `host:port`。macOS PAC 自动代理当前不支持。
+
+Tunnel 健康不再只看本地 `/healthz` / `readyz`，还会从当前 runtime 的 control-plane 日志持续读取 poll 成功、失败与恢复事件。状态分为 `healthy / suspect / down`，并独立记录连续 Control Plane 失败次数与实际 proxy source。
+
+手机公网 Relay 的唯一配置源是 `settings.json` 中的 `relay`。旧 `state/monitor-relay.json` 仅作为一次性迁移输入。macOS 下 ChatX 会管理 `~/Library/LaunchAgents/com.chatx.relay.plist` 与 state 目录中的 `relay-run.sh`，使用严格 SSH host-key 校验、5 秒 keepalive，并在重连前仅清理由 `sshd` 占用的同一远端反向转发端口，降低 stale reverse-forward 导致的重连循环。
 
 静态检查：
 

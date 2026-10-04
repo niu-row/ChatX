@@ -1,6 +1,6 @@
 {
   "name": "chatx",
-  "version": "0.3.0",
+  "version": "0.4.10",
   "private": true,
   "description": "Desktop bridge connecting ChatGPT Secure MCP Tunnel to Desktop Commander on Windows and macOS",
   "type": "module",
@@ -14,12 +14,20 @@
     "desktop:installer": "npm run desktop:prepare && node scripts/build-package.mjs",
     "desktop:release": "npm run desktop:prepare && node scripts/build-package.mjs --publish",
     "desktop:verify": "npm run desktop:prepare && npm run test:runtime",
+    "dev:doctor": "node scripts/dev-toolchain.mjs doctor",
+    "test:rust:check": "node scripts/dev-toolchain.mjs rust-check",
+    "test:rust": "node scripts/dev-toolchain.mjs rust-test",
+    "test:android:gradle": "node scripts/dev-toolchain.mjs android-test",
+    "test:local-full": "node scripts/dev-toolchain.mjs local-full",
     "test:desktop": "node scripts/desktop-static-test.mjs",
     "test:installer": "node scripts/installer-runtime-test.mjs",
     "test:bridge": "node scripts/bridge-smoke-test.mjs",
+    "test:monitor": "node scripts/monitor-instrumentation-test.mjs",
+    "test:monitor-ui": "node scripts/monitor-ui-test.mjs",
+    "test:android-monitor": "node scripts/android-monitor-static-test.mjs",
     "test:runtime": "npm run test:installer && npm run test:bridge",
     "test:version": "node scripts/version-consistency-test.mjs",
-    "test": "node scripts/version-consistency-test.mjs && node scripts/desktop-static-test.mjs && node scripts/connection-ui-test.mjs && node scripts/call-history-ui-test.mjs"
+    "test": "node scripts/version-consistency-test.mjs && node scripts/dev-toolchain-static-test.mjs && node scripts/desktop-static-test.mjs && node scripts/connection-ui-test.mjs && node scripts/network-ui-test.mjs && node scripts/call-history-ui-test.mjs && node scripts/monitor-instrumentation-test.mjs && node scripts/monitor-ui-test.mjs && node scripts/android-monitor-static-test.mjs"
   },
   "dependencies": {
     "@modelcontextprotocol/node": "^2.0.0",

@@ -84,3 +84,39 @@ assert.equal(element('connect').disabled, true, 'Manual connect should be disabl
 assert.equal(element('stop').disabled, false, 'Stop must remain available to cancel automatic reconnect');
 assert.match(element('reconnectStatus').textContent, /第 2 次/);
 console.log('automatic reconnect UI checks passed: visible state and cancel path');
+
+status = {
+  runtimeState: 'running',
+  runtimeActive: false,
+  configured: true,
+  desiredConnected: true,
+  reconnecting: false,
+  keyStorage: 'session only',
+};
+await vm.runInContext('refresh()', context);
+assert.notEqual(element('sidebarStatus').textContent, '已连接 ChatGPT', 'Explicit runtimeActive=false must override a running-looking runtimeState');
+assert.notEqual(element('tunnelFact').textContent, 'Ready', 'Not-ready runtime must not render as Ready');
+console.log('connection UI checks passed: runtimeActive is authoritative');
+
+status = {
+  ...status,
+  runtimeState: 'ready',
+  runtimeActive: false,
+  runtimeHealth: 'suspect',
+  configured: true,
+  desiredConnected: true,
+  reconnecting: false,
+};
+await vm.runInContext('refresh()', context);
+assert.match(element('sidebarStatus').textContent, /检查中/);
+assert.equal(element('tunnelFact').textContent, 'Suspect');
+assert.match(element('heroTitle').textContent, /检查/);
+
+status = {
+  ...status,
+  runtimeHealth: 'down',
+};
+await vm.runInContext('refresh()', context);
+assert.match(element('sidebarStatus').textContent, /已断开/);
+assert.equal(element('tunnelFact').textContent, 'Down');
+console.log('connection UI checks passed: suspect/down health is distinct');

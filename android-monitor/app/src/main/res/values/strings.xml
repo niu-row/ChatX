@@ -1,0 +1,5 @@
+<resources>
+    <string name="app_name">ChatX Monitor</string>
+    <string name="monitor_channel">ChatX 实时监控</string>
+    <string name="alert_channel">ChatX 告警</string>
+</resources>

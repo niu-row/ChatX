@@ -16,7 +16,7 @@ for (const file of [node, launcher, entry]) {
 const temp = fs.mkdtempSync(path.join(os.tmpdir(), 'chatx-dc-smoke-'));
 const home = path.join(temp, 'dc-home');
 const sample = path.join(temp, 'sample.txt');
-const client = new Client({ name: 'chatx-bridge-smoke', version: '0.3.0' });
+const client = new Client({ name: 'chatx-bridge-smoke', version: '0.4.10' });
 const transportEnv = Object.fromEntries(
   Object.entries(process.env).filter(([, value]) => typeof value === 'string'),
 );

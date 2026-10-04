@@ -1,0 +1,18 @@
+<resources>
+    <color name="cx_bg">#F4F7FB</color>
+    <color name="cx_surface">#FFFFFF</color>
+    <color name="cx_surface_soft">#EEF4FF</color>
+    <color name="cx_text">#172033</color>
+    <color name="cx_text_muted">#64748B</color>
+    <color name="cx_border">#DCE5F1</color>
+    <color name="cx_primary">#2F6FED</color>
+    <color name="cx_primary_dark">#1F56C2</color>
+    <color name="cx_success">#168A56</color>
+    <color name="cx_success_bg">#E9F8F0</color>
+    <color name="cx_warning">#B26A00</color>
+    <color name="cx_warning_bg">#FFF4DD</color>
+    <color name="cx_danger">#C93B3B</color>
+    <color name="cx_danger_bg">#FFF0F0</color>
+    <color name="cx_chip">#E8EEF8</color>
+    <color name="transparent">#00000000</color>
+</resources>

@@ -29,6 +29,57 @@ process.argv = [process.execPath, entry, ...serverArgs];
 // Keep the locked upstream package intact. Adapt its registered MCP handlers
 // before connecting stdio so ChatX exposes tools without embedded UI resources.
 // Upstream's preview A/B flag is not a reliable off switch and still lists UI.
+const monitorDir = path.join(home, '.chatx-monitor');
+const activityPath = path.join(monitorDir, 'activity.json');
+fs.mkdirSync(monitorDir, { recursive: true });
+let activitySequence = 0;
+let callSequence = 0;
+let lastCallStartedAt = null;
+let lastCallFinishedAt = null;
+let lastToolName = null;
+let lastSuccess = null;
+let lastDurationMs = null;
+let recentCallStarts = [];
+const inFlightCalls = new Map();
+
+function writeActivitySnapshot() {
+  try {
+    const now = Date.now();
+    recentCallStarts = recentCallStarts.filter((timestamp) => now - timestamp <= 60_000);
+    const inFlightCallList = [...inFlightCalls.entries()].map(([id, call]) => ({
+      id,
+      toolName: call.toolName,
+      startedAt: call.startedAt,
+    }));
+    const oldestInFlightStartedAt = inFlightCallList.length
+      ? Math.min(...inFlightCallList.map((call) => call.startedAt))
+      : null;
+    const payload = {
+      schemaVersion: 2,
+      sequence: ++activitySequence,
+      updatedAt: now,
+      lastCallStartedAt,
+      lastCallFinishedAt,
+      lastToolName,
+      lastSuccess,
+      lastDurationMs,
+      inFlight: inFlightCalls.size,
+      inFlightCalls: inFlightCallList,
+      oldestInFlightStartedAt,
+      recentCallStarts,
+      callsLastMinute: recentCallStarts.length,
+    };
+    const temp = `${activityPath}.${process.pid}.tmp`;
+    fs.writeFileSync(temp, `${JSON.stringify(payload)}\n`, { mode: 0o600 });
+    fs.renameSync(temp, activityPath);
+  } catch {
+    // Monitoring is observational only. Snapshot I/O must never break an MCP call.
+  }
+}
+
+// Clear any stale in-flight snapshot left by a previous crashed launcher.
+writeActivitySnapshot();
+
 const dist = path.dirname(entry);
 await import(pathToFileURL(path.join(dist, 'bootstrap.js')).href);
 const sdk = path.join(dist, '..', 'node_modules', '@modelcontextprotocol', 'sdk', 'dist', 'esm');
@@ -48,6 +99,35 @@ Server.prototype.setRequestHandler = function (schema, handler) {
         const { _meta, ...rest } = tool;
         return Object.keys(meta).length ? { ...rest, _meta: meta } : rest;
       }) };
+    };
+  } else if (schema === types.CallToolRequestSchema) {
+    const upstream = handler;
+    handler = async (...args) => {
+      const request = args[0];
+      const startedAt = Date.now();
+      const callId = `${process.pid}:${++callSequence}:${startedAt}`;
+      const toolName = request?.params?.name || 'unknown';
+      lastCallStartedAt = startedAt;
+      lastToolName = toolName;
+      recentCallStarts.push(startedAt);
+      inFlightCalls.set(callId, { toolName, startedAt });
+      writeActivitySnapshot();
+      try {
+        const result = await upstream(...args);
+        lastSuccess = result?.isError !== true;
+        return result;
+      } catch (error) {
+        lastSuccess = false;
+        throw error;
+      } finally {
+        const finishedAt = Date.now();
+        lastCallStartedAt = startedAt;
+        lastCallFinishedAt = finishedAt;
+        lastToolName = toolName;
+        lastDurationMs = Math.max(0, finishedAt - startedAt);
+        inFlightCalls.delete(callId);
+        writeActivitySnapshot();
+      }
     };
   } else if (schema === types.ListResourcesRequestSchema) {
     handler = async () => ({ resources: [] });
