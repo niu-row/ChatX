@@ -45,6 +45,8 @@ class SecureStore(context: Context) {
             .remove("last_snapshot")
             .remove("event_history")
             .remove("monitor_service_running")
+            .remove("route_policy")
+            .remove("manual_route_selector")
             .apply()
     }
 
@@ -64,6 +66,42 @@ class SecureStore(context: Context) {
     fun getLastEndpoint(): String? = prefs.getString("last_endpoint", null)
     fun setLastEndpoint(url: String) {
         prefs.edit().putString("last_endpoint", url).apply()
+    }
+
+    fun getRoutePolicy(): RoutePolicy = runCatching {
+        RoutePolicy.valueOf(
+            prefs.getString("route_policy", RoutePolicy.LAN_FIRST.name)
+                ?: RoutePolicy.LAN_FIRST.name,
+        )
+    }.getOrDefault(RoutePolicy.LAN_FIRST)
+
+    fun setRoutePolicy(policy: RoutePolicy) {
+        prefs.edit().putString("route_policy", policy.name).apply()
+    }
+
+    fun getManualRouteSelector(): ManualRouteSelector? {
+        val raw = prefs.getString("manual_route_selector", null) ?: return null
+        return runCatching {
+            val root = org.json.JSONObject(raw)
+            ManualRouteSelector(
+                kind = root.optString("kind"),
+                family = root.optString("family"),
+                interfaceName = root.optString("interface"),
+            ).takeIf { it.kind.isNotBlank() }
+        }.getOrNull()
+    }
+
+    fun setManualRouteSelector(selector: ManualRouteSelector?) {
+        if (selector == null) {
+            prefs.edit().remove("manual_route_selector").apply()
+            return
+        }
+        val root = org.json.JSONObject().apply {
+            put("kind", selector.kind)
+            put("family", selector.family)
+            put("interface", selector.interfaceName)
+        }
+        prefs.edit().putString("manual_route_selector", root.toString()).apply()
     }
     fun getAlertThresholds(): Set<Long> {
         val raw = prefs.getString("alert_thresholds", null)

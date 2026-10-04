@@ -28,6 +28,10 @@ use tokio_tungstenite::{
 };
 
 const SNAPSHOT_INTERVAL: Duration = Duration::from_secs(10);
+const CLIENT_HEARTBEAT_INTERVAL: Duration = Duration::from_secs(5);
+const CLIENT_IDLE_TIMEOUT: Duration = Duration::from_secs(12);
+const RECOVERY_PROBE_INTERVAL: Duration = Duration::from_secs(2);
+const RECOVERY_PROBE_TIMEOUT: Duration = Duration::from_secs(3);
 const RECONNECT_DELAYS: [u64; 5] = [1, 2, 5, 10, 30];
 
 fn now_ms() -> u64 {
@@ -413,12 +417,11 @@ async fn relay_loop(
         }
         let base = RECONNECT_DELAYS[(attempt.saturating_sub(1) as usize).min(RECONNECT_DELAYS.len() - 1)];
         let delay = jittered_delay(base);
-        let started = tokio::time::Instant::now();
-        while started.elapsed() < delay {
-            if stop.load(Ordering::SeqCst) {
-                break;
+        if wait_for_network_recovery(&settings, delay, stop.clone()).await {
+            attempt = 0;
+            if let Ok(mut value) = status.lock() {
+                value.reconnect_attempt = 0;
             }
-            tokio::time::sleep(Duration::from_millis(200)).await;
         }
     }
     if let Ok(mut value) = status.lock() {
@@ -434,6 +437,58 @@ fn jittered_delay(seconds: u64) -> Duration {
         .saturating_mul(1000 + jitter)
         / 1000;
     Duration::from_millis(millis.max(200) as u64)
+}
+
+async fn wait_for_network_recovery(
+    settings: &RelaySettings,
+    delay: Duration,
+    stop: Arc<AtomicBool>,
+) -> bool {
+    let health_url = normalized_base_url(&settings.base_url)
+        .ok()
+        .map(|base| format!("{base}/healthz"));
+    let client = reqwest::Client::builder()
+        .connect_timeout(Duration::from_secs(2))
+        .timeout(RECOVERY_PROBE_TIMEOUT)
+        .build()
+        .ok();
+    let deadline = tokio::time::Instant::now() + delay;
+    let mut saw_unreachable = false;
+
+    loop {
+        if stop.load(Ordering::SeqCst) || tokio::time::Instant::now() >= deadline {
+            return false;
+        }
+
+        if let (Some(client), Some(health_url)) = (&client, &health_url) {
+            let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+            let probe_timeout = RECOVERY_PROBE_TIMEOUT.min(remaining);
+            let reachable = tokio::time::timeout(
+                probe_timeout,
+                client.get(health_url).send(),
+            )
+            .await
+            .ok()
+            .and_then(Result::ok)
+            .map(|response| response.status().is_success())
+            .unwrap_or(false);
+            if reachable && saw_unreachable {
+                return true;
+            }
+            saw_unreachable |= !reachable;
+        }
+
+        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+        if remaining.is_zero() {
+            return false;
+        }
+        let sleep_for = if client.is_some() && health_url.is_some() {
+            RECOVERY_PROBE_INTERVAL.min(remaining)
+        } else {
+            Duration::from_millis(200).min(remaining)
+        };
+        tokio::time::sleep(sleep_for).await;
+    }
 }
 
 async fn relay_session(
@@ -479,6 +534,12 @@ async fn relay_session(
     let mut session_id: Option<String> = None;
     let mut sequences: HashMap<String, u64> = HashMap::new();
     let mut snapshot_tick = tokio::time::interval(SNAPSHOT_INTERVAL);
+    let heartbeat_start = tokio::time::Instant::now() + CLIENT_HEARTBEAT_INTERVAL;
+    let mut heartbeat_tick = tokio::time::interval_at(
+        heartbeat_start,
+        CLIENT_HEARTBEAT_INTERVAL,
+    );
+    let mut last_server_activity = tokio::time::Instant::now();
 
     loop {
         if stop.load(Ordering::SeqCst) {
@@ -486,6 +547,15 @@ async fn relay_session(
             return Ok(());
         }
         tokio::select! {
+            _ = heartbeat_tick.tick() => {
+                if last_server_activity.elapsed() > CLIENT_IDLE_TIMEOUT {
+                    return Err("Relay WSS heartbeat timeout。".into());
+                }
+                send_desktop_message(
+                    &mut socket,
+                    &DesktopWsMessage::Ping { sent_at: now_ms() },
+                ).await?;
+            }
             _ = snapshot_tick.tick(), if session_id.is_some() => {
                 let relay_session = session_id.as_deref().unwrap_or("");
                 for source in snapshot_provider() {
@@ -515,6 +585,7 @@ async fn relay_session(
                     return Err("Relay WSS 已关闭。".into());
                 };
                 let message = message.map_err(|error| format!("Relay WSS 读取失败：{error}"))?;
+                last_server_activity = tokio::time::Instant::now();
                 if let Ok(mut value) = status.lock() {
                     value.last_heartbeat_at = Some(now_ms());
                 }

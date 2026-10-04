@@ -706,31 +706,14 @@ class MainActivity : Activity() {
     private fun renderConnection() {
         pageHeading(
             "连接",
-            "Monitor Protocol over WSS · 自动选择 Direct / ChatX Relay",
+            "Monitor Protocol over WSS · Direct / Relay 动态多路径",
         )
         val config = store.loadPairing() ?: return
         val currentEndpoint = currentEndpointUrl()
         val currentBase = currentEndpoint?.substringBefore('?')
-        val relayEndpoint = config.relay?.let { relay ->
-            val scheme = if (relay.baseUrl.startsWith("https://")) {
-                "wss://" + relay.baseUrl.removePrefix("https://")
-            } else {
-                "ws://" + relay.baseUrl.removePrefix("http://")
-            }
-            MonitorEndpoint(
-                kind = "relay",
-                family = "wss",
-                interfaceName = "chatx-relay",
-                host = runCatching {
-                    java.net.URI(relay.baseUrl).host
-                }.getOrNull().orEmpty(),
-                url = "${scheme.trimEnd('/')}/v1/ws/device",
-            )
-        }
-        val routes = buildList {
-            addAll(config.directEndpoints)
-            relayEndpoint?.let(::add)
-        }
+        val routes = configuredRoutes(config)
+        val policy = store.getRoutePolicy()
+        val manualSelector = store.getManualRouteSelector()
         val configuredUrls = routes.map { it.url }.toSet()
         val testedUrls = endpointHealth?.map { it.endpoint.url }?.toSet()
         val needsHealthTest = testedUrls == null || testedUrls != configuredUrls
@@ -757,6 +740,39 @@ class MainActivity : Activity() {
             ui.margin(top = 8),
         )
         pageContent.addView(summary, ui.margin(bottom = 14))
+
+        val policyCard = ui.card()
+        policyCard.addView(ui.title("路径策略", 16f))
+        policyCard.addView(
+            keyValue("当前策略", routePolicyLabel(policy)),
+            ui.margin(top = 12),
+        )
+        if (policy == RoutePolicy.MANUAL) {
+            policyCard.addView(
+                keyValue(
+                    "手动首选",
+                    manualSelector?.let(::manualRouteLabel) ?: "尚未选择",
+                ),
+                ui.margin(top = 8),
+            )
+        }
+        val policyActions = ui.row()
+        policyActions.addView(
+            ui.button("更改策略", primary = true) {
+                showRoutePolicyDialog()
+            },
+            ui.margin(width = 0, weight = 1f, right = 5, top = 12),
+        )
+        if (policy == RoutePolicy.MANUAL) {
+            policyActions.addView(
+                ui.button("选择路径") {
+                    showManualRouteDialog(routes)
+                },
+                ui.margin(width = 0, weight = 1f, left = 5, top = 12),
+            )
+        }
+        policyCard.addView(policyActions)
+        pageContent.addView(policyCard, ui.margin(bottom = 14))
 
         val routeCard = ui.card()
         val routesTop = ui.row()
@@ -787,6 +803,9 @@ class MainActivity : Activity() {
             val isCurrent = endpoint.url == currentBase ||
                 (endpoint.kind == "relay" &&
                     currentBase?.contains("/v1/ws/device") == true)
+            val isManualPreferred =
+                policy == RoutePolicy.MANUAL &&
+                    manualSelector?.matches(endpoint) == true
             val row = ui.row()
             val copy = ui.column()
             copy.addView(
@@ -802,6 +821,12 @@ class MainActivity : Activity() {
             if (isCurrent) {
                 copy.addView(
                     ui.muted("当前使用路径", 12f),
+                    ui.margin(top = 3),
+                )
+            }
+            if (isManualPreferred) {
+                copy.addView(
+                    ui.muted("手动首选路径", 12f),
                     ui.margin(top = 3),
                 )
             }
@@ -1327,6 +1352,114 @@ class MainActivity : Activity() {
         )
         return row
     }
+
+    private fun configuredRoutes(config: PairingConfig): List<MonitorEndpoint> =
+        buildList {
+            addAll(config.directEndpoints)
+            config.relay?.let { relay ->
+                val scheme = if (relay.baseUrl.startsWith("https://")) {
+                    "wss://" + relay.baseUrl.removePrefix("https://")
+                } else {
+                    "ws://" + relay.baseUrl.removePrefix("http://")
+                }
+                add(
+                    MonitorEndpoint(
+                        kind = "relay",
+                        family = "wss",
+                        interfaceName = "chatx-relay",
+                        host = runCatching {
+                            java.net.URI(relay.baseUrl).host
+                        }.getOrNull().orEmpty(),
+                        url = "${scheme.trimEnd('/')}/v1/ws/device",
+                    ),
+                )
+            }
+        }
+
+    private fun showRoutePolicyDialog() {
+        val policies = arrayOf(
+            RoutePolicy.LAN_FIRST,
+            RoutePolicy.RELAY_FIRST,
+            RoutePolicy.AUTO,
+            RoutePolicy.MANUAL,
+        )
+        val labels = policies.map(::routePolicyLabel).toTypedArray()
+        val selected = policies.indexOf(store.getRoutePolicy()).coerceAtLeast(0)
+        AlertDialog.Builder(this)
+            .setTitle("选择路径策略")
+            .setSingleChoiceItems(labels, selected) { dialog, which ->
+                val policy = policies[which]
+                store.setRoutePolicy(policy)
+                if (policy == RoutePolicy.MANUAL &&
+                    store.getManualRouteSelector() == null
+                ) {
+                    val routes = store.loadPairing()?.let(::configuredRoutes).orEmpty()
+                    val currentBase = currentEndpointUrl()?.substringBefore('?')
+                    val preferred = routes.firstOrNull { it.url == currentBase }
+                        ?: routes.firstOrNull()
+                    store.setManualRouteSelector(
+                        preferred?.let(ManualRouteSelector::from),
+                    )
+                }
+                if (store.isMonitorServiceRunning()) {
+                    MonitorService.reevaluate(this)
+                }
+                dialog.dismiss()
+                renderCurrentPage()
+            }
+            .setNegativeButton("取消", null)
+            .show()
+    }
+
+    private fun showManualRouteDialog(routes: List<MonitorEndpoint>) {
+        if (routes.isEmpty()) {
+            toast("当前没有可选择的路径。")
+            return
+        }
+        val current = store.getManualRouteSelector()
+        val labels = routes.map { endpoint ->
+            "${endpointKindLabel(endpoint.kind)} · ${endpoint.family.uppercase()} · " +
+                (endpoint.host.ifBlank { endpoint.interfaceName })
+        }.toTypedArray()
+        val selected = routes.indexOfFirst { current?.matches(it) == true }
+        AlertDialog.Builder(this)
+            .setTitle("选择手动首选路径")
+            .setSingleChoiceItems(labels, selected) { dialog, which ->
+                store.setManualRouteSelector(
+                    ManualRouteSelector.from(routes[which]),
+                )
+                store.setRoutePolicy(RoutePolicy.MANUAL)
+                if (store.isMonitorServiceRunning()) {
+                    MonitorService.reevaluate(this)
+                }
+                dialog.dismiss()
+                renderCurrentPage()
+            }
+            .setNegativeButton("取消", null)
+            .show()
+    }
+
+    private fun routePolicyLabel(policy: RoutePolicy): String = when (policy) {
+        RoutePolicy.LAN_FIRST -> "LAN 优先"
+        RoutePolicy.RELAY_FIRST -> "公网 Relay 优先"
+        RoutePolicy.AUTO -> "自动 · 保持稳定路径"
+        RoutePolicy.MANUAL -> "手动首选"
+    }
+
+    private fun manualRouteLabel(selector: ManualRouteSelector): String =
+        buildString {
+            append(endpointKindLabel(selector.kind))
+            if (selector.family.isNotBlank()) {
+                append(" · ")
+                append(selector.family.uppercase())
+            }
+            if (selector.interfaceName.isNotBlank() &&
+                selector.interfaceName != "chatx-relay"
+            ) {
+                append(" · ")
+                append(selector.interfaceName)
+            }
+        }
 
     private fun currentEndpointUrl(): String? {
         val root = latestStatusJson

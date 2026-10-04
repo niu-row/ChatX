@@ -53,6 +53,10 @@ class MonitorService : Service() {
             stopSelf()
             return START_NOT_STICKY
         }
+        if (intent?.action == ACTION_REEVALUATE) {
+            if (connection == null) startConnection() else connection?.reevaluatePolicy()
+            return START_STICKY
+        }
         if (connection == null) {
             startConnection()
         }
@@ -98,7 +102,7 @@ class MonitorService : Service() {
     override fun onBind(intent: Intent?): IBinder? = null
 
     private fun handleSnapshot(snapshot: MonitorSnapshot) {
-        store.updateDirectEndpoints(snapshot.endpoints)
+        connection?.updateRoutes(snapshot.endpoints)
         val json = StatusCodec.snapshot(snapshot)
         store.setLastSnapshotJson(json)
         NotificationCenter.updateForeground(
@@ -186,6 +190,7 @@ class MonitorService : Service() {
         const val ACTION_STATUS = "com.chatx.monitor.STATUS"
         const val EXTRA_STATUS_JSON = "status_json"
         private const val ACTION_STOP = "com.chatx.monitor.STOP"
+        private const val ACTION_REEVALUATE = "com.chatx.monitor.REEVALUATE"
 
         fun start(context: Context) {
             val intent = Intent(context, MonitorService::class.java)
@@ -194,6 +199,12 @@ class MonitorService : Service() {
             } else {
                 context.startService(intent)
             }
+        }
+
+        fun reevaluate(context: Context) {
+            context.startService(
+                Intent(context, MonitorService::class.java).setAction(ACTION_REEVALUATE),
+            )
         }
 
         fun stop(context: Context) {

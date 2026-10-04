@@ -7,8 +7,10 @@ ChatX Monitor 是 ChatX Desktop 的只读手机监控客户端。
 - 扫描桌面端本地生成的配对二维码，或粘贴配对 JSON。
 - 使用 Android Keystore + AES-GCM 保存 Monitor Token 和 TLS 指纹。
 - 对 ChatX 自签名 TLS 证书执行 SHA-256 certificate pinning。
-- 自动尝试 LAN、Tailscale、Public IPv6 endpoint。
-- 前台服务每 15 秒检查一次 ChatX。
+- 动态维护 LAN、Tailscale、Public IPv6 与 ChatX Relay endpoint；Relay 在线时会同步 Desktop 最新地址。
+- 支持 LAN 优先、Relay 优先、自动稳定路径、手动首选四种连接策略，并在切换前先验证新路径。
+- 连接页并行执行轻量 WSS 握手测试，不再逐条等待完整 Snapshot。
+- 前台服务使用常驻 WSS 监控 ChatX，并在 endpoint 或策略变化时在线重评估路径。
 - 区分 Host Offline、Tunnel Down、MCP GAP、MCP STALLED。
 - 支持 1 / 2 / 3 / 5 分钟中断告警与恢复通知。
 

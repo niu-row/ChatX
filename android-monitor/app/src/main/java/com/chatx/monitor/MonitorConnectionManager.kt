@@ -34,6 +34,7 @@ class MonitorConnectionManager(
     context: Context,
     private val config: PairingConfig,
     private val listener: Listener,
+    private val dynamicRoutes: Boolean = true,
 ) : Closeable {
     interface Listener {
         fun onTransportState(state: MonitorTransportState)
@@ -44,6 +45,8 @@ class MonitorConnectionManager(
     private data class Candidate(
         val key: String,
         val kind: String,
+        val family: String,
+        val interfaceName: String,
         val url: String,
         val token: String,
         val relay: Boolean,
@@ -56,12 +59,15 @@ class MonitorConnectionManager(
     private val relayClient: OkHttpClient = WssClients.relay()
     private val sockets = ConcurrentHashMap<String, WebSocket>()
     private val winnerKey = AtomicReference<String?>(null)
+    private val activeCandidate = AtomicReference<Candidate?>(null)
     private val stopped = AtomicBoolean(true)
     private val generation = AtomicInteger(0)
     private val reconnectScheduled = AtomicBoolean(false)
+    private val promotionInFlight = AtomicBoolean(false)
     private val revokeRequested = AtomicBoolean(false)
     private var reconnectAttempt = 0
     private var raceTimeout: ScheduledFuture<*>? = null
+    private var reconnectFuture: ScheduledFuture<*>? = null
 
     @Volatile
     private var producerSessionId: String? = null
@@ -77,6 +83,16 @@ class MonitorConnectionManager(
     }
 
     override fun close() = stop()
+
+    fun updateRoutes(endpoints: List<MonitorEndpoint>) {
+        store.updateDirectEndpoints(endpoints)
+        reevaluatePolicy()
+    }
+
+    fun reevaluatePolicy() {
+        if (stopped.get()) return
+        scheduler.execute { maybePromote() }
+    }
 
     fun requestSelfRevoke() {
         revokeRequested.set(true)
@@ -95,12 +111,15 @@ class MonitorConnectionManager(
         if (!stopped.compareAndSet(false, true)) return
         generation.incrementAndGet()
         raceTimeout?.cancel(true)
+        reconnectFuture?.cancel(true)
         sockets.values.forEach { socket ->
             runCatching { socket.close(1000, "stopped") }
         }
         sockets.clear()
         winnerKey.set(null)
+        activeCandidate.set(null)
         reconnectScheduled.set(false)
+        promotionInFlight.set(false)
         scheduler.shutdownNow()
         directClient.dispatcher.executorService.shutdown()
         relayClient.dispatcher.executorService.shutdown()
@@ -115,7 +134,10 @@ class MonitorConnectionManager(
             if (stopped.get()) return@schedule
             val raceGeneration = generation.incrementAndGet()
             raceTimeout?.cancel(true)
+            reconnectFuture?.cancel(true)
             winnerKey.set(null)
+            activeCandidate.set(null)
+            promotionInFlight.set(false)
             producerSessionId = null
             lastSequence = 0L
             lastGeneratedAt = 0L
@@ -137,27 +159,10 @@ class MonitorConnectionManager(
                 ),
             )
 
-            val last = store.getLastEndpoint()
-            val direct = candidates.filterNot { it.relay }
-            val relay = candidates.firstOrNull { it.relay }
-            val preferred = candidates.firstOrNull { it.url == last }
-
-            val starts = linkedMapOf<Candidate, Long>()
-            if (preferred != null) starts[preferred] = 0L
-            direct.forEachIndexed { index, candidate ->
-                if (candidate !in starts) {
-                    starts[candidate] =
-                        if (preferred == null && index == 0) 0L else 250L
-                }
-            }
-            if (relay != null && relay !in starts) {
-                starts[relay] = 750L
-            }
-
-            starts.forEach { (candidate, stagger) ->
+            orderedCandidates(candidates).forEachIndexed { index, candidate ->
                 scheduler.schedule(
                     { openCandidate(candidate, raceGeneration) },
-                    stagger,
+                    (index * 250L).coerceAtMost(1_000L),
                     TimeUnit.MILLISECONDS,
                 )
             }
@@ -183,17 +188,20 @@ class MonitorConnectionManager(
     }
 
     private fun candidates(): List<Candidate> {
+        val latest = if (dynamicRoutes) store.loadPairing() ?: config else config
         val result = mutableListOf<Candidate>()
-        config.directEndpoints.forEach { endpoint ->
+        latest.directEndpoints.forEach { endpoint ->
             result += Candidate(
                 key = "direct:${endpoint.url}",
                 kind = endpoint.kind,
+                family = endpoint.family,
+                interfaceName = endpoint.interfaceName,
                 url = appendIdentityQuery(endpoint.url),
                 token = config.directToken,
                 relay = false,
             )
         }
-        config.relay?.let { relay ->
+        latest.relay?.let { relay ->
             val scheme = when {
                 relay.baseUrl.startsWith("https://") ->
                     "wss://" + relay.baseUrl.removePrefix("https://")
@@ -206,6 +214,8 @@ class MonitorConnectionManager(
             result += Candidate(
                 key = "relay:$url",
                 kind = "relay",
+                family = "wss",
+                interfaceName = "chatx-relay",
                 url = url,
                 token = relay.deviceToken,
                 relay = true,
@@ -214,17 +224,103 @@ class MonitorConnectionManager(
         return result
     }
 
+    private fun orderedCandidates(
+        values: List<Candidate> = candidates(),
+    ): List<Candidate> {
+        val policy = store.getRoutePolicy()
+        val last = store.getLastEndpoint()
+        return values.sortedWith(
+            compareBy<Candidate> {
+                if (policy == RoutePolicy.AUTO && it.url == last) {
+                    -1
+                } else {
+                    routeRank(it, policy)
+                }
+            }.thenBy { it.url },
+        )
+    }
+
+    private fun routeRank(candidate: Candidate, policy: RoutePolicy): Int {
+        val directRank = when (candidate.kind) {
+            "lan" -> 0
+            "tailscale" -> 1
+            "ipv6" -> 2
+            else -> 3
+        }
+        return when (policy) {
+            RoutePolicy.AUTO -> directRank + if (candidate.relay) 10 else 0
+            RoutePolicy.LAN_FIRST -> if (candidate.relay) 10 else directRank
+            RoutePolicy.RELAY_FIRST -> if (candidate.relay) 0 else directRank + 10
+            RoutePolicy.MANUAL -> {
+                val selector = store.getManualRouteSelector()
+                when {
+                    selector != null && selectorMatches(selector, candidate) -> 0
+                    candidate.relay -> 10
+                    else -> directRank + 20
+                }
+            }
+        }
+    }
+
+    private fun selectorMatches(
+        selector: ManualRouteSelector,
+        candidate: Candidate,
+    ): Boolean =
+        candidate.kind == selector.kind &&
+            (selector.family.isBlank() || candidate.family == selector.family) &&
+            (selector.interfaceName.isBlank() ||
+                candidate.interfaceName == selector.interfaceName)
+
+
+    private fun maybePromote() {
+        if (stopped.get() || promotionInFlight.get()) return
+        val current = activeCandidate.get() ?: return
+        val policy = store.getRoutePolicy()
+        if (policy == RoutePolicy.AUTO) return
+
+        val available = candidates()
+        val desired = orderedCandidates(available).firstOrNull() ?: return
+        val currentStillAdvertised = available.any { it.key == current.key }
+        val desiredRank = routeRank(desired, policy)
+        val currentRank = routeRank(current, policy)
+        val shouldSwitch =
+            desired.key != current.key &&
+                (desiredRank < currentRank ||
+                    (!currentStillAdvertised && desiredRank <= currentRank))
+        if (!shouldSwitch || !promotionInFlight.compareAndSet(false, true)) return
+
+        val currentGeneration = generation.get()
+        openCandidate(desired, currentGeneration, promotion = true)
+        scheduler.schedule(
+            {
+                if (
+                    generation.get() == currentGeneration &&
+                    winnerKey.get() != desired.key
+                ) {
+                    sockets.remove(desired.key)?.cancel()
+                    promotionInFlight.set(false)
+                }
+            },
+            5,
+            TimeUnit.SECONDS,
+        )
+    }
+
     private fun appendIdentityQuery(url: String): String {
         val separator = if ('?' in url) '&' else '?'
         return "$url${separator}desktopId=${config.desktopId}" +
             "&deviceId=${config.deviceId}"
     }
 
-    private fun openCandidate(candidate: Candidate, raceGeneration: Int) {
+    private fun openCandidate(
+        candidate: Candidate,
+        raceGeneration: Int,
+        promotion: Boolean = false,
+    ) {
         if (
             stopped.get() ||
             generation.get() != raceGeneration ||
-            winnerKey.get() != null
+            (!promotion && winnerKey.get() != null)
         ) return
 
         val request = Request.Builder()
@@ -234,7 +330,7 @@ class MonitorConnectionManager(
         val client = if (candidate.relay) relayClient else directClient
         val socket = client.newWebSocket(
             request,
-            CandidateListener(candidate, raceGeneration),
+            CandidateListener(candidate, raceGeneration, promotion),
         )
         sockets[candidate.key] = socket
     }
@@ -242,6 +338,7 @@ class MonitorConnectionManager(
     private inner class CandidateListener(
         private val candidate: Candidate,
         private val raceGeneration: Int,
+        private val promotion: Boolean,
     ) : WebSocketListener() {
         override fun onOpen(webSocket: WebSocket, response: Response) {
             if (!isCurrent()) {
@@ -321,29 +418,51 @@ class MonitorConnectionManager(
             webSocket: WebSocket,
             root: JSONObject,
         ) {
-            if (!winnerKey.compareAndSet(null, candidate.key)) {
+            val desktopOnline = if (candidate.relay) {
+                root.optBoolean("desktopOnline", false)
+            } else {
+                true
+            }
+            if (promotion && !desktopOnline) {
+                sockets.remove(candidate.key)
+                promotionInFlight.set(false)
+                webSocket.close(1000, "desktop offline")
+                return
+            }
+
+            val accepted = if (promotion) {
+                winnerKey.getAndSet(candidate.key) != candidate.key
+            } else {
+                winnerKey.compareAndSet(null, candidate.key)
+            }
+            if (!accepted) {
+                promotionInFlight.set(false)
                 if (winnerKey.get() != candidate.key) {
                     webSocket.close(1000, "race lost")
                 }
                 return
             }
+
             raceTimeout?.cancel(true)
+            reconnectFuture?.cancel(true)
             reconnectAttempt = 0
             reconnectScheduled.set(false)
+            promotionInFlight.set(false)
+            activeCandidate.set(candidate)
             producerSessionId = null
             lastSequence = 0L
             lastGeneratedAt = 0L
             store.setLastEndpoint(candidate.url)
             sockets.entries.forEach { (key, socket) ->
                 if (key != candidate.key) {
-                    runCatching { socket.close(1000, "race lost") }
+                    runCatching {
+                        socket.close(
+                            1000,
+                            if (promotion) "route promoted" else "race lost",
+                        )
+                    }
                     sockets.remove(key)
                 }
-            }
-            val desktopOnline = if (candidate.relay) {
-                root.optBoolean("desktopOnline", false)
-            } else {
-                true
             }
             listener.onTransportState(
                 MonitorTransportState(
@@ -357,6 +476,9 @@ class MonitorConnectionManager(
                 webSocket.send(
                     JSONObject().apply { put("type", "revoke_self") }.toString(),
                 )
+            }
+            if (!promotion) {
+                scheduler.schedule({ maybePromote() }, 500, TimeUnit.MILLISECONDS)
             }
         }
 
@@ -410,7 +532,11 @@ class MonitorConnectionManager(
         private fun handleDisconnect(message: String) {
             sockets.remove(candidate.key)
             if (winnerKey.compareAndSet(candidate.key, null)) {
+                activeCandidate.compareAndSet(candidate, null)
+                promotionInFlight.set(false)
                 scheduleReconnect(message, raceGeneration)
+            } else if (promotion) {
+                promotionInFlight.set(false)
             }
         }
 
@@ -441,7 +567,7 @@ class MonitorConnectionManager(
                 error = message,
             ),
         )
-        scheduler.schedule({
+        reconnectFuture = scheduler.schedule({
             reconnectScheduled.set(false)
             beginRace(0L)
         }, delayMs, TimeUnit.MILLISECONDS)
@@ -449,6 +575,46 @@ class MonitorConnectionManager(
 
     companion object {
         private val RECONNECT_DELAYS = listOf(1, 2, 5, 10, 30)
+
+        fun probeOnce(
+            context: Context,
+            config: PairingConfig,
+            timeoutMillis: Long = 2_500L,
+        ) {
+            val latch = CountDownLatch(1)
+            val error = AtomicReference<String?>()
+            lateinit var manager: MonitorConnectionManager
+            manager = MonitorConnectionManager(
+                context,
+                config,
+                object : Listener {
+                    override fun onTransportState(state: MonitorTransportState) {
+                        when (state.phase) {
+                            "connected" -> latch.countDown()
+                            "desktop_offline" -> {
+                                error.set("Relay 可达，但 Desktop 当前离线。")
+                                latch.countDown()
+                            }
+                            "degraded" -> state.error?.let(error::set)
+                            "reconnecting" -> if (state.reconnectAttempt > 0) {
+                                state.error?.let(error::set)
+                                latch.countDown()
+                            }
+                        }
+                    }
+
+                    override fun onSnapshot(snapshot: MonitorSnapshot) {}
+                },
+                dynamicRoutes = false,
+            )
+            manager.start()
+            val completed = latch.await(timeoutMillis, TimeUnit.MILLISECONDS)
+            manager.stop()
+            if (!completed) {
+                throw TimeoutException(error.get() ?: "WSS 握手超时。")
+            }
+            error.get()?.let { throw IOException(it) }
+        }
 
         fun revokePairing(
             context: Context,

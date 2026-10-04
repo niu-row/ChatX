@@ -3,6 +3,7 @@ package com.chatx.monitor
 import android.content.Context
 import android.os.SystemClock
 import java.net.URI
+import java.util.concurrent.Executors
 
 class MonitorRepository(context: Context) {
     private val appContext = context.applicationContext
@@ -48,28 +49,37 @@ class MonitorRepository(context: Context) {
             )
         }
 
-        return routes.map { (endpoint, routeConfig) ->
-            val started = SystemClock.elapsedRealtime()
-            try {
-                MonitorConnectionManager.fetchOnce(
-                    context = appContext,
-                    config = routeConfig,
-                    timeoutSeconds = 6,
-                )
-                EndpointHealth(
-                    endpoint = endpoint,
-                    reachable = true,
-                    latencyMs = SystemClock.elapsedRealtime() - started,
-                    error = null,
-                )
-            } catch (error: Exception) {
-                EndpointHealth(
-                    endpoint = endpoint,
-                    reachable = false,
-                    latencyMs = null,
-                    error = error.message ?: error.javaClass.simpleName,
-                )
-            }
+        val pool = Executors.newFixedThreadPool(
+            minOf(routes.size, 4).coerceAtLeast(1),
+        )
+        return try {
+            routes.map { (endpoint, routeConfig) ->
+                pool.submit<EndpointHealth> {
+                    val started = SystemClock.elapsedRealtime()
+                    try {
+                        MonitorConnectionManager.probeOnce(
+                            context = appContext,
+                            config = routeConfig,
+                            timeoutMillis = if (endpoint.kind == "relay") 2_500L else 1_800L,
+                        )
+                        EndpointHealth(
+                            endpoint = endpoint,
+                            reachable = true,
+                            latencyMs = SystemClock.elapsedRealtime() - started,
+                            error = null,
+                        )
+                    } catch (error: Exception) {
+                        EndpointHealth(
+                            endpoint = endpoint,
+                            reachable = false,
+                            latencyMs = null,
+                            error = error.message ?: error.javaClass.simpleName,
+                        )
+                    }
+                }
+            }.map { it.get() }
+        } finally {
+            pool.shutdownNow()
         }
     }
 }

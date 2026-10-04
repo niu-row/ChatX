@@ -16,6 +16,7 @@ const activity = fs.readFileSync(`${base}/MainActivity.kt`, 'utf8');
 const alerts = fs.readFileSync(`${base}/AlertEngine.kt`, 'utf8');
 const codec = fs.readFileSync(`${base}/StatusCodec.kt`, 'utf8');
 const uiKit = fs.readFileSync(`${base}/UiKit.kt`, 'utf8');
+const routePolicy = fs.readFileSync(`${base}/RoutePolicy.kt`, 'utf8');
 
 function requireText(label, text, needle) {
   if (!text.includes(needle)) throw new Error(`${label} is missing: ${needle}`);
@@ -59,7 +60,10 @@ requireText('MonitorCrypto.kt', crypto, 'config.deviceId');
 
 requireText('MonitorConnectionManager.kt', connection, 'WssClients.direct');
 requireText('MonitorConnectionManager.kt', connection, 'WssClients.relay');
-requireText('MonitorConnectionManager.kt', connection, 'starts[relay] = 750L');
+requireText('MonitorConnectionManager.kt', connection, 'orderedCandidates(candidates)');
+requireText('MonitorConnectionManager.kt', connection, 'fun updateRoutes(endpoints: List<MonitorEndpoint>)');
+requireText('MonitorConnectionManager.kt', connection, 'promotionInFlight');
+requireText('MonitorConnectionManager.kt', connection, 'fun probeOnce(');
 requireText('MonitorConnectionManager.kt', connection, 'RECONNECT_DELAYS = listOf(1, 2, 5, 10, 30)');
 requireText('MonitorConnectionManager.kt', connection, '"desktop_presence"');
 requireText('MonitorConnectionManager.kt', connection, '"revoke_self"');
@@ -77,6 +81,11 @@ rejectText('MonitorService.kt', service, 'fetchSnapshot()');
 requireText('MonitorRepository.kt', repository, 'MonitorConnectionManager.fetchOnce');
 requireText('MonitorRepository.kt', repository, 'store.updateDirectEndpoints(snapshot.endpoints)');
 requireText('MonitorRepository.kt', repository, 'kind = "relay"');
+requireText('MonitorRepository.kt', repository, 'Executors.newFixedThreadPool');
+requireText('MonitorRepository.kt', repository, 'MonitorConnectionManager.probeOnce');
+requireText('RoutePolicy.kt', routePolicy, 'LAN_FIRST');
+requireText('RoutePolicy.kt', routePolicy, 'RELAY_FIRST');
+requireText('RoutePolicy.kt', routePolicy, 'MANUAL');
 
 requireText('MonitorSnapshotParser.kt', parser, 'parseRecentCalls');
 requireText('MonitorSnapshotParser.kt', parser, 'controlPlaneState');
@@ -91,6 +100,10 @@ requireText('MainActivity.kt', activity, '"relay" -> "ChatX Relay"');
 requireText('MainActivity.kt', activity, '"删除此设备"');
 requireText('MainActivity.kt', activity, 'MonitorConnectionManager.revokePairing');
 requireText('MainActivity.kt', activity, 'testAllEndpoints');
+requireText('MainActivity.kt', activity, 'showRoutePolicyDialog');
+requireText('MainActivity.kt', activity, 'showManualRouteDialog');
+requireText('MainActivity.kt', activity, 'LAN 优先');
+requireText('MainActivity.kt', activity, '公网 Relay 优先');
 rejectText(
   'MainActivity.kt',
   activity,
