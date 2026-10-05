@@ -833,7 +833,7 @@ fn executable_version(path: &Path) -> String {
 
 #[cfg(windows)]
 fn protect_secret(secret: &str, target: &Path) -> Result<(), String> {
-    let script = r#"$b=[Text.Encoding]::UTF8.GetBytes($env:CHATX_SECRET);$p=[Security.Cryptography.ProtectedData]::Protect($b,$null,[Security.Cryptography.DataProtectionScope]::CurrentUser);[IO.File]::WriteAllText($env:CHATX_SECRET_FILE,[Convert]::ToBase64String($p))"#;
+    let script = r#"$ErrorActionPreference='Stop';[Console]::OutputEncoding=[Text.UTF8Encoding]::new($false);Add-Type -AssemblyName System.Security;$b=[Text.Encoding]::UTF8.GetBytes($env:CHATX_SECRET);$p=[System.Security.Cryptography.ProtectedData]::Protect($b,$null,[System.Security.Cryptography.DataProtectionScope]::CurrentUser);[IO.File]::WriteAllText($env:CHATX_SECRET_FILE,[Convert]::ToBase64String($p))"#;
     let mut command = Command::new("powershell.exe");
     command.args(["-NoLogo", "-NoProfile", "-NonInteractive", "-Command", script])
         .env("CHATX_SECRET", secret).env("CHATX_SECRET_FILE", target);
@@ -846,7 +846,7 @@ fn protect_secret(_secret: &str, _target: &Path) -> Result<(), String> { Err("хо
 
 #[cfg(windows)]
 fn unprotect_secret(target: &Path) -> Result<String, String> {
-    let script = r#"$s=[IO.File]::ReadAllText($env:CHATX_SECRET_FILE);$p=[Convert]::FromBase64String($s);$b=[Security.Cryptography.ProtectedData]::Unprotect($p,$null,[Security.Cryptography.DataProtectionScope]::CurrentUser);[Console]::Out.Write([Text.Encoding]::UTF8.GetString($b))"#;
+    let script = r#"$ErrorActionPreference='Stop';[Console]::OutputEncoding=[Text.UTF8Encoding]::new($false);Add-Type -AssemblyName System.Security;$s=[IO.File]::ReadAllText($env:CHATX_SECRET_FILE);$p=[Convert]::FromBase64String($s);$b=[System.Security.Cryptography.ProtectedData]::Unprotect($p,$null,[System.Security.Cryptography.DataProtectionScope]::CurrentUser);[Console]::Out.Write([Text.Encoding]::UTF8.GetString($b))"#;
     let mut command = Command::new("powershell.exe");
     command.args(["-NoLogo", "-NoProfile", "-NonInteractive", "-Command", script]).env("CHATX_SECRET_FILE", target);
     let output = command_output(&mut command)?;
@@ -1593,6 +1593,16 @@ mod tests {
         assert!(!keychain_key_saved());
         assert!(unprotect_secret(path).is_err());
         clear_keychain_key().unwrap();
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_dpapi_round_trip() {
+        let path = std::env::temp_dir().join(format!("chatx-dpapi-test-{}.txt", std::process::id()));
+        let _ = fs::remove_file(&path);
+        protect_secret("chatx-dpapi-regression", &path).unwrap();
+        assert_eq!(unprotect_secret(&path).unwrap(), "chatx-dpapi-regression");
+        fs::remove_file(&path).unwrap();
     }
 
     #[test]
