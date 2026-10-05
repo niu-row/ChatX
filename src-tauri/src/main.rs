@@ -206,7 +206,7 @@ fn timestamp_ms() -> u64 {
 }
 
 fn command_text(mut command: Command) -> Option<String> {
-    let output = command.output().ok()?;
+    let output = command_output(&mut command).ok()?;
     output.status.success().then(|| String::from_utf8_lossy(&output.stdout).trim().to_string())
 }
 
