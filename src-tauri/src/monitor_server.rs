@@ -435,7 +435,7 @@ fn handle_https_request<S: Write>(
 
     match (request.method.as_str(), route) {
         ("GET", "/v1/monitor/snapshot") if authorized => {
-            let session_id = format!("h_{}", &generate_monitor_token()?[..32]);
+            let session_id = format!("s_{}", &generate_monitor_token()?[..32]);
             match snapshot_provider(device_id, &session_id, 1) {
                 Ok(snapshot) => write_http_json(
                     stream,
@@ -928,6 +928,7 @@ mod tests {
         let response = String::from_utf8(output).unwrap();
         assert!(response.starts_with("HTTP/1.1 200 OK"));
         assert!(response.contains("\"type\":\"snapshot\""));
+        assert!(response.contains("\"sessionId\":\"s_"));
         assert!(response.contains("\"ciphertext\":\"ciphertext\""));
     }
 
@@ -986,6 +987,7 @@ mod tests {
         tls.read_to_string(&mut response).unwrap();
         assert!(response.starts_with("HTTP/1.1 200 OK"));
         assert!(response.contains("\"type\":\"snapshot\""));
+        assert!(response.contains("\"sessionId\":\"s_"));
         assert!(response.contains("\"ciphertext\":\"ciphertext\""));
         drop(server);
         fs::remove_dir_all(dir).unwrap();

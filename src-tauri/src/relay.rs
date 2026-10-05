@@ -42,6 +42,10 @@ fn now_ms() -> u64 {
         .unwrap_or(0)
 }
 
+fn snapshot_session_id() -> String {
+    format!("s_{}_{}", std::process::id(), now_ms())
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct RelaySettings {
@@ -527,7 +531,7 @@ async fn snapshot_http_loop(
             return;
         }
     };
-    let session_id = format!("h_{}_{}", std::process::id(), now_ms());
+    let session_id = snapshot_session_id();
     let mut sequences = std::collections::HashMap::<String, u64>::new();
     let mut tick = tokio::time::interval(SNAPSHOT_INTERVAL);
 
@@ -785,5 +789,10 @@ mod tests {
     #[test]
     fn settings_disabled_do_not_require_url() {
         assert!(validate(&RelaySettings::default()).is_ok());
+    }
+
+    #[test]
+    fn https_snapshot_session_uses_monitor_session_namespace() {
+        assert!(snapshot_session_id().starts_with("s_"));
     }
 }
