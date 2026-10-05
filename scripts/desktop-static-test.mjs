@@ -22,6 +22,7 @@ const macRuntimeLock = JSON.parse(fs.readFileSync('runtime-lock.darwin-arm64.jso
 const runtimeLock = JSON.parse(fs.readFileSync('runtime-lock.json', 'utf8'));
 const pkg = JSON.parse(fs.readFileSync('package.json', 'utf8'));
 const getStatusSection = main.slice(main.indexOf('fn get_status'), main.indexOf('fn get_network_settings'));
+const commandTextSection = main.slice(main.indexOf('fn command_text'), main.indexOf('fn validate_proxy_url'));
 
 function requireText(label, text, needle) {
   if (!text.includes(needle)) throw new Error(`${label} is missing: ${needle}`);
@@ -39,7 +40,22 @@ requireText('main.rs', main, 'desktop-commander-home');
 requireText('main.rs', main, 'desktop-commander-launcher.mjs');
 requireText('main.rs', main, 'root.join("desktop-commander").join("dist").join("index.js")');
 requireText('main.rs', main, 'env:CHATX_TUNNEL_RUNTIME_KEY');
-requireText('main.rs', main, 'ProtectedData');
+requireText('main.rs', main, 'Add-Type -AssemblyName System.Security');
+requireText('main.rs', main, '[System.Security.Cryptography.ProtectedData]');
+requireText('main.rs', main, '[Console]::OutputEncoding=[Text.UTF8Encoding]::new($false)');
+requireText('command_text', commandTextSection, 'command_output(&mut command)');
+rejectText('command_text', commandTextSection, 'command.output()');
+requireText('main.rs', main, 'fn probe_runtime_key_remote');
+requireText('main.rs', main, 'reqwest::Proxy::all');
+requireText('main.rs', main, 'https://api.openai.com/v1/tunnels/{tunnel_id}');
+requireText('main.rs', main, 'Runtime Key remote auth');
+requireText('main.rs', main, '#[tauri::command(async)]');
+requireText('main.rs', main, 'Remote MCP activity');
+requireText('main.rs', main, 'Remote tools/list');
+requireText('main.rs', main, 'Remote tools/call');
+requireText('launcher', launcher, 'schemaVersion: 3');
+requireText('launcher', launcher, "lastRequestMethod = 'tools/call'");
+requireText('launcher', launcher, "recordRequest('tools/list')");
 requireText('main.rs', main, 'fn runtime_not_running');
 requireText('main.rs', main, 'struct RuntimeObservation');
 requireText('main.rs', main, 'control_plane_observation');

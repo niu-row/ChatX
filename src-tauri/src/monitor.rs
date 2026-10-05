@@ -59,6 +59,14 @@ pub struct ActivitySnapshot {
     pub schema_version: u32,
     pub sequence: u64,
     pub updated_at: u64,
+    #[serde(default)]
+    pub launcher_started_at: Option<u64>,
+    #[serde(default)]
+    pub last_request_at: Option<u64>,
+    #[serde(default)]
+    pub last_request_method: Option<String>,
+    #[serde(default)]
+    pub last_list_tools_at: Option<u64>,
     pub last_call_started_at: Option<u64>,
     pub last_call_finished_at: Option<u64>,
     pub last_tool_name: Option<String>,
@@ -80,6 +88,10 @@ pub struct McpMonitorStatus {
     pub state: &'static str,
     pub source_sequence: Option<u64>,
     pub source_updated_at: Option<u64>,
+    pub launcher_started_at: Option<u64>,
+    pub last_request_at: Option<u64>,
+    pub last_request_method: Option<String>,
+    pub last_list_tools_at: Option<u64>,
     pub calls_last_minute: usize,
     pub gap_duration_ms: Option<u64>,
     pub stall_duration_ms: Option<u64>,
@@ -94,7 +106,7 @@ pub struct McpMonitorStatus {
 pub fn read_activity_snapshot(path: &Path) -> Option<ActivitySnapshot> {
     let text = fs::read_to_string(path).ok()?;
     let snapshot = serde_json::from_str::<ActivitySnapshot>(&text).ok()?;
-    (snapshot.schema_version == 1 || snapshot.schema_version == 2).then_some(snapshot)
+    (snapshot.schema_version == 1 || snapshot.schema_version == 2 || snapshot.schema_version == 3).then_some(snapshot)
 }
 
 fn elapsed(now: u64, then: u64) -> u64 {
@@ -140,6 +152,10 @@ pub fn evaluate_activity(snapshot: Option<&ActivitySnapshot>, now: u64) -> McpMo
         state,
         source_sequence: Some(snapshot.sequence),
         source_updated_at: Some(snapshot.updated_at),
+        launcher_started_at: snapshot.launcher_started_at,
+        last_request_at: snapshot.last_request_at,
+        last_request_method: snapshot.last_request_method.clone(),
+        last_list_tools_at: snapshot.last_list_tools_at,
         calls_last_minute: current_calls,
         gap_duration_ms,
         stall_duration_ms,
@@ -158,6 +174,10 @@ fn empty_status() -> McpMonitorStatus {
         state: "idle",
         source_sequence: None,
         source_updated_at: None,
+        launcher_started_at: None,
+        last_request_at: None,
+        last_request_method: None,
+        last_list_tools_at: None,
         calls_last_minute: 0,
         gap_duration_ms: None,
         stall_duration_ms: None,
@@ -176,10 +196,13 @@ mod tests {
 
     fn snapshot(now: u64) -> ActivitySnapshot {
         ActivitySnapshot {
-            schema_version: 1,
-
+            schema_version: 3,
             sequence: 1,
             updated_at: now,
+            launcher_started_at: Some(now - 60_000),
+            last_request_at: Some(now - 5_000),
+            last_request_method: Some("tools/call".into()),
+            last_list_tools_at: Some(now - 30_000),
             last_call_started_at: Some(now - 5_000),
             last_call_finished_at: Some(now - 4_900),
             last_tool_name: Some("read_file".into()),

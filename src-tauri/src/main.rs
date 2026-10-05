@@ -1462,6 +1462,106 @@ fn load_runtime_key(app: &tauri::AppHandle, supplied: &str) -> Result<String, St
     Ok(value)
 }
 
+#[derive(Debug, Clone)]
+struct RuntimeKeyRemoteProbe {
+    ok: bool,
+    state: &'static str,
+    detail: String,
+}
+
+fn runtime_key_remote_status(status: u16) -> RuntimeKeyRemoteProbe {
+    match status {
+        200..=299 => RuntimeKeyRemoteProbe {
+            ok: true,
+            state: "valid",
+            detail: format!("OpenAI Control Plane accepted the Runtime Key (HTTP {status})."),
+        },
+        401 => RuntimeKeyRemoteProbe {
+            ok: false,
+            state: "invalid",
+            detail: "OpenAI rejected the Runtime Key (HTTP 401). The key may have been deleted or revoked.".into(),
+        },
+        403 => RuntimeKeyRemoteProbe {
+            ok: false,
+            state: "forbidden",
+            detail: "OpenAI authenticated the request but denied access to this Tunnel (HTTP 403).".into(),
+        },
+        404 => RuntimeKeyRemoteProbe {
+            ok: false,
+            state: "tunnel_not_found",
+            detail: "The configured Tunnel was not found or is not visible to this Runtime Key (HTTP 404).".into(),
+        },
+        429 => RuntimeKeyRemoteProbe {
+            ok: false,
+            state: "rate_limited",
+            detail: "OpenAI rate-limited the credential probe (HTTP 429); Runtime Key validity is unverified.".into(),
+        },
+        _ => RuntimeKeyRemoteProbe {
+            ok: false,
+            state: "unexpected_response",
+            detail: format!("OpenAI returned HTTP {status}; Runtime Key validity is unverified."),
+        },
+    }
+}
+
+fn runtime_key_probe_client(proxy_url: Option<&str>) -> Result<reqwest::blocking::Client, String> {
+    let mut builder = reqwest::blocking::Client::builder()
+        .connect_timeout(Duration::from_secs(4))
+        .timeout(Duration::from_secs(8))
+        .no_proxy();
+    if let Some(proxy_url) = proxy_url {
+        let proxy = reqwest::Proxy::all(proxy_url)
+            .map_err(|error| format!("Runtime Key probe proxy is invalid: {error}"))?;
+        builder = builder.proxy(proxy);
+    }
+    builder
+        .build()
+        .map_err(|error| format!("Could not create the OpenAI credential probe client: {error}"))
+}
+
+fn probe_runtime_key_remote(
+    tunnel_id: &str,
+    runtime_key: &str,
+    proxy_url: Option<&str>,
+) -> RuntimeKeyRemoteProbe {
+    if !tunnel_id.starts_with("tunnel_") {
+        return RuntimeKeyRemoteProbe {
+            ok: false,
+            state: "not_configured",
+            detail: "Tunnel ID is not configured, so the Runtime Key cannot be verified remotely.".into(),
+        };
+    }
+    if runtime_key.trim().is_empty() {
+        return RuntimeKeyRemoteProbe {
+            ok: false,
+            state: "not_available",
+            detail: "No Runtime Key is available for remote verification.".into(),
+        };
+    }
+    let client = match runtime_key_probe_client(proxy_url) {
+        Ok(client) => client,
+        Err(error) => return RuntimeKeyRemoteProbe {
+            ok: false,
+            state: "client_error",
+            detail: error,
+        },
+    };
+    let url = format!("https://api.openai.com/v1/tunnels/{tunnel_id}");
+    match client
+        .get(url)
+        .bearer_auth(runtime_key)
+        .header(reqwest::header::USER_AGENT, format!("ChatX/{APP_VERSION}"))
+        .send()
+    {
+        Ok(response) => runtime_key_remote_status(response.status().as_u16()),
+        Err(error) => RuntimeKeyRemoteProbe {
+            ok: false,
+            state: "network_error",
+            detail: format!("Could not reach OpenAI Control Plane to verify the Runtime Key: {error}"),
+        },
+    }
+}
+
 fn quote_mcp_path(path: &Path) -> String {
     let value = path.to_string_lossy().replace('\\', "/").replace('"', "\\\"");
     format!("\"{value}\"")
@@ -1603,6 +1703,23 @@ mod tests {
         protect_secret("chatx-dpapi-regression", &path).unwrap();
         assert_eq!(unprotect_secret(&path).unwrap(), "chatx-dpapi-regression");
         fs::remove_file(&path).unwrap();
+    }
+
+    #[test]
+    fn runtime_key_remote_status_distinguishes_auth_failures() {
+        assert!(runtime_key_remote_status(200).ok);
+        assert_eq!(runtime_key_remote_status(401).state, "invalid");
+        assert_eq!(runtime_key_remote_status(403).state, "forbidden");
+        assert_eq!(runtime_key_remote_status(404).state, "tunnel_not_found");
+        assert_eq!(runtime_key_remote_status(429).state, "rate_limited");
+        assert_eq!(runtime_key_remote_status(500).state, "unexpected_response");
+    }
+
+    #[test]
+    fn runtime_key_probe_client_accepts_supported_proxy_schemes() {
+        assert!(runtime_key_probe_client(None).is_ok());
+        assert!(runtime_key_probe_client(Some("http://127.0.0.1:7890")).is_ok());
+        assert!(runtime_key_probe_client(Some("socks5://127.0.0.1:7891")).is_ok());
     }
 
     #[test]
@@ -3320,7 +3437,7 @@ fn clear_saved_key(app: tauri::AppHandle, state: State<'_, AppState>) -> Result<
     get_status(app, state)
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn run_diagnostics(app: tauri::AppHandle, state: State<'_, AppState>) -> Result<Value, String> {
     let mut checks = Vec::new();
     match runtime_paths(&app) {
@@ -3352,12 +3469,86 @@ fn run_diagnostics(app: tauri::AppHandle, state: State<'_, AppState>) -> Result<
         Err(error) => checks.push(json!({"name":"Bundled runtime","ok":false,"detail":error}))
     }
     let snapshot = state.runtime_snapshot.lock().map(|value| value.clone()).unwrap_or_default();
-    let probe_age = timestamp_ms().saturating_sub(snapshot.last_probe_at);
+    let now_ms = timestamp_ms();
+    let probe_age = now_ms.saturating_sub(snapshot.last_probe_at);
     checks.push(json!({"name":"Tunnel probe freshness","ok":snapshot.last_probe_at > 0 && probe_age <= 12_000,"detail":format!("{} ms ago; health={}; failures={}", probe_age, snapshot.health, snapshot.consecutive_failures)}));
+    let remote_activity = monitor_activity_path(&app).ok()
+        .and_then(|path| monitor::read_activity_snapshot(&path));
+    match remote_activity {
+        Some(activity) => {
+            let launcher_age = activity.launcher_started_at
+                .map(|started_at| now_ms.saturating_sub(started_at));
+            let request_age = activity.last_request_at
+                .map(|request_at| now_ms.saturating_sub(request_at));
+            let list_tools_age = activity.last_list_tools_at
+                .map(|request_at| now_ms.saturating_sub(request_at));
+            let call_age = activity.last_call_started_at
+                .map(|request_at| now_ms.saturating_sub(request_at));
+            checks.push(json!({
+                "name":"Remote MCP activity",
+                "ok":activity.last_request_at.is_some(),
+                "detail":match (activity.last_request_at, request_age) {
+                    (Some(_), Some(age)) => format!("last={} {} ms ago; launcher age={} ms",
+                        activity.last_request_method.as_deref().unwrap_or("unknown"),
+                        age,
+                        launcher_age.unwrap_or(0)),
+                    _ => format!("no remote MCP request observed since launcher start; launcher age={} ms; ChatGPT Connector session may be stale -- try a new chat or reconnect the Connector", launcher_age.unwrap_or(0)),
+                }
+            }));
+            checks.push(json!({
+                "name":"Remote tools/list",
+                "ok":activity.last_list_tools_at.is_some(),
+                "detail":list_tools_age.map(|age| format!("{} ms ago", age))
+                    .unwrap_or_else(|| "not observed in the current launcher session".into())
+            }));
+            checks.push(json!({
+                "name":"Remote tools/call",
+                "ok":activity.last_call_started_at.is_some(),
+                "detail":call_age.map(|age| format!("{} ms ago; last tool={}", age, activity.last_tool_name.as_deref().unwrap_or("unknown")))
+                    .unwrap_or_else(|| "not observed in the current launcher session".into())
+            }));
+        }
+        None => {
+            checks.push(json!({"name":"Remote MCP activity","ok":false,"detail":"no launcher activity snapshot is available"}));
+            checks.push(json!({"name":"Remote tools/list","ok":false,"detail":"not observed"}));
+            checks.push(json!({"name":"Remote tools/call","ok":false,"detail":"not observed"}));
+        }
+    }
     let settings = load_settings(&app);
     let saved = runtime_key_saved(&app);
+    let session_key = state.session_runtime_key.lock().ok().and_then(|value| value.clone())
+        .filter(|value| !value.trim().is_empty());
+    let saved_key = if saved { Some(load_runtime_key(&app, "")) } else { None };
+    let (local_key_ok, local_key_detail) = match &saved_key {
+        Some(Ok(_)) => (true, format!("{} saved and readable", key_storage())),
+        Some(Err(error)) => (false, format!("{} exists but cannot be read: {error}", key_storage())),
+        None if session_key.is_some() => (true, "available in the current session; not persisted".into()),
+        None => (false, "not available; enter a Runtime Key when connecting".into()),
+    };
+    let probe_key = session_key.as_deref()
+        .or_else(|| saved_key.as_ref().and_then(|result| result.as_ref().ok()).map(String::as_str));
+    let remote_probe = match (probe_key, effective_proxy_url(&settings)) {
+        (Some(key), Ok(proxy_url)) => {
+            probe_runtime_key_remote(&settings.tunnel_id, key, proxy_url.as_deref())
+        }
+        (Some(_), Err(error)) => RuntimeKeyRemoteProbe {
+            ok: false,
+            state: "proxy_error",
+            detail: format!("Could not resolve ChatX proxy settings for remote verification: {error}"),
+        },
+        (None, _) => RuntimeKeyRemoteProbe {
+            ok: false,
+            state: "not_available",
+            detail: "No readable Runtime Key is available for remote verification.".into(),
+        },
+    };
     checks.push(json!({"name":"Tunnel ID","ok":settings.tunnel_id.starts_with("tunnel_"),"detail":settings.tunnel_id}));
-    checks.push(json!({"name":"Runtime Key","ok":saved,"detail":if saved{format!("{} saved", key_storage())}else{"not saved; enter it when connecting".into()}}));
+    checks.push(json!({"name":"Runtime Key local","ok":local_key_ok,"detail":local_key_detail}));
+    checks.push(json!({
+        "name":"Runtime Key remote auth",
+        "ok":remote_probe.ok,
+        "detail":format!("state={} {}", remote_probe.state, remote_probe.detail)
+    }));
     Ok(json!({"checks":checks}))
 }
 

@@ -47,6 +47,8 @@ if (initialActivity.inFlight !== 0 || initialActivity.inFlightCalls.length !== 0
 }
 
 const server = new Server();
+server.setRequestHandler(types.ListToolsRequestSchema, async () => ({ tools: [{ name: 'read_file' }] }));
+await globalThis.__chatxHandlers.get(types.ListToolsRequestSchema)({});
 server.setRequestHandler(types.CallToolRequestSchema, async (request) => {
   const file = path.join(process.env.HOME, '.chatx-monitor', 'activity.json');
   const active = JSON.parse(fs.readFileSync(file, 'utf8'));
@@ -87,7 +89,11 @@ try {
   const activityPath = path.join(home, '.chatx-monitor', 'activity.json');
   const text = fs.readFileSync(activityPath, 'utf8');
   const activity = JSON.parse(text);
-  assert.equal(activity.schemaVersion, 2);
+  assert.equal(activity.schemaVersion, 3);
+  assert.ok(activity.launcherStartedAt > 0);
+  assert.ok(activity.lastRequestAt >= activity.launcherStartedAt);
+  assert.equal(activity.lastRequestMethod, 'tools/call');
+  assert.ok(activity.lastListToolsAt >= activity.launcherStartedAt);
   assert.equal(activity.inFlight, 0);
   assert.deepEqual(activity.inFlightCalls, []);
   assert.equal(activity.lastToolName, 'error');

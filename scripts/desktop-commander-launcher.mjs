@@ -32,8 +32,12 @@ process.argv = [process.execPath, entry, ...serverArgs];
 const monitorDir = path.join(home, '.chatx-monitor');
 const activityPath = path.join(monitorDir, 'activity.json');
 fs.mkdirSync(monitorDir, { recursive: true });
+const launcherStartedAt = Date.now();
 let activitySequence = 0;
 let callSequence = 0;
+let lastRequestAt = null;
+let lastRequestMethod = null;
+let lastListToolsAt = null;
 let lastCallStartedAt = null;
 let lastCallFinishedAt = null;
 let lastToolName = null;
@@ -55,9 +59,13 @@ function writeActivitySnapshot() {
       ? Math.min(...inFlightCallList.map((call) => call.startedAt))
       : null;
     const payload = {
-      schemaVersion: 2,
+      schemaVersion: 3,
       sequence: ++activitySequence,
       updatedAt: now,
+      launcherStartedAt,
+      lastRequestAt,
+      lastRequestMethod,
+      lastListToolsAt,
       lastCallStartedAt,
       lastCallFinishedAt,
       lastToolName,
@@ -77,6 +85,14 @@ function writeActivitySnapshot() {
   }
 }
 
+function recordRequest(method) {
+  const now = Date.now();
+  lastRequestAt = now;
+  lastRequestMethod = method;
+  if (method === 'tools/list') lastListToolsAt = now;
+  writeActivitySnapshot();
+}
+
 // Clear any stale in-flight snapshot left by a previous crashed launcher.
 writeActivitySnapshot();
 
@@ -90,6 +106,7 @@ Server.prototype.setRequestHandler = function (schema, handler) {
   if (schema === types.ListToolsRequestSchema) {
     const upstream = handler;
     handler = async (...args) => {
+      recordRequest('tools/list');
       const result = await upstream(...args);
       return { ...result, tools: result.tools.map((tool) => {
         const meta = { ...tool._meta };
@@ -107,6 +124,8 @@ Server.prototype.setRequestHandler = function (schema, handler) {
       const startedAt = Date.now();
       const callId = `${process.pid}:${++callSequence}:${startedAt}`;
       const toolName = request?.params?.name || 'unknown';
+      lastRequestAt = startedAt;
+      lastRequestMethod = 'tools/call';
       lastCallStartedAt = startedAt;
       lastToolName = toolName;
       recentCallStarts.push(startedAt);
@@ -130,11 +149,11 @@ Server.prototype.setRequestHandler = function (schema, handler) {
       }
     };
   } else if (schema === types.ListResourcesRequestSchema) {
-    handler = async () => ({ resources: [] });
+    handler = async () => { recordRequest('resources/list'); return { resources: [] }; };
   } else if (schema === types.ListResourceTemplatesRequestSchema) {
-    handler = async () => ({ resourceTemplates: [] });
+    handler = async () => { recordRequest('resources/templates/list'); return { resourceTemplates: [] }; };
   } else if (schema === types.ReadResourceRequestSchema) {
-    handler = async () => { throw new types.McpError(-32002, 'ChatX does not expose UI resources.'); };
+    handler = async () => { recordRequest('resources/read'); throw new types.McpError(-32002, 'ChatX does not expose UI resources.'); };
   }
   return originalSetRequestHandler.call(this, schema, handler);
 };
