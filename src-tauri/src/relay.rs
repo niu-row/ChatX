@@ -7,10 +7,8 @@ use chatx_relay_protocol::{
 use futures_util::{SinkExt, StreamExt};
 use serde::{Deserialize, Serialize};
 use std::{
-    collections::HashMap,
     fs,
     path::Path,
-    process::Command,
     sync::{
         atomic::{AtomicBool, Ordering},
         Arc, Mutex,
@@ -18,6 +16,9 @@ use std::{
     thread::{self, JoinHandle},
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
+#[cfg(target_os = "macos")]
+use std::process::Command;
+
 use tokio_tungstenite::{
     connect_async,
     tungstenite::{
@@ -387,14 +388,21 @@ async fn relay_loop(
     revoke_handler: RevokeHandler,
     stop: Arc<AtomicBool>,
 ) {
+    let uploader = tokio::spawn(snapshot_http_loop(
+        settings.clone(),
+        credentials.clone(),
+        master_key,
+        status.clone(),
+        snapshot_provider,
+        stop.clone(),
+    ));
+
     let mut attempt = 0u32;
     while !stop.load(Ordering::SeqCst) && settings.enabled {
         let result = relay_session(
             &settings,
             &credentials,
-            &master_key,
             status.clone(),
-            snapshot_provider.clone(),
             pairing_handler.clone(),
             revoke_handler.clone(),
             stop.clone(),
@@ -424,6 +432,8 @@ async fn relay_loop(
             }
         }
     }
+    uploader.abort();
+    let _ = uploader.await;
     if let Ok(mut value) = status.lock() {
         value.connected = false;
         value.connecting = false;
@@ -491,12 +501,94 @@ async fn wait_for_network_recovery(
     }
 }
 
+async fn snapshot_http_loop(
+    settings: RelaySettings,
+    credentials: RelayCredentials,
+    master_key: [u8; 32],
+    status: Arc<Mutex<RelayStatus>>,
+    snapshot_provider: SnapshotProvider,
+    stop: Arc<AtomicBool>,
+) {
+    let base = match normalized_base_url(&settings.base_url) {
+        Ok(value) => value,
+        Err(error) => {
+            set_error(&status, error);
+            return;
+        }
+    };
+    let client = match reqwest::Client::builder()
+        .connect_timeout(Duration::from_secs(5))
+        .timeout(Duration::from_secs(10))
+        .build()
+    {
+        Ok(value) => value,
+        Err(error) => {
+            set_error(&status, format!("创建 Relay HTTPS 客户端失败：{error}"));
+            return;
+        }
+    };
+    let session_id = format!("h_{}_{}", std::process::id(), now_ms());
+    let mut sequences = std::collections::HashMap::<String, u64>::new();
+    let mut tick = tokio::time::interval(SNAPSHOT_INTERVAL);
+
+    loop {
+        tick.tick().await;
+        if stop.load(Ordering::SeqCst) || !settings.enabled {
+            return;
+        }
+        for source in snapshot_provider() {
+            let sequence = sequences.entry(source.device_id.clone()).or_insert(0);
+            *sequence = sequence.saturating_add(1);
+            let generated_at = now_ms();
+            let encrypted = match monitor_crypto::encrypt_snapshot(
+                &master_key,
+                &credentials.desktop_id,
+                &source.device_id,
+                &session_id,
+                *sequence,
+                generated_at,
+                &source.plaintext,
+            ) {
+                Ok(value) => value,
+                Err(error) => {
+                    set_error(&status, format!("Relay HTTPS Snapshot 加密失败：{error}"));
+                    continue;
+                }
+            };
+            let url = format!(
+                "{base}/v1/desktops/{}/devices/{}/snapshot",
+                credentials.desktop_id,
+                source.device_id,
+            );
+            match client
+                .post(url)
+                .bearer_auth(&credentials.desktop_token)
+                .json(&encrypted)
+                .send()
+                .await
+            {
+                Ok(response) if response.status().is_success() => {
+                    if let Ok(mut value) = status.lock() {
+                        value.last_heartbeat_at = Some(now_ms());
+                    }
+                }
+                Ok(response) => set_error(
+                    &status,
+                    format!("Relay HTTPS Snapshot 上传失败：HTTP {}", response.status()),
+                ),
+                Err(error) => set_error(
+                    &status,
+                    format!("Relay HTTPS Snapshot 上传失败：{error}"),
+                ),
+            }
+        }
+    }
+}
+
 async fn relay_session(
     settings: &RelaySettings,
     credentials: &RelayCredentials,
-    master_key: &[u8; 32],
     status: Arc<Mutex<RelayStatus>>,
-    snapshot_provider: SnapshotProvider,
     pairing_handler: PairingHandler,
     revoke_handler: RevokeHandler,
     stop: Arc<AtomicBool>,
@@ -531,9 +623,6 @@ async fn relay_session(
     };
     send_desktop_message(&mut socket, &hello).await?;
 
-    let mut session_id: Option<String> = None;
-    let mut sequences: HashMap<String, u64> = HashMap::new();
-    let mut snapshot_tick = tokio::time::interval(SNAPSHOT_INTERVAL);
     let heartbeat_start = tokio::time::Instant::now() + CLIENT_HEARTBEAT_INTERVAL;
     let mut heartbeat_tick = tokio::time::interval_at(
         heartbeat_start,
@@ -556,30 +645,6 @@ async fn relay_session(
                     &DesktopWsMessage::Ping { sent_at: now_ms() },
                 ).await?;
             }
-            _ = snapshot_tick.tick(), if session_id.is_some() => {
-                let relay_session = session_id.as_deref().unwrap_or("");
-                for source in snapshot_provider() {
-                    let sequence = sequences.entry(source.device_id.clone()).or_insert(0);
-                    *sequence = sequence.saturating_add(1);
-                    let generated_at = now_ms();
-                    let encrypted = monitor_crypto::encrypt_snapshot(
-                        master_key,
-                        &credentials.desktop_id,
-                        &source.device_id,
-                        relay_session,
-                        *sequence,
-                        generated_at,
-                        &source.plaintext,
-                    )?;
-                    send_desktop_message(
-                        &mut socket,
-                        &DesktopWsMessage::Snapshot {
-                            device_id: source.device_id,
-                            snapshot: encrypted,
-                        },
-                    ).await?;
-                }
-            }
             incoming = socket.next() => {
                 let Some(message) = incoming else {
                     return Err("Relay WSS 已关闭。".into());
@@ -593,8 +658,6 @@ async fn relay_session(
                     Message::Text(text) => {
                         match serde_json::from_str::<DesktopServerMessage>(&text) {
                             Ok(DesktopServerMessage::HelloAck { session_id: accepted, .. }) => {
-                                session_id = Some(accepted.clone());
-                                sequences.clear();
                                 if let Ok(mut value) = status.lock() {
                                     value.connected = true;
                                     value.connecting = false;

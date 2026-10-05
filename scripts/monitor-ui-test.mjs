@@ -116,7 +116,7 @@ assert.deepEqual(
 assert.equal(element('monitorStatus').textContent, '已运行');
 assert.match(element('monitorBind').textContent, /0\.0\.0\.0:19432/);
 assert.equal(element('monitorFingerprint').textContent, 'ab'.repeat(32));
-assert.match(element('monitorProtocol').textContent, /WSS.*AES-256-GCM/);
+assert.match(element('monitorProtocol').textContent, /HTTPS.*AES-256-GCM/);
 
 await vm.runInContext('createMonitorPairing()', context);
 assert.equal(element('monitorPairing').hidden, false);
@@ -155,4 +155,4 @@ element('monitorPort').value = '80';
 await vm.runInContext('saveMonitorSettings()', context);
 assert.match(element('error').textContent, /1024-65535/);
 
-console.log('monitor UI checks passed: WSS, E2EE pairing and device delete');
+console.log('monitor UI checks passed: HTTPS monitoring, E2EE pairing and device delete');

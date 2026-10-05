@@ -14,7 +14,9 @@ data class ManualRouteSelector(
 ) {
     fun matches(endpoint: MonitorEndpoint): Boolean =
         endpoint.kind == kind &&
-            (family.isBlank() || endpoint.family == family) &&
+            (family.isBlank() ||
+                endpoint.family == family ||
+                (family == "wss" && endpoint.family == "https")) &&
             (interfaceName.isBlank() || endpoint.interfaceName == interfaceName)
 
     companion object {

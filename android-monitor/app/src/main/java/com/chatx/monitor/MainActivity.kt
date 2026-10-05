@@ -706,7 +706,7 @@ class MainActivity : Activity() {
     private fun renderConnection() {
         pageHeading(
             "连接",
-            "Monitor Protocol over WSS · Direct / Relay 动态多路径",
+            "Monitor over HTTPS · Direct / Relay 动态多路径",
         )
         val config = store.loadPairing() ?: return
         val currentEndpoint = currentEndpointUrl()
@@ -732,7 +732,7 @@ class MainActivity : Activity() {
             ui.margin(top = 8),
         )
         summary.addView(
-            keyValue("协议", "WSS · E2EE"),
+            keyValue("协议", "HTTPS · E2EE"),
             ui.margin(top = 8),
         )
         summary.addView(
@@ -800,9 +800,7 @@ class MainActivity : Activity() {
             }
             val health = endpointHealth
                 ?.firstOrNull { it.endpoint.url == endpoint.url }
-            val isCurrent = endpoint.url == currentBase ||
-                (endpoint.kind == "relay" &&
-                    currentBase?.contains("/v1/ws/device") == true)
+            val isCurrent = endpoint.url == currentBase
             val isManualPreferred =
                 policy == RoutePolicy.MANUAL &&
                     manualSelector?.matches(endpoint) == true
@@ -893,13 +891,13 @@ class MainActivity : Activity() {
     }
 
     private fun renderSettings() {
-        pageHeading("设置", "实时 WSS、系统权限与端到端安全")
+        pageHeading("设置", "HTTPS 监控、系统权限与端到端安全")
 
         val realtime = ui.card()
-        realtime.addView(ui.title("实时连接", 16f))
+        realtime.addView(ui.title("稳定监控", 16f))
         realtime.addView(
             ui.muted(
-                "Monitor 数据通过常驻 WSS 推送，不使用定时 HTTP polling。",
+                "Monitor 使用短连接 HTTPS 轮询，不依赖常驻 WebSocket。",
             ),
             ui.margin(top = 4),
         )
@@ -911,15 +909,15 @@ class MainActivity : Activity() {
             ui.margin(top = 12),
         )
         realtime.addView(
-            keyValue("Heartbeat", "15 秒"),
+            keyValue("刷新间隔", "10 秒"),
             ui.margin(top = 8),
         )
         realtime.addView(
-            keyValue("断线判定", "45 秒"),
+            keyValue("快照过期", "90 秒"),
             ui.margin(top = 8),
         )
         realtime.addView(
-            keyValue("重连退避", "1 / 2 / 5 / 10 / 30 秒"),
+            keyValue("离线确认", "连续 3 次请求失败"),
             ui.margin(top = 8),
         )
         pageContent.addView(realtime, ui.margin(bottom = 14))
@@ -966,7 +964,7 @@ class MainActivity : Activity() {
         security.addView(ui.title("安全", 16f))
         security.addView(
             ui.muted(
-                "Direct WSS 使用 Desktop 自签证书 SHA-256 fingerprint pinning。",
+                "Direct HTTPS 使用 Desktop 自签证书 SHA-256 fingerprint pinning。",
                 13f,
             ),
             ui.margin(top = 8),
@@ -1355,22 +1353,20 @@ class MainActivity : Activity() {
 
     private fun configuredRoutes(config: PairingConfig): List<MonitorEndpoint> =
         buildList {
-            addAll(config.directEndpoints)
+            config.directEndpoints.forEach { endpoint ->
+                add(endpoint.copy(url = directMonitorHttpsUrl(endpoint.url)))
+            }
             config.relay?.let { relay ->
-                val scheme = if (relay.baseUrl.startsWith("https://")) {
-                    "wss://" + relay.baseUrl.removePrefix("https://")
-                } else {
-                    "ws://" + relay.baseUrl.removePrefix("http://")
-                }
                 add(
                     MonitorEndpoint(
                         kind = "relay",
-                        family = "wss",
+                        family = "https",
                         interfaceName = "chatx-relay",
                         host = runCatching {
                             java.net.URI(relay.baseUrl).host
                         }.getOrNull().orEmpty(),
-                        url = "${scheme.trimEnd('/')}/v1/ws/device",
+                        url = relay.baseUrl.trimEnd('/') +
+                            "/v1/desktops/${config.desktopId}/devices/${config.deviceId}/snapshot",
                     ),
                 )
             }
@@ -1479,11 +1475,12 @@ class MainActivity : Activity() {
         val baseUrl = url.substringBefore('?')
         val kind = config
             ?.directEndpoints
-            ?.firstOrNull { it.url == baseUrl }
+            ?.firstOrNull { directMonitorHttpsUrl(it.url) == baseUrl }
             ?.kind
             ?: if (
                 config?.relay != null &&
-                baseUrl.contains("/v1/ws/device")
+                baseUrl.startsWith(config.relay.baseUrl.trimEnd('/') + "/v1/desktops/") &&
+                baseUrl.endsWith("/snapshot")
             ) {
                 "relay"
             } else {
@@ -1494,6 +1491,17 @@ class MainActivity : Activity() {
         } else {
             host
         }
+    }
+
+    private fun directMonitorHttpsUrl(source: String): String {
+        val base = when {
+            source.startsWith("wss://") -> "https://" + source.removePrefix("wss://")
+            source.startsWith("ws://") -> "http://" + source.removePrefix("ws://")
+            else -> source
+        }
+        return base.substringBefore('?')
+            .replace("/v1/ws/monitor", "/v1/monitor/snapshot")
+            .replace("/v1/ws/pair", "/v1/monitor/snapshot")
     }
 
     private fun endpointKindLabel(kind: String): String = when (kind) {

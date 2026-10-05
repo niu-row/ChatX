@@ -9,8 +9,8 @@ ChatX Monitor 是 ChatX Desktop 的只读手机监控客户端。
 - 对 ChatX 自签名 TLS 证书执行 SHA-256 certificate pinning。
 - 动态维护 LAN、Tailscale、Public IPv6 与 ChatX Relay endpoint；Relay 在线时会同步 Desktop 最新地址。
 - 支持 LAN 优先、Relay 优先、自动稳定路径、手动首选四种连接策略，并在切换前先验证新路径。
-- 连接页并行执行轻量 WSS 握手测试，不再逐条等待完整 Snapshot。
-- 前台服务使用常驻 WSS 监控 ChatX，并在 endpoint 或策略变化时在线重评估路径。
+- 连接页并行执行轻量 HTTPS Snapshot 请求，直接验证当前监控路径。
+- 前台服务每 10 秒通过短连接 HTTPS 获取加密 Snapshot，并在 endpoint 或策略变化时重评估路径；稳态监控不依赖常驻 WSS。
 - 区分 Host Offline、Tunnel Down、MCP GAP、MCP STALLED。
 - 支持 1 / 2 / 3 / 5 分钟中断告警与恢复通知。
 

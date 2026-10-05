@@ -24,22 +24,19 @@ class MonitorRepository(context: Context) {
         val config = store.loadPairing() ?: return emptyList()
         val routes = mutableListOf<Pair<MonitorEndpoint, PairingConfig>>()
         config.directEndpoints.forEach { endpoint ->
-            routes += endpoint to config.copy(
+            val displayEndpoint = endpoint.copy(url = directSnapshotUrl(endpoint.url))
+            routes += displayEndpoint to config.copy(
                 directEndpoints = listOf(endpoint),
                 relay = null,
             )
         }
         config.relay?.let { relay ->
-            val wsScheme = if (relay.baseUrl.startsWith("https://")) {
-                "wss://" + relay.baseUrl.removePrefix("https://")
-            } else {
-                "ws://" + relay.baseUrl.removePrefix("http://")
-            }
-            val url = "${wsScheme.trimEnd('/')}/v1/ws/device"
+            val url = relay.baseUrl.trimEnd('/') +
+                "/v1/desktops/${config.desktopId}/devices/${config.deviceId}/snapshot"
             val host = runCatching { URI(relay.baseUrl).host }.getOrNull().orEmpty()
             routes += MonitorEndpoint(
                 kind = "relay",
-                family = "wss",
+                family = "https",
                 interfaceName = "chatx-relay",
                 host = host,
                 url = url,
@@ -82,4 +79,15 @@ class MonitorRepository(context: Context) {
             pool.shutdownNow()
         }
     }
+}
+
+private fun directSnapshotUrl(source: String): String {
+    val base = when {
+        source.startsWith("wss://") -> "https://" + source.removePrefix("wss://")
+        source.startsWith("ws://") -> "http://" + source.removePrefix("ws://")
+        else -> source
+    }
+    return base.substringBefore('?')
+        .replace("/v1/ws/monitor", "/v1/monitor/snapshot")
+        .replace("/v1/ws/pair", "/v1/monitor/snapshot")
 }

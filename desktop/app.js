@@ -22,7 +22,7 @@ const pages = {
   diagnostics: ['诊断', '检查 Tunnel、Node、Desktop Commander 和本地 runtime。'],
   permissions: ['权限中心', '集中处理 ChatX / Desktop Commander 所需的本机访问权限。'],
   calls: ['调用记录', '查看 ChatGPT 通过 MCP 调用 Desktop Commander 的最近记录。'],
-  monitor: ['手机连接', 'Direct / Relay 统一 WSS，端到端加密查看 Tunnel 与 MCP 状态。'],
+  monitor: ['手机连接', 'Direct / Relay 使用 HTTPS 稳定监控，端到端加密查看 Tunnel 与 MCP 状态。'],
   settings: ['设置', '配置 ChatX 的连接恢复与本机运行方式。'],
   logs: ['运行日志', '查看 ChatX 与 Tunnel 生命周期日志。'],
 };
@@ -879,7 +879,7 @@ function renderMonitorInfo(payload) {
   $('createMonitorPairing').disabled = monitorBusy || !running;
   $('monitorBind').textContent = payload?.bindAddress || '—';
   $('monitorFingerprint').textContent = payload?.fingerprintSha256 || '—';
-  $('monitorProtocol').textContent = `${payload?.protocol === 'chatx-monitor-wss-v1' ? 'WSS' : '—'} · ${payload?.encryption || 'E2EE'}`;
+  $('monitorProtocol').textContent = `${payload?.protocol === 'chatx-monitor-wss-v1' ? 'HTTPS' : '—'} · ${payload?.encryption || 'E2EE'}`;
   renderMonitorDevices(payload?.devices || []);
   const status = $('monitorStatus');
   status.textContent = running ? '已运行' : enabled ? '未运行' : '已关闭';

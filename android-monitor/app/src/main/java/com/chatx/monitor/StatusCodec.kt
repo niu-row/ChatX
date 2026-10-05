@@ -128,6 +128,6 @@ object StatusCodec {
         "ipv6" -> "IPv6"
         "tailscale" -> "Tailscale"
         "relay" -> "ChatX Relay"
-        else -> "WSS"
+        else -> "HTTPS"
     }
 }

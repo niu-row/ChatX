@@ -12,12 +12,12 @@ use socket2::{Domain, Protocol, Socket, Type};
 use std::{
     collections::HashMap,
     fs::{self, OpenOptions},
-    io::{Read, Write},
+    io::{Cursor, Read, Write},
     net::{SocketAddr, TcpListener, TcpStream},
     path::Path,
     sync::{
         atomic::{AtomicBool, AtomicUsize, Ordering},
-        Arc, Mutex,
+        Arc,
     },
     thread::{self, JoinHandle},
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
@@ -32,6 +32,7 @@ use tungstenite::{
 
 const MAX_ACTIVE_CONNECTIONS: usize = 32;
 const MAX_WS_TEXT_BYTES: usize = 128 * 1024;
+const MAX_HTTP_HEADER_BYTES: usize = 16 * 1024;
 const IO_POLL_TIMEOUT: Duration = Duration::from_millis(500);
 const HELLO_TIMEOUT: Duration = Duration::from_secs(5);
 const SNAPSHOT_INTERVAL: Duration = Duration::from_secs(10);
@@ -287,6 +288,201 @@ struct HandshakeContext {
     bearer_token: Option<String>,
 }
 
+#[derive(Debug, Clone, Default)]
+struct HttpRequestHead {
+    method: String,
+    path: String,
+    bearer_token: Option<String>,
+    websocket_upgrade: bool,
+}
+
+struct PrefixedStream<S> {
+    prefix: Cursor<Vec<u8>>,
+    inner: S,
+}
+
+impl<S> PrefixedStream<S> {
+    fn new(prefix: Vec<u8>, inner: S) -> Self {
+        Self {
+            prefix: Cursor::new(prefix),
+            inner,
+        }
+    }
+}
+
+impl<S: Read> Read for PrefixedStream<S> {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        if self.prefix.position() < self.prefix.get_ref().len() as u64 {
+            let read = self.prefix.read(buf)?;
+            if read > 0 {
+                return Ok(read);
+            }
+        }
+        self.inner.read(buf)
+    }
+}
+
+impl<S: Write> Write for PrefixedStream<S> {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.inner.write(buf)
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.inner.flush()
+    }
+}
+
+fn read_http_request_head<S: Read>(stream: &mut S) -> Result<(Vec<u8>, HttpRequestHead), String> {
+    let started = Instant::now();
+    let mut bytes = Vec::with_capacity(2048);
+    let mut chunk = [0u8; 1024];
+    loop {
+        if bytes.windows(4).any(|window| window == b"\r\n\r\n") {
+            break;
+        }
+        if bytes.len() >= MAX_HTTP_HEADER_BYTES {
+            return Err("Monitor HTTP 请求头过大。".into());
+        }
+        if started.elapsed() > HELLO_TIMEOUT {
+            return Err("Monitor HTTP 请求头超时。".into());
+        }
+        match stream.read(&mut chunk) {
+            Ok(0) => return Err("Monitor HTTP 连接已关闭。".into()),
+            Ok(read) => bytes.extend_from_slice(&chunk[..read]),
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                ) => {}
+            Err(error) => return Err(format!("读取 Monitor HTTP 请求失败：{error}")),
+        }
+    }
+
+    let header_end = bytes.windows(4)
+        .position(|window| window == b"\r\n\r\n")
+        .map(|index| index + 4)
+        .ok_or_else(|| "Monitor HTTP 请求头无效。".to_string())?;
+    let text = String::from_utf8_lossy(&bytes[..header_end]);
+    let mut lines = text.split("\r\n");
+    let request_line = lines.next().unwrap_or_default();
+    let mut request_parts = request_line.split_whitespace();
+    let method = request_parts.next().unwrap_or_default().to_ascii_uppercase();
+    let path = request_parts.next().unwrap_or_default().to_string();
+    if method.is_empty() || path.is_empty() {
+        return Err("Monitor HTTP 请求行无效。".into());
+    }
+
+    let mut head = HttpRequestHead {
+        method,
+        path,
+        ..HttpRequestHead::default()
+    };
+    for line in lines {
+        let Some((name, value)) = line.split_once(':') else { continue; };
+        let name = name.trim();
+        let value = value.trim();
+        if name.eq_ignore_ascii_case("authorization") {
+            head.bearer_token = value
+                .strip_prefix("Bearer ")
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(str::to_string);
+        } else if name.eq_ignore_ascii_case("upgrade")
+            && value.eq_ignore_ascii_case("websocket")
+        {
+            head.websocket_upgrade = true;
+        }
+    }
+    Ok((bytes, head))
+}
+
+fn write_http_json<S: Write, T: Serialize>(
+    stream: &mut S,
+    status: &str,
+    value: &T,
+) -> Result<(), String> {
+    let body = serde_json::to_vec(value)
+        .map_err(|e| format!("序列化 Monitor HTTPS 响应失败：{e}"))?;
+    write!(
+        stream,
+        "HTTP/1.1 {status}\r\nContent-Type: application/json; charset=utf-8\r\nContent-Length: {}\r\nCache-Control: no-store\r\nConnection: close\r\n\r\n",
+        body.len(),
+    )
+    .map_err(|e| format!("写入 Monitor HTTPS 响应头失败：{e}"))?;
+    stream
+        .write_all(&body)
+        .and_then(|_| stream.flush())
+        .map_err(|e| format!("写入 Monitor HTTPS 响应失败：{e}"))
+}
+
+fn handle_https_request<S: Write>(
+    stream: &mut S,
+    desktop_id: &str,
+    request: &HttpRequestHead,
+    auth_checker: &AuthChecker,
+    revoke_handler: &RevokeHandler,
+    snapshot_provider: &SnapshotProvider,
+) -> Result<(), String> {
+    let route = request.path.split('?').next().unwrap_or("");
+    let query = parse_query(&request.path);
+    let requested_desktop = query.get("desktopId").map(String::as_str).unwrap_or("");
+    let device_id = query.get("deviceId").map(String::as_str).unwrap_or("");
+    let token = request.bearer_token.as_deref().unwrap_or("");
+    let authorized = requested_desktop == desktop_id
+        && !device_id.is_empty()
+        && !token.is_empty()
+        && auth_checker(device_id, token);
+
+    match (request.method.as_str(), route) {
+        ("GET", "/v1/monitor/snapshot") if authorized => {
+            let session_id = format!("h_{}", &generate_monitor_token()?[..32]);
+            match snapshot_provider(device_id, &session_id, 1) {
+                Ok(snapshot) => write_http_json(
+                    stream,
+                    "200 OK",
+                    &DeviceServerMessage::Snapshot {
+                        received_at: now_ms(),
+                        snapshot,
+                    },
+                ),
+                Err(_) => write_http_json(
+                    stream,
+                    "500 Internal Server Error",
+                    &serde_json::json!({ "error": "snapshot unavailable" }),
+                ),
+            }
+        }
+        ("POST", "/v1/monitor/revoke") if authorized => {
+            match revoke_handler(device_id) {
+                Ok(()) => write_http_json(
+                    stream,
+                    "200 OK",
+                    &DeviceServerMessage::Revoked {
+                        device_id: device_id.to_string(),
+                    },
+                ),
+                Err(_) => write_http_json(
+                    stream,
+                    "409 Conflict",
+                    &serde_json::json!({ "error": "device revoke failed" }),
+                ),
+            }
+        }
+        ("GET", "/v1/monitor/snapshot") | ("POST", "/v1/monitor/revoke") => {
+            write_http_json(
+                stream,
+                "401 Unauthorized",
+                &serde_json::json!({ "error": "unauthorized" }),
+            )
+        }
+        _ => write_http_json(
+            stream,
+            "404 Not Found",
+            &serde_json::json!({ "error": "unknown monitor https route" }),
+        ),
+    }
+}
+
 fn handle_connection(
     stream: TcpStream,
     config: Arc<ServerConfig>,
@@ -304,28 +500,33 @@ fn handle_connection(
 
     let connection = ServerConnection::new(config)
         .map_err(|e| format!("创建 Monitor TLS 会话失败：{e}"))?;
-    let tls = StreamOwned::new(connection, stream);
-    let context = Arc::new(Mutex::new(HandshakeContext::default()));
-    let callback_context = context.clone();
+    let mut tls = StreamOwned::new(connection, stream);
+    let (request_bytes, head) = read_http_request_head(&mut tls)?;
 
-    let mut websocket = accept_hdr(tls, move |request: &Request, response: Response| {
-        if let Ok(mut value) = callback_context.lock() {
-            value.path = request.uri().to_string();
-            value.bearer_token = request
-                .headers()
-                .get("authorization")
-                .and_then(|header| header.to_str().ok())
-                .and_then(|value| value.strip_prefix("Bearer "))
-                .map(str::trim)
-                .filter(|value| !value.is_empty())
-                .map(str::to_string);
-        }
-        Ok(response)
-    }).map_err(|e| format!("Monitor WebSocket 握手失败：{e}"))?;
+    if !head.websocket_upgrade {
+        let result = handle_https_request(
+            &mut tls,
+            desktop_id,
+            &head,
+            &auth_checker,
+            &revoke_handler,
+            &snapshot_provider,
+        );
+        tls.conn.send_close_notify();
+        let _ = tls.flush();
+        return result;
+    }
 
-    let request = context.lock()
-        .map(|value| value.clone())
-        .unwrap_or_default();
+    let request = HandshakeContext {
+        path: head.path.clone(),
+        bearer_token: head.bearer_token.clone(),
+    };
+    let prefixed = PrefixedStream::new(request_bytes, tls);
+    let mut websocket = accept_hdr(
+        prefixed,
+        |_request: &Request, response: Response| Ok(response),
+    )
+    .map_err(|e| format!("Monitor WebSocket 握手失败：{e}"))?;
     let route = request.path.split('?').next().unwrap_or("");
 
     match route {
@@ -686,6 +887,138 @@ mod tests {
         );
         assert_eq!(query.get("desktopId").map(String::as_str), Some("d_abc123"));
         assert_eq!(query.get("deviceId").map(String::as_str), Some("dev_001"));
+    }
+
+    #[test]
+    fn direct_https_snapshot_requires_auth_and_returns_encrypted_snapshot() {
+        let desktop_id = "d_0123456789abcdef0123456789abcdef";
+        let device_id = "dev_0123456789abcdef";
+        let token = "aa".repeat(32);
+        let auth_token = token.clone();
+        let auth: AuthChecker = Arc::new(move |candidate_device, candidate_token| {
+            candidate_device == device_id && candidate_token == auth_token
+        });
+        let revoke: RevokeHandler = Arc::new(|_| Ok(()));
+        let snapshots: SnapshotProvider = Arc::new(|_, session_id, sequence| {
+            Ok(EncryptedSnapshot {
+                session_id: session_id.to_string(),
+                sequence,
+                generated_at: 123,
+                nonce: "nonce".into(),
+                ciphertext: "ciphertext".into(),
+            })
+        });
+        let request = HttpRequestHead {
+            method: "GET".into(),
+            path: format!(
+                "/v1/monitor/snapshot?desktopId={desktop_id}&deviceId={device_id}"
+            ),
+            bearer_token: Some(token),
+            websocket_upgrade: false,
+        };
+        let mut output = Vec::new();
+        handle_https_request(
+            &mut output,
+            desktop_id,
+            &request,
+            &auth,
+            &revoke,
+            &snapshots,
+        ).unwrap();
+        let response = String::from_utf8(output).unwrap();
+        assert!(response.starts_with("HTTP/1.1 200 OK"));
+        assert!(response.contains("\"type\":\"snapshot\""));
+        assert!(response.contains("\"ciphertext\":\"ciphertext\""));
+    }
+
+    #[test]
+    fn direct_https_round_trip_over_tls() {
+        let dir = temp_dir("monitor-https");
+        let identity = ensure_tls_identity(&dir).unwrap();
+        let desktop_id = "d_0123456789abcdef0123456789abcdef".to_string();
+        let device_id = "dev_0123456789abcdef".to_string();
+        let token = generate_monitor_token().unwrap();
+        let auth_token = token.clone();
+        let auth_device = device_id.clone();
+        let auth: AuthChecker = Arc::new(move |candidate_device, candidate_token| {
+            candidate_device == auth_device && candidate_token == auth_token
+        });
+        let pairing: PairHandler = Arc::new(|_| Err("pairing disabled in test".into()));
+        let revoke: RevokeHandler = Arc::new(|_| Ok(()));
+        let snapshots: SnapshotProvider = Arc::new(|_, session_id, sequence| {
+            Ok(EncryptedSnapshot {
+                session_id: session_id.to_string(),
+                sequence,
+                generated_at: 123,
+                nonce: "nonce".into(),
+                ciphertext: "ciphertext".into(),
+            })
+        });
+        let server = start_monitor_server(
+            "127.0.0.1:0".parse().unwrap(),
+            identity.clone(),
+            desktop_id.clone(),
+            auth,
+            pairing,
+            revoke,
+            snapshots,
+        ).unwrap();
+
+        let mut roots = RootCertStore::empty();
+        roots.add(CertificateDer::from(identity.certificate_der.clone())).unwrap();
+        let provider = rustls::crypto::ring::default_provider();
+        let config = ClientConfig::builder_with_provider(Arc::new(provider))
+            .with_safe_default_protocol_versions().unwrap()
+            .with_root_certificates(roots)
+            .with_no_client_auth();
+        let connection = ClientConnection::new(
+            Arc::new(config),
+            ServerName::try_from("localhost").unwrap().to_owned(),
+        ).unwrap();
+        let stream = TcpStream::connect(server.addr).unwrap();
+        let mut tls = StreamOwned::new(connection, stream);
+        write!(
+            tls,
+            "GET /v1/monitor/snapshot?desktopId={desktop_id}&deviceId={device_id} HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer {token}\r\nConnection: close\r\n\r\n"
+        ).unwrap();
+        tls.flush().unwrap();
+        let mut response = String::new();
+        tls.read_to_string(&mut response).unwrap();
+        assert!(response.starts_with("HTTP/1.1 200 OK"));
+        assert!(response.contains("\"type\":\"snapshot\""));
+        assert!(response.contains("\"ciphertext\":\"ciphertext\""));
+        drop(server);
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn direct_https_snapshot_rejects_missing_auth() {
+        let desktop_id = "d_0123456789abcdef0123456789abcdef";
+        let auth: AuthChecker = Arc::new(|_, _| false);
+        let revoke: RevokeHandler = Arc::new(|_| Ok(()));
+        let snapshots: SnapshotProvider = Arc::new(|_, _, _| {
+            Err("snapshot provider must not run".into())
+        });
+        let request = HttpRequestHead {
+            method: "GET".into(),
+            path: format!(
+                "/v1/monitor/snapshot?desktopId={desktop_id}&deviceId=dev_0123456789abcdef"
+            ),
+            bearer_token: None,
+            websocket_upgrade: false,
+        };
+        let mut output = Vec::new();
+        handle_https_request(
+            &mut output,
+            desktop_id,
+            &request,
+            &auth,
+            &revoke,
+            &snapshots,
+        ).unwrap();
+        let response = String::from_utf8(output).unwrap();
+        assert!(response.starts_with("HTTP/1.1 401 Unauthorized"));
+        assert!(response.contains("\"error\":\"unauthorized\""));
     }
 
     #[test]

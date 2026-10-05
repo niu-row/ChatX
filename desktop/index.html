@@ -145,8 +145,8 @@
           </div>
           <div class="setting-row">
             <div class="setting-copy">
-              <strong>Direct WSS Monitor</strong>
-              <p>手机在 LAN、IPv6 或 Tailscale 下直接通过 WSS 连接本机；公网时自动切换到 ChatX Relay。</p>
+              <strong>Direct HTTPS Monitor</strong>
+              <p>手机在 LAN、IPv6 或 Tailscale 下通过短连接 HTTPS 读取状态；公网时自动切换到 ChatX Relay。</p>
               <small>所有 Snapshot 均使用设备独立密钥进行 AES-256-GCM 端到端加密，Direct 与 Relay 使用同一协议。</small>
             </div>
             <label class="switch" title="手机监控">
@@ -161,7 +161,7 @@
           <div class="monitor-facts">
             <article><span>监听地址</span><code id="monitorBind">—</code></article>
             <article><span>TLS 指纹 SHA-256</span><code id="monitorFingerprint">—</code></article>
-            <article><span>协议 / 加密</span><strong id="monitorProtocol">WSS · E2EE</strong></article>
+            <article><span>协议 / 加密</span><strong id="monitorProtocol">HTTPS · E2EE</strong></article>
           </div>
           <div class="monitor-actions">
             <button id="createMonitorPairing" class="primary">添加手机</button>
@@ -190,9 +190,9 @@
           </div>
           <div class="setting-row">
             <div class="setting-copy">
-              <strong>WSS Relay</strong>
-              <p>Desktop 与 Android 都只主动连接 Relay 的 443；Relay 只路由加密帧，不读取 Monitor 内容。</p>
-              <small>LAN / IPv6 / Tailscale 可直连时优先使用 Direct WSS，公网自动切换 Relay。</small>
+              <strong>HTTPS Monitor Relay</strong>
+              <p>Desktop 通过 HTTPS 上传加密 Snapshot，Android 通过 HTTPS 读取；Relay 只保存短期密文，不读取 Monitor 内容。</p>
+              <small>配对和控制保留 WSS 通道；日常状态监控不依赖长连接。</small>
             </div>
             <label class="switch" title="ChatX Relay">
               <input id="relayEnabled" type="checkbox" aria-label="ChatX Relay">
@@ -206,7 +206,7 @@
           </div>
           <div class="network-facts">
             <article><span>Desktop 注册</span><strong id="relayRegistrationFact">—</strong></article>
-            <article><span>WSS Session</span><strong id="relaySessionFact">—</strong></article>
+            <article><span>Control WSS</span><strong id="relaySessionFact">—</strong></article>
             <article><span>Desktop ID</span><code id="relayDesktopFact">—</code></article>
             <article><span>最近心跳</span><strong id="relayHeartbeatFact">—</strong></article>
             <article><span>最近错误</span><code id="relayErrorFact">—</code></article>

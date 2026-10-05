@@ -25,7 +25,7 @@ class MonitorService : Service() {
         store.setMonitorServiceRunning(true)
         val notification = NotificationCenter.foreground(
             this,
-            "正在建立 ChatX WSS…",
+            "正在建立 ChatX HTTPS 监控…",
         )
         if (Build.VERSION.SDK_INT >= 34) {
             startForeground(
@@ -77,9 +77,13 @@ class MonitorService : Service() {
             config,
             object : MonitorConnectionManager.Listener {
                 override fun onTransportState(state: MonitorTransportState) {
-                    transportReachable =
-                        state.phase == "connected" &&
-                            state.desktopOnline != false
+                    when (state.phase) {
+                        "connected" -> transportReachable = state.desktopOnline != false
+                        "desktop_offline", "closed" -> transportReachable = false
+                        "degraded" -> if (state.reconnectAttempt >= 3) {
+                            transportReachable = false
+                        }
+                    }
                     handleTransportState(state)
                 }
 
@@ -119,25 +123,21 @@ class MonitorService : Service() {
     }
 
     private fun handleTransportState(state: MonitorTransportState) {
+        if (state.phase == "degraded" && transportReachable) {
+            return
+        }
         val label = when (state.transportKind) {
             "lan" -> "LAN"
             "ipv6" -> "IPv6"
             "tailscale" -> "Tailscale"
             "relay" -> "ChatX Relay"
-            else -> "WSS"
+            else -> "HTTPS"
         }
         val text = when (state.phase) {
-            "connected" -> "已连接 · $label"
+            "connected" -> "监控正常 · $label"
             "desktop_offline" -> "电脑离线 · $label"
-            "reconnecting" -> {
-                if (state.reconnectAttempt > 0) {
-                    "正在重新连接 · 第 ${state.reconnectAttempt} 次"
-                } else {
-                    "正在重新连接"
-                }
-            }
-            "degraded" -> "连接异常 · $label"
-            "closed" -> "实时监控已停止"
+            "reconnecting", "degraded" -> "连接波动，正在重试 · $label"
+            "closed" -> "监控已停止"
             else -> "正在寻找 ChatX…"
         }
         NotificationCenter.updateForeground(this, text)

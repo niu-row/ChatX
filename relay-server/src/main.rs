@@ -558,6 +558,90 @@ async fn device_ws(
     ws.on_upgrade(move |socket| device_socket(state, query.desktop_id, query.device_id, socket))
 }
 
+async fn desktop_snapshot_http(
+    State(state): State<AppState>,
+    AxumPath((desktop_id, device_id)): AxumPath<(String, String)>,
+    headers: HeaderMap,
+    Json(snapshot): Json<EncryptedSnapshot>,
+) -> Response {
+    let Some(token) = bearer(&headers) else {
+        return json_error(StatusCode::UNAUTHORIZED, "missing bearer token");
+    };
+    if !state.desktop_authorized(&desktop_id, token) {
+        return json_error(StatusCode::UNAUTHORIZED, "invalid desktop credential");
+    }
+    match state.cache_and_route_snapshot(&desktop_id, &device_id, snapshot).await {
+        Ok(()) => StatusCode::NO_CONTENT.into_response(),
+        Err(error) if error == "device not authorized" => {
+            json_error(StatusCode::NOT_FOUND, error)
+        }
+        Err(error) => json_error(StatusCode::BAD_REQUEST, error),
+    }
+}
+
+async fn device_snapshot_http(
+    State(state): State<AppState>,
+    AxumPath((desktop_id, device_id)): AxumPath<(String, String)>,
+    headers: HeaderMap,
+) -> Response {
+    let Some(token) = bearer(&headers) else {
+        return json_error(StatusCode::UNAUTHORIZED, "missing bearer token");
+    };
+    if !state.device_authorized(&desktop_id, &device_id, token) {
+        return json_error(StatusCode::UNAUTHORIZED, "invalid device credential");
+    }
+
+    let desktop_online = state.online_desktops.read().await.contains_key(&desktop_id);
+    if let Some(record) = state.latest_snapshot(&desktop_id, &device_id).await {
+        return Json(json!({
+            "type": "snapshot",
+            "desktopOnline": true,
+            "serverTime": now_ms(),
+            "receivedAt": record.received_at,
+            "snapshot": record.snapshot,
+        }))
+        .into_response();
+    }
+
+    Json(json!({
+        "type": "status",
+        "desktopOnline": desktop_online,
+        "serverTime": now_ms(),
+    }))
+    .into_response()
+}
+
+async fn device_revoke_http(
+    State(state): State<AppState>,
+    AxumPath((desktop_id, device_id)): AxumPath<(String, String)>,
+    headers: HeaderMap,
+) -> Response {
+    let Some(token) = bearer(&headers) else {
+        return json_error(StatusCode::UNAUTHORIZED, "missing bearer token");
+    };
+    if !state.device_authorized(&desktop_id, &device_id, token) {
+        return json_error(StatusCode::UNAUTHORIZED, "invalid device credential");
+    }
+    let desktop_route = state.desktop_channels.read().await.get(&desktop_id).cloned();
+    let Some(desktop_route) = desktop_route else {
+        return json_error(
+            StatusCode::CONFLICT,
+            "desktop offline; synchronized revoke unavailable",
+        );
+    };
+    match state.revoke_device_record(&desktop_id, &device_id) {
+        Ok(true) => {
+            state.snapshots.write().await.remove(&(desktop_id, device_id.clone()));
+            let _ = desktop_route.sender.send(DesktopServerMessage::DeviceRevoked {
+                device_id: device_id.clone(),
+            });
+            Json(json!({ "type": "revoked", "deviceId": device_id })).into_response()
+        }
+        Ok(false) => json_error(StatusCode::NOT_FOUND, "device already revoked"),
+        Err(error) => json_error(StatusCode::INTERNAL_SERVER_ERROR, error),
+    }
+}
+
 async fn device_socket(
     state: AppState,
     desktop_id: String,
@@ -980,6 +1064,14 @@ async fn main() {
         .route("/v1/ws/desktop", get(desktop_ws))
         .route("/v1/ws/device", get(device_ws))
         .route("/v1/ws/pair", get(pairing_ws))
+        .route(
+            "/v1/desktops/{desktop_id}/devices/{device_id}/snapshot",
+            get(device_snapshot_http).post(desktop_snapshot_http),
+        )
+        .route(
+            "/v1/desktops/{desktop_id}/devices/{device_id}/revoke-self",
+            post(device_revoke_http),
+        )
         .route(
             "/v1/desktops/{desktop_id}/devices/{device_id}",
             put(authorize_device).delete(revoke_device),
