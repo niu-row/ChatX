@@ -121,7 +121,7 @@ Tunnel 健康状态同时参考本地 runtime `ready/health` 和 control-plane p
 
 当前 Desktop / Android Monitor 使用 pairing schema 3 和 wire protocol v1。Desktop 在 Relay Hello 中上报自身能力，Relay 仅向手机发布端到端实际可用的能力；Android 只有看到 `control.refresh_snapshot` / `control.reconnect_tunnel` 后才发送对应控制消息。设备远程撤销使用 `revoke.sync`：Relay 必须等 Desktop 本地撤销确认后才删除 Relay registry 并向手机返回成功。缺少 capability 的旧 Desktop / Relay 会被视为 legacy：立即刷新回退到 HTTPS Snapshot，Tunnel 重连或同步撤销会明确报告不支持，而不是依赖超时猜测。
 
-当前仓库版本组合为 Desktop 0.4.10、Android Monitor 0.3.5；两者版本号独立演进，兼容性以 pairing schema、wire protocol 和 capability 为准。
+当前仓库版本组合为 Desktop 0.4.11、Android Monitor 0.3.6；两者版本号独立演进，兼容性以 pairing schema、wire protocol 和 capability 为准。
 
 ## 开发
 

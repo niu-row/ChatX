@@ -1,6 +1,6 @@
 {
   "name": "chatx",
-  "version": "0.4.10",
+  "version": "0.4.11",
   "private": true,
   "description": "Desktop bridge connecting ChatGPT Secure MCP Tunnel to Desktop Commander on Windows and macOS",
   "type": "module",

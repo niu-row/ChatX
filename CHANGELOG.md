@@ -1,6 +1,13 @@
 # Changelog
 
-## Unreleased
+## 0.4.11 - 2026-10-06
+
+### Changed
+
+- Finalized the Monitor route model around LAN IPv4, global IPv6 Direct, and server Relay only; obsolete route-specific references were removed from code, tests, and UI text.
+- Bumped Desktop to 0.4.11 and Android Monitor to 0.3.6 (versionCode 9).
+
+## 0.4.10 - 2026-10-06
 
 ### Changed
 

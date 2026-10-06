@@ -5,6 +5,7 @@ import path from 'node:path';
 import { Client } from '@modelcontextprotocol/client';
 import { StdioClientTransport } from '@modelcontextprotocol/client/stdio';
 
+const pkg = JSON.parse(fs.readFileSync('package.json', 'utf8'));
 const resourceDir = path.resolve('src-tauri', 'resources');
 const node = path.join(resourceDir, process.platform === 'win32' ? 'node.exe' : 'node');
 const launcher = path.join(resourceDir, 'desktop-commander-launcher.mjs');
@@ -16,7 +17,10 @@ for (const file of [node, launcher, entry]) {
 const temp = fs.mkdtempSync(path.join(os.tmpdir(), 'chatx-dc-smoke-'));
 const home = path.join(temp, 'dc-home');
 const sample = path.join(temp, 'sample.txt');
-const client = new Client({ name: 'chatx-bridge-smoke', version: '0.4.10' });
+const client = new Client({
+  name: 'chatx-bridge-smoke',
+  version: pkg.version,
+});
 const transportEnv = Object.fromEntries(
   Object.entries(process.env).filter(([, value]) => typeof value === 'string'),
 );
