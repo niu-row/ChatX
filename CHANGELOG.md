@@ -10,11 +10,19 @@
 - Relay control routing is scoped by desktop/device/request, with websocket capacity, pending-control limits, and per-device control throttling.
 - Canonical local verification now includes Relay protocol/server tests; CI runs the full Windows verification plus macOS Rust/Relay checks.
 - Android adds byte-level AES-GCM control tests, and stale background snapshots are rejected before endpoint mutation.
+- Relay device revocation is now synchronized: Relay waits for an explicit Desktop acknowledgement before deleting the Relay credential, then terminates active device sessions.
+- Relay registry persistence is fail-closed on corruption and uses a recoverable backup during Windows replacement.
+- Android pairing/revoke work moved into a lifecycle-bound controller; pairing-derived endpoint/snapshot writes are conditional on the currently paired Desktop/device identity.
+- Monitor routing is reduced to three supported paths only: private LAN IPv4, global IPv6 Direct, and server Relay; Tailscale/other Direct routes are filtered from discovery, pairing, storage, routing, and UI.
+- Desktop secret handling is isolated in `secrets.rs`; Monitor Master Key corruption is surfaced instead of silently rotating device E2EE material, and Runtime Key persistence is committed only after a successful Tunnel connection.
+- Desktop build/package entry points share a real-user HOME/Cargo/Rustup environment, Cargo verification uses `--locked`, and locked runtime downloads use a SHA-verified persistent cache.
+- CI now uses the runtime-locked Node 24.16.0 and exercises Desktop runtime verification plus the production no-bundle build on Windows; Gradle wrapper bytes are SHA-256 pinned.
 
 ### Security
 
 - Runtime Key remains Desktop-only; mobile control is restricted to `refresh_snapshot` and `reconnect_tunnel`.
 - Replayed identical encrypted control requests return the cached encrypted result, while conflicting reuse of a request ID is rejected.
+- Existing Direct/Relay Monitor sessions are re-authorized after device revocation so revoked clients stop receiving new Snapshots.
 
 ## 0.3.0 - 2026-09-08
 

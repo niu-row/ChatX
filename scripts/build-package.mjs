@@ -1,6 +1,7 @@
 import { spawnSync } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
+import { toolchainEnv } from './toolchain-env.mjs';
 
 const args = process.argv.slice(2);
 const MAC_BUNDLE_ID = 'com.chatgptx.local';
@@ -64,7 +65,7 @@ function verifyMacBundle(appPath, localSigning = null) {
 if (process.platform === 'win32') {
   const result = spawnSync(process.execPath, [path.resolve('scripts/build-installer.mjs'), ...args], {
     stdio: 'inherit',
-    env: process.env,
+    env: toolchainEnv(),
     windowsHide: true,
   });
   process.exit(result.status ?? 1);
@@ -77,13 +78,12 @@ if (process.platform === 'darwin' && process.arch === 'arm64') {
   const cli = path.resolve('node_modules', '@tauri-apps', 'cli', 'tauri.js');
   const localSigning = loadLocalMacSigning();
   const tauriArgs = [cli, 'build', '--bundles', 'app,dmg'];
-  const buildEnv = { ...process.env };
+  let buildEnv = toolchainEnv();
   if (localSigning) {
     tauriArgs.push('--config', JSON.stringify({ bundle: { macOS: { signingIdentity: localSigning.identity } } }));
-    buildEnv.HOME = localSigning.home;
-    buildEnv.CARGO_HOME = path.join(localSigning.home, '.cargo');
-    buildEnv.RUSTUP_HOME = path.join(localSigning.home, '.rustup');
-    buildEnv.PATH = `${path.join(localSigning.home, '.cargo', 'bin')}:${buildEnv.PATH ?? '/usr/bin:/bin:/usr/sbin:/sbin'}`;
+    buildEnv = toolchainEnv({}, localSigning.home);
+
+
     console.log(`Using local macOS signing identity: ${localSigning.identity}`);
   }
   const result = spawnSync(process.execPath, tauriArgs, {

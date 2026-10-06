@@ -8,7 +8,9 @@ mod monitor_crypto;
 mod monitor_network;
 mod monitor_server;
 mod relay;
+mod secrets;
 
+use secrets::{clear_runtime_key, ensure_monitor_master_key, key_storage, load_runtime_key, protect_secret, read_relay_credentials, runtime_key_saved, save_relay_credentials};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::{
@@ -437,17 +439,6 @@ fn monitor_activity_path(app: &tauri::AppHandle) -> Result<PathBuf, String> {
     Ok(desktop_commander_home(app)?.join(".chatx-monitor").join("activity.json"))
 }
 
-fn runtime_key_saved(app: &tauri::AppHandle) -> bool {
-    #[cfg(windows)]
-    { secret_path(app).map(|path| path.is_file()).unwrap_or(false) }
-    #[cfg(target_os = "macos")]
-    {
-        let _ = app;
-        keychain_key_saved()
-    }
-    #[cfg(not(any(windows, target_os = "macos")))]
-    { let _ = app; false }
-}
 
 fn runtime_binary_name(base: &str) -> String {
     if cfg!(windows) { format!("{base}.exe") } else { base.to_string() }
@@ -683,184 +674,6 @@ fn executable_version(path: &Path) -> String {
     match command_output(&mut command) { Ok(output) => output_text(&output), Err(error) => error }
 }
 
-#[cfg(windows)]
-fn protect_secret(secret: &str, target: &Path) -> Result<(), String> {
-    let script = r#"$ErrorActionPreference='Stop';[Console]::OutputEncoding=[Text.UTF8Encoding]::new($false);Add-Type -AssemblyName System.Security;$b=[Text.Encoding]::UTF8.GetBytes($env:CHATX_SECRET);$p=[System.Security.Cryptography.ProtectedData]::Protect($b,$null,[System.Security.Cryptography.DataProtectionScope]::CurrentUser);[IO.File]::WriteAllText($env:CHATX_SECRET_FILE,[Convert]::ToBase64String($p))"#;
-    let mut command = Command::new("powershell.exe");
-    command.args(["-NoLogo", "-NoProfile", "-NonInteractive", "-Command", script])
-        .env("CHATX_SECRET", secret).env("CHATX_SECRET_FILE", target);
-    let output = command_output(&mut command)?;
-    if output.status.success() { Ok(()) } else { Err(format!("保存 Runtime Key 失败：{}", output_text(&output))) }
-}
-
-#[cfg(not(any(windows, target_os = "macos")))]
-fn protect_secret(_secret: &str, _target: &Path) -> Result<(), String> { Err("安全保存 Runtime Key 当前仅支持 Windows。".into()) }
-
-#[cfg(windows)]
-fn unprotect_secret(target: &Path) -> Result<String, String> {
-    let script = r#"$ErrorActionPreference='Stop';[Console]::OutputEncoding=[Text.UTF8Encoding]::new($false);Add-Type -AssemblyName System.Security;$s=[IO.File]::ReadAllText($env:CHATX_SECRET_FILE);$p=[Convert]::FromBase64String($s);$b=[System.Security.Cryptography.ProtectedData]::Unprotect($p,$null,[System.Security.Cryptography.DataProtectionScope]::CurrentUser);[Console]::Out.Write([Text.Encoding]::UTF8.GetString($b))"#;
-    let mut command = Command::new("powershell.exe");
-    command.args(["-NoLogo", "-NoProfile", "-NonInteractive", "-Command", script]).env("CHATX_SECRET_FILE", target);
-    let output = command_output(&mut command)?;
-    if !output.status.success() { return Err(format!("读取已保存 Runtime Key 失败：{}", output_text(&output))); }
-    Ok(String::from_utf8_lossy(&output.stdout).to_string())
-}
-
-#[cfg(not(any(windows, target_os = "macos")))]
-fn unprotect_secret(_target: &Path) -> Result<String, String> { Err("安全读取 Runtime Key 当前仅支持 Windows。".into()) }
-
-#[cfg(target_os = "macos")]
-fn keychain_key_saved() -> bool {
-    use security_framework::item::{ItemClass, ItemSearchOptions};
-    // Poll metadata only; never retrieve the secret during status refresh.
-    ItemSearchOptions::new().class(ItemClass::generic_password())
-        .service(KEYCHAIN_SERVICE).account(RUNTIME_ALIAS)
-        .load_attributes(true).load_data(false).search().is_ok()
-}
-
-#[cfg(target_os = "macos")]
-fn clear_keychain_key() -> Result<(), String> {
-    match security_framework::passwords::delete_generic_password(KEYCHAIN_SERVICE, RUNTIME_ALIAS) {
-        Ok(()) => Ok(()),
-        // errSecItemNotFound: clearing an absent key is already successful.
-        Err(error) if error.code() == -25300 => Ok(()),
-        Err(error) => Err(format!("清除 macOS 钥匙串中的 Runtime Key 失败：{error}")),
-    }
-}
-
-#[cfg(target_os = "macos")]
-fn protect_secret(secret: &str, _target: &Path) -> Result<(), String> {
-    security_framework::passwords::set_generic_password(KEYCHAIN_SERVICE, RUNTIME_ALIAS, secret.as_bytes())
-        .map_err(|e| format!("保存 Runtime Key 到 macOS 钥匙串失败（错误码 {}）：{e}。可取消勾选保存密钥后重试；无需还原系统钥匙串。", e.code()))
-}
-
-#[cfg(target_os = "macos")]
-fn unprotect_secret(_target: &Path) -> Result<String, String> {
-    let bytes = security_framework::passwords::get_generic_password(KEYCHAIN_SERVICE, RUNTIME_ALIAS)
-        .map_err(|e| format!("读取 macOS 钥匙串失败，请允许 ChatX 访问钥匙串或重新输入 Runtime API Key：{e}"))?;
-    String::from_utf8(bytes).map_err(|_| "钥匙串中的 Runtime Key 编码无效，请重新保存。".into())
-}
-
-
-#[cfg(windows)]
-fn read_monitor_master_key(app: &tauri::AppHandle) -> Result<String, String> {
-    unprotect_secret(&monitor_master_secret_path(app)?)
-        .map_err(|e| e.replace("Runtime Key", "Monitor Master Key"))
-}
-
-#[cfg(target_os = "macos")]
-fn read_monitor_master_key(_app: &tauri::AppHandle) -> Result<String, String> {
-    let bytes = security_framework::passwords::get_generic_password(
-        MONITOR_MASTER_KEYCHAIN_SERVICE,
-        MONITOR_MASTER_KEYCHAIN_ACCOUNT,
-    ).map_err(|e| format!("读取 Monitor Master Key 失败：{e}"))?;
-    String::from_utf8(bytes).map_err(|_| "Monitor Master Key 编码无效。".into())
-}
-
-#[cfg(not(any(windows, target_os = "macos")))]
-fn read_monitor_master_key(_app: &tauri::AppHandle) -> Result<String, String> {
-    Err("安全读取 Monitor Master Key 当前仅支持 Windows 和 macOS。".into())
-}
-
-#[cfg(windows)]
-fn save_monitor_master_key(app: &tauri::AppHandle, value: &str) -> Result<(), String> {
-    protect_secret(value, &monitor_master_secret_path(app)?)
-        .map_err(|e| e.replace("Runtime Key", "Monitor Master Key"))
-}
-
-#[cfg(target_os = "macos")]
-fn save_monitor_master_key(_app: &tauri::AppHandle, value: &str) -> Result<(), String> {
-    security_framework::passwords::set_generic_password(
-        MONITOR_MASTER_KEYCHAIN_SERVICE,
-        MONITOR_MASTER_KEYCHAIN_ACCOUNT,
-        value.as_bytes(),
-    ).map_err(|e| format!("保存 Monitor Master Key 到 macOS 钥匙串失败：{e}"))
-}
-
-#[cfg(not(any(windows, target_os = "macos")))]
-fn save_monitor_master_key(_app: &tauri::AppHandle, _value: &str) -> Result<(), String> {
-    Err("安全保存 Monitor Master Key 当前仅支持 Windows 和 macOS。".into())
-}
-
-fn ensure_monitor_master_key(app: &tauri::AppHandle) -> Result<[u8; 32], String> {
-    if let Ok(value) = read_monitor_master_key(app) {
-        return monitor_crypto::decode_master_key(&value);
-    }
-    let key = monitor_crypto::generate_master_key()?;
-    save_monitor_master_key(app, &monitor_crypto::encode_master_key(&key))?;
-    Ok(key)
-}
-
-#[cfg(windows)]
-fn save_relay_credentials(app: &tauri::AppHandle, credentials: &relay::RelayCredentials) -> Result<(), String> {
-    let value = serde_json::to_string(credentials)
-        .map_err(|e| format!("序列化 Relay Credential 失败：{e}"))?;
-    protect_secret(&value, &relay_secret_path(app)?)
-        .map_err(|e| e.replace("Runtime Key", "Relay Credential"))
-}
-
-#[cfg(target_os = "macos")]
-fn save_relay_credentials(_app: &tauri::AppHandle, credentials: &relay::RelayCredentials) -> Result<(), String> {
-    let value = serde_json::to_string(credentials)
-        .map_err(|e| format!("序列化 Relay Credential 失败：{e}"))?;
-    security_framework::passwords::set_generic_password(
-        RELAY_KEYCHAIN_SERVICE,
-        RELAY_KEYCHAIN_ACCOUNT,
-        value.as_bytes(),
-    ).map_err(|e| format!("保存 Relay Credential 到 macOS 钥匙串失败：{e}"))
-}
-
-#[cfg(not(any(windows, target_os = "macos")))]
-fn save_relay_credentials(_app: &tauri::AppHandle, _credentials: &relay::RelayCredentials) -> Result<(), String> {
-    Err("安全保存 Relay Credential 当前仅支持 Windows 和 macOS。".into())
-}
-
-#[cfg(windows)]
-fn read_relay_credentials(app: &tauri::AppHandle) -> Result<relay::RelayCredentials, String> {
-    let value = unprotect_secret(&relay_secret_path(app)?)
-        .map_err(|e| e.replace("Runtime Key", "Relay Credential"))?;
-    serde_json::from_str(&value).map_err(|e| format!("Relay Credential 编码无效：{e}"))
-}
-
-#[cfg(target_os = "macos")]
-fn read_relay_credentials(_app: &tauri::AppHandle) -> Result<relay::RelayCredentials, String> {
-    let bytes = security_framework::passwords::get_generic_password(
-        RELAY_KEYCHAIN_SERVICE,
-        RELAY_KEYCHAIN_ACCOUNT,
-    ).map_err(|e| format!("读取 Relay Credential 失败：{e}"))?;
-    let value = String::from_utf8(bytes).map_err(|_| "Relay Credential 编码无效。".to_string())?;
-    serde_json::from_str(&value).map_err(|e| format!("Relay Credential 编码无效：{e}"))
-}
-
-#[cfg(not(any(windows, target_os = "macos")))]
-fn read_relay_credentials(_app: &tauri::AppHandle) -> Result<relay::RelayCredentials, String> {
-    Err("安全读取 Relay Credential 当前仅支持 Windows 和 macOS。".into())
-}
-
-
-fn clear_runtime_key(app: &tauri::AppHandle) -> Result<(), String> {
-    #[cfg(target_os = "macos")]
-    clear_keychain_key()?;
-    let path = secret_path(app)?;
-    if path.exists() { fs::remove_file(path).map_err(|e| format!("清除 Runtime Key 失败：{e}"))?; }
-    Ok(())
-}
-
-fn key_storage() -> &'static str {
-    if cfg!(windows) { "Windows DPAPI" }
-    else if cfg!(target_os = "macos") { "macOS Keychain" }
-    else { "session only" }
-}
-
-fn load_runtime_key(app: &tauri::AppHandle, supplied: &str) -> Result<String, String> {
-    if !supplied.trim().is_empty() { return Ok(supplied.trim().to_string()); }
-    let path = secret_path(app)?;
-    if !runtime_key_saved(app) { return Err("请输入 Runtime API Key，或先保存一个 Runtime Key。".into()); }
-    let value = unprotect_secret(&path)?;
-    if value.trim().is_empty() { return Err("已保存的 Runtime Key 为空。".into()); }
-    Ok(value)
-}
-
 #[derive(Debug, Clone)]
 struct RuntimeKeyRemoteProbe {
     ok: bool,
@@ -1020,7 +833,7 @@ fn parse_call_history(text: &str, limit: usize, tool_name: Option<&str>, status:
     let p95_duration_ms = if durations.is_empty() {
         None
     } else {
-        let index = ((durations.len() * 95 + 99) / 100).saturating_sub(1);
+        let index = (durations.len() * 95).div_ceil(100).saturating_sub(1);
         durations.get(index).copied()
     };
     records.reverse();
@@ -1076,39 +889,13 @@ mod tests {
         assert!(output.status.success(), "{}", output_text(&output));
     }
 
-    #[cfg(target_os = "macos")]
-    #[test]
-    fn keychain_save_update_read_and_clear() {
-        // Test service is separate from the application's real credentials.
-        let path = Path::new("unused");
-        clear_keychain_key().unwrap();
-        assert!(!keychain_key_saved());
-        protect_secret("chatx-test-first", path).unwrap();
-        assert!(keychain_key_saved());
-        assert_eq!(unprotect_secret(path).unwrap(), "chatx-test-first");
-        protect_secret("chatx-test-updated", path).unwrap();
-        assert_eq!(unprotect_secret(path).unwrap(), "chatx-test-updated");
-        clear_keychain_key().unwrap();
-        assert!(!keychain_key_saved());
-        assert!(unprotect_secret(path).is_err());
-        clear_keychain_key().unwrap();
-    }
-
-    #[cfg(windows)]
-    #[test]
-    fn windows_dpapi_round_trip() {
-        let path = std::env::temp_dir().join(format!("chatx-dpapi-test-{}.txt", std::process::id()));
-        let _ = fs::remove_file(&path);
-        protect_secret("chatx-dpapi-regression", &path).unwrap();
-        assert_eq!(unprotect_secret(&path).unwrap(), "chatx-dpapi-regression");
-        fs::remove_file(&path).unwrap();
-    }
-
     #[test]
     fn explicit_stop_blocks_any_start_that_requires_connection_intent() {
         let state = AppState::default();
-        let mut settings = Settings::default();
-        settings.connection_intent = true;
+        let mut settings = Settings {
+            connection_intent: true,
+            ..Settings::default()
+        };
 
         state.desired_connected.store(false, Ordering::SeqCst);
         assert!(ensure_runtime_start_intent(&state, &settings, true).is_err());
@@ -2235,15 +2022,18 @@ fn start_relay_client_for_settings(
         },
     );
 
+    let handlers = relay::RelayHandlers::new(
+        snapshot_provider,
+        pairing_handler,
+        revoke_handler,
+        control_handler,
+    );
     let handle = relay::start_client(
         settings.relay.clone(),
         credentials,
         master_key,
         state.relay_status.clone(),
-        snapshot_provider,
-        pairing_handler,
-        revoke_handler,
-        control_handler,
+        handlers,
     )?;
     let mut slot = state.relay_client.lock()
         .map_err(|_| "Relay Client 状态锁已损坏。".to_string())?;
@@ -2625,22 +2415,19 @@ fn stop_requested(app: &tauri::AppHandle, state: &AppState) -> Result<(), String
 }
 
 #[tauri::command]
-fn connect_tunnel(app: tauri::AppHandle, state: State<'_, AppState>, tunnel_id: String, runtime_key: String, remember_key: bool) -> Result<Value, String> {
+fn connect_tunnel(
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+    tunnel_id: String,
+    runtime_key: String,
+    remember_key: bool,
+) -> Result<Value, String> {
     let tunnel_id = tunnel_id.trim().to_string();
-    if !tunnel_id.starts_with("tunnel_") { return Err("Tunnel ID 应以 tunnel_ 开头。".into()); }
-    let key = load_runtime_key(&app, &runtime_key)?;
-    let secret = secret_path(&app)?;
-    if remember_key {
-        protect_secret(&key, &secret)?;
-    } else {
-        clear_runtime_key(&app)?;
+    if !tunnel_id.starts_with("tunnel_") {
+        return Err("Tunnel ID 应以 tunnel_ 开头。".into());
     }
-    if let Ok(mut cache) = state.permission_results.lock() { *cache = None; }
-    let mut settings = load_settings(&app);
-    settings.tunnel_id = tunnel_id.clone();
-    settings.remember_key = remember_key;
-    settings.connection_intent = false;
-    save_settings(&app, &settings)?;
+    let key = load_runtime_key(&app, &runtime_key)?;
+    let previous_settings = load_settings(&app);
 
     state.desired_connected.store(false, Ordering::SeqCst);
     state.reconnecting.store(false, Ordering::SeqCst);
@@ -2649,26 +2436,61 @@ fn connect_tunnel(app: tauri::AppHandle, state: State<'_, AppState>, tunnel_id: 
         *session_key = Some(key.clone());
     }
 
-    if let Err(error) = start_runtime_connection(&app, state.inner(), &tunnel_id, &key, false, false) {
+    if let Err(error) = start_runtime_connection(
+        &app,
+        state.inner(),
+        &tunnel_id,
+        &key,
+        false,
+        false,
+    ) {
         cancel_connection_intent(state.inner());
         return Err(error);
     }
+
     state.desired_connected.store(true, Ordering::SeqCst);
-    let mut settings = load_settings(&app);
-    settings.connection_intent = true;
-    if let Err(error) = save_settings(&app, &settings) {
+    let mut next_settings = previous_settings.clone();
+    next_settings.tunnel_id = tunnel_id;
+    next_settings.remember_key = remember_key;
+    next_settings.connection_intent = true;
+    if let Err(error) = save_settings(&app, &next_settings) {
         cancel_connection_intent(state.inner());
         let _ = stop_runtime(&app, Some(state.inner()));
-        return Err(format!("Tunnel 已启动但无法保存连接意图，已回滚连接：{error}"));
+        return Err(format!(
+            "Tunnel 已启动但无法保存连接设置，已回滚连接：{error}"
+        ));
+    }
+
+    let secret_result = if remember_key {
+        secret_path(&app)
+            .and_then(|path| protect_secret(&key, &path))
+    } else {
+        clear_runtime_key(&app)
+    };
+    if let Err(error) = secret_result {
+        let settings_restore = save_settings(&app, &previous_settings);
+        cancel_connection_intent(state.inner());
+        let _ = stop_runtime(&app, Some(state.inner()));
+        return match settings_restore {
+            Ok(()) => Err(format!(
+                "Tunnel 已启动但 Runtime Key 持久化失败，已回滚连接和设置：{error}"
+            )),
+            Err(restore_error) => Err(format!(
+                "Tunnel Runtime Key 持久化失败：{error}；同时恢复原设置失败：{restore_error}"
+            )),
+        };
+    }
+
+    if let Ok(mut cache) = state.permission_results.lock() {
+        *cache = None;
     }
     if let Ok(paths) = runtime_paths(&app) {
         let observation = runtime_status(&app, &paths);
-        let settings = load_settings(&app);
         update_runtime_snapshot(
             state.inner(),
             &observation,
             true,
-            &settings,
+            &next_settings,
         );
     }
     get_status(app, state)

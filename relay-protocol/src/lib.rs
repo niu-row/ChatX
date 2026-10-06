@@ -4,12 +4,14 @@ pub const PROTOCOL_VERSION: u32 = 1;
 pub const CAPABILITY_SNAPSHOT: &str = "snapshot";
 pub const CAPABILITY_CONTROL_REFRESH: &str = "control.refresh_snapshot";
 pub const CAPABILITY_CONTROL_RECONNECT: &str = "control.reconnect_tunnel";
+pub const CAPABILITY_REVOKE_SYNC: &str = "revoke.sync";
 
 pub fn device_capabilities() -> Vec<String> {
     vec![
         CAPABILITY_SNAPSHOT.into(),
         CAPABILITY_CONTROL_REFRESH.into(),
         CAPABILITY_CONTROL_RECONNECT.into(),
+        CAPABILITY_REVOKE_SYNC.into(),
     ]
 }
 
@@ -106,6 +108,15 @@ pub enum DesktopWsMessage {
         request_id: String,
         message: String,
     },
+    RevokeResult {
+        device_id: String,
+        request_id: String,
+    },
+    RevokeError {
+        device_id: String,
+        request_id: String,
+        message: String,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -127,6 +138,10 @@ pub enum DesktopServerMessage {
     },
     DeviceRevoked {
         device_id: String,
+    },
+    DeviceRevoke {
+        device_id: String,
+        request_id: String,
     },
     DeviceControl {
         device_id: String,
@@ -277,6 +292,22 @@ mod tests {
         let notice = serde_json::to_string(&desktop_notice).unwrap();
         assert!(notice.contains("\"type\":\"device_revoked\""));
         assert!(notice.contains("\"deviceId\":\"dev_test\""));
+
+        let sync_request = DesktopServerMessage::DeviceRevoke {
+            device_id: "dev_test".into(),
+            request_id: "r_0123456789abcdef".into(),
+        };
+        let sync_text = serde_json::to_string(&sync_request).unwrap();
+        assert!(sync_text.contains("\"type\":\"device_revoke\""));
+        assert!(sync_text.contains("\"requestId\":\"r_0123456789abcdef\""));
+
+        let ack = DesktopWsMessage::RevokeResult {
+            device_id: "dev_test".into(),
+            request_id: "r_0123456789abcdef".into(),
+        };
+        let ack_text = serde_json::to_string(&ack).unwrap();
+        assert!(ack_text.contains("\"type\":\"revoke_result\""));
+        assert!(ack_text.contains("\"requestId\":\"r_0123456789abcdef\""));
     }
 
     #[test]

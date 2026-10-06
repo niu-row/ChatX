@@ -1,5 +1,9 @@
 package com.chatx.monitor
 
+import java.net.Inet4Address
+import java.net.Inet6Address
+import java.net.InetAddress
+import java.net.URI
 import org.json.JSONArray
 import org.json.JSONObject
 
@@ -17,13 +21,8 @@ data class RelayEnrollment(
     val deviceToken: String,
 ) {
     init {
-        require(
-            baseUrl.startsWith("https://") ||
-                baseUrl.startsWith("http://127.0.0.1") ||
-                baseUrl.startsWith("http://localhost") ||
-                baseUrl.startsWith("http://[::1]")
-        ) {
-            "Relay URL 无效。"
+        require(baseUrl.startsWith("https://")) {
+            "Relay URL 必须使用 HTTPS。"
         }
         require(deviceToken.matches(Regex("[0-9a-fA-F]{64}"))) {
             "Relay Device Token 无效。"
@@ -51,9 +50,11 @@ data class PairingConfig(
         put("directToken", directToken)
         put("deviceKey", deviceKey)
         put("directEndpoints", JSONArray().apply {
-            directEndpoints.forEach { endpoint ->
-                put(endpoint.toJson())
-            }
+            directEndpoints
+                .filter(MonitorEndpoint::isSupportedDirectRoute)
+                .forEach { endpoint ->
+                    put(endpoint.toJson())
+                }
         })
         put("relay", relay?.let { item ->
             JSONObject().apply {
@@ -198,11 +199,10 @@ data class PairingInvite(
                 require(route.routeToken.matches(Regex("[0-9a-f]{64}"))) {
                     "Relay Pairing Token 无效。"
                 }
-                val secureRelay = route.url.startsWith("wss://")
-                val loopbackRelay = route.url.startsWith("ws://127.0.0.1") ||
-                    route.url.startsWith("ws://localhost") ||
-                    route.url.startsWith("ws://[::1]")
-                require(secureRelay || loopbackRelay) {
+                require(route.baseUrl.startsWith("https://")) {
+                    "Relay Pairing URL 必须使用 HTTPS。"
+                }
+                require(route.url.startsWith("wss://")) {
                     "Relay Pairing Endpoint 必须使用 WSS。"
                 }
                 route
@@ -233,17 +233,39 @@ private fun normalizeFingerprint(value: String): String {
 private fun parseEndpoints(array: JSONArray): List<MonitorEndpoint> = buildList {
     for (index in 0 until array.length()) {
         val item = array.getJSONObject(index)
-        val url = item.getString("url").trim()
-        require(url.startsWith("wss://")) { "Monitor Endpoint 必须使用 WSS。" }
-        add(
-            MonitorEndpoint(
-                kind = item.optString("kind", "unknown"),
-                family = item.optString("family", "unknown"),
-                interfaceName = item.optString("interface", ""),
-                host = item.optString("host", ""),
-                url = url,
-            ),
+        val endpoint = MonitorEndpoint(
+            kind = item.optString("kind", "unknown"),
+            family = item.optString("family", "unknown"),
+            interfaceName = item.optString("interface", ""),
+            host = item.optString("host", ""),
+            url = item.getString("url").trim(),
         )
+        if (endpoint.isSupportedDirectRoute()) {
+            add(endpoint)
+        }
+    }
+}
+
+fun MonitorEndpoint.isSupportedDirectRoute(): Boolean {
+    if (!url.startsWith("wss://")) return false
+    val address = runCatching {
+        val host = URI(url).host ?: return@runCatching null
+        InetAddress.getByName(host)
+    }.getOrNull() ?: return false
+
+    return when {
+        kind == "lan" && family == "ipv4" ->
+            address is Inet4Address && address.isSiteLocalAddress
+        kind == "ipv6" && family == "ipv6" &&
+            address is Inet6Address -> {
+            val first = address.address[0].toInt() and 0xff
+            !address.isAnyLocalAddress &&
+                !address.isLoopbackAddress &&
+                !address.isMulticastAddress &&
+                !address.isLinkLocalAddress &&
+                first and 0xfe != 0xfc
+        }
+        else -> false
     }
 }
 

@@ -142,7 +142,7 @@ pub fn evaluate_activity(snapshot: Option<&ActivitySnapshot>, now: u64) -> McpMo
         let gap = elapsed(now, last_activity_at);
         if gap < GAP_THRESHOLD_MS && (current_calls >= ACTIVE_MIN_CALLS || burst_detected) {
             state = "active";
-        } else if burst_detected && gap >= GAP_THRESHOLD_MS && gap <= IDLE_RESET_MS {
+        } else if burst_detected && (GAP_THRESHOLD_MS..=IDLE_RESET_MS).contains(&gap) {
             state = "gap";
             gap_duration_ms = Some(gap);
         }

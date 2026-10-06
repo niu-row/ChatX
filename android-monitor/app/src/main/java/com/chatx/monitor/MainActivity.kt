@@ -42,6 +42,7 @@ class MainActivity : Activity() {
     private lateinit var pageContent: LinearLayout
     private lateinit var bottomNav: LinearLayout
     private lateinit var actions: MonitorActionController
+    private lateinit var pairingActions: PairingActionController
     private var pairingInput: EditText? = null
     private var currentPage = Page.OVERVIEW
     private var latestStatusJson: String? = null
@@ -62,6 +63,7 @@ class MainActivity : Activity() {
         store = SecureStore(this)
         ui = UiKit(this)
         actions = buildActionController()
+        pairingActions = buildPairingActionController()
         latestStatusJson = store.getLastSnapshotJson()
         NotificationCenter.createChannels(this)
         setContentView(buildShell())
@@ -75,6 +77,7 @@ class MainActivity : Activity() {
     }
 
     override fun onDestroy() {
+        pairingActions.close()
         actions.close()
         unregisterReceiver(statusReceiver)
         super.onDestroy()
@@ -103,6 +106,37 @@ class MainActivity : Activity() {
 
                 override fun onToast(message: String) {
                     if (!isDestroyed) toast(message)
+                }
+            },
+        )
+
+    private fun buildPairingActionController(): PairingActionController =
+        PairingActionController(
+            applicationContext,
+            store,
+            object : PairingActionController.Listener {
+                override fun onPairingSucceeded(config: PairingConfig) {
+                    pairingInput?.setText("")
+                    latestStatusJson = null
+                    endpointHealth = null
+                    store.clearEvents()
+                    currentPage = Page.OVERVIEW
+                    toast("ChatX 已安全配对。")
+                    renderApp()
+                    actions.refresh(config)
+                }
+
+                override fun onPairingFailed(message: String) {
+                    toast(message)
+                }
+
+                override fun onRevokeSucceeded() {
+                    clearLocalPairing()
+                    toast("此设备已删除。")
+                }
+
+                override fun onRevokeFailed(message: String) {
+                    confirmLocalOnlyDelete(message)
                 }
             },
         )
@@ -755,7 +789,7 @@ class MainActivity : Activity() {
     private fun renderConnection() {
         pageHeading(
             "连接",
-            "Monitor over HTTPS · Direct / Relay 动态多路径",
+            "Monitor over HTTPS · LAN / IPv6 / 服务器 Relay",
         )
         val config = store.loadPairing() ?: return
         val currentEndpoint = currentEndpointUrl()
@@ -1035,7 +1069,7 @@ class MainActivity : Activity() {
         )
         security.addView(
             ui.muted(
-                "LAN / IPv6 / Tailscale / Relay 全部使用同一套 AES-256-GCM E2EE envelope。",
+                "LAN、IPv6 Direct 与服务器 Relay 使用同一套 AES-256-GCM E2EE envelope。",
                 13f,
             ),
             ui.margin(top = 5),
@@ -1164,26 +1198,7 @@ class MainActivity : Activity() {
             return
         }
         toast("正在安全配对…")
-        Thread {
-            try {
-                val config = PairingManager().pair(text)
-                store.savePairing(config)
-                runOnUiThread {
-                    pairingInput?.setText("")
-                    latestStatusJson = null
-                    endpointHealth = null
-                    store.clearEvents()
-                    currentPage = Page.OVERVIEW
-                    toast("ChatX 已安全配对。")
-                    renderApp()
-                    refreshOnce()
-                }
-            } catch (error: Exception) {
-                runOnUiThread {
-                    toast(error.message ?: "配对失败。")
-                }
-            }
-        }.start()
+        pairingActions.pair(text)
     }
 
     private fun confirmClearPairing() {
@@ -1197,21 +1212,7 @@ class MainActivity : Activity() {
             .setPositiveButton("删除") { _, _ ->
                 MonitorService.stop(this)
                 toast("正在撤销设备凭据…")
-                Thread {
-                    val failure = runCatching {
-                        MonitorConnectionManager.revokePairing(this, config)
-                    }.exceptionOrNull()
-                    runOnUiThread {
-                        if (failure == null) {
-                            clearLocalPairing()
-                            toast("此设备已删除。")
-                        } else {
-                            confirmLocalOnlyDelete(
-                                failure.message ?: "无法连接 ChatX 撤销设备。"
-                            )
-                        }
-                    }
-                }.start()
+                pairingActions.revoke(config)
             }
             .show()
     }
@@ -1300,7 +1301,7 @@ class MainActivity : Activity() {
                 ACCESS_LOCAL_NETWORK,
             ) != PackageManager.PERMISSION_GRANTED
         ) {
-            toast("LAN 权限未授予；仍会继续尝试 Tailscale / IPv6。")
+            toast("LAN 权限未授予；仍会尝试 IPv6 / 服务器 Relay。")
         }
         startMonitoring()
     }
@@ -1491,9 +1492,15 @@ class MainActivity : Activity() {
 
     private fun configuredRoutes(config: PairingConfig): List<MonitorEndpoint> =
         buildList {
-            config.directEndpoints.forEach { endpoint ->
-                add(endpoint.copy(url = directMonitorHttpsUrl(endpoint.url)))
-            }
+            config.directEndpoints
+                .filter(MonitorEndpoint::isSupportedDirectRoute)
+                .forEach { endpoint ->
+                    add(
+                        endpoint.copy(
+                            url = directMonitorHttpsUrl(endpoint.url),
+                        ),
+                    )
+                }
             config.relay?.let { relay ->
                 add(
                     MonitorEndpoint(
@@ -1575,7 +1582,7 @@ class MainActivity : Activity() {
 
     private fun routePolicyLabel(policy: RoutePolicy): String = when (policy) {
         RoutePolicy.LAN_FIRST -> "LAN 优先"
-        RoutePolicy.RELAY_FIRST -> "公网 Relay 优先"
+        RoutePolicy.RELAY_FIRST -> "服务器 Relay 优先"
         RoutePolicy.AUTO -> "自动 · 保持稳定路径"
         RoutePolicy.MANUAL -> "手动首选"
     }
@@ -1645,8 +1652,7 @@ class MainActivity : Activity() {
     private fun endpointKindLabel(kind: String): String = when (kind) {
         "lan" -> "LAN"
         "ipv6" -> "IPv6 Direct"
-        "relay" -> "ChatX Relay"
-        "tailscale" -> "Tailscale"
+        "relay" -> "服务器 Relay"
         else -> kind
     }
     private fun eventTypeLabel(type: String): String = when (type) {

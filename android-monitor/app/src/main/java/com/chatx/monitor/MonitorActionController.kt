@@ -46,7 +46,7 @@ class MonitorActionController(
             val json = controlAttempt.fold(
                 onSuccess = { result ->
                     if (result.ok) {
-                        controlSnapshotJson(result)
+                        controlSnapshotJson(config, result)
                             ?: StatusCodec.error(
                                 "刷新响应缺少 Snapshot。",
                             )
@@ -72,7 +72,11 @@ class MonitorActionController(
                 },
             )
             if (json != null) {
-                store.setLastSnapshotJson(json)
+                store.setLastSnapshotJson(
+                    config.desktopId,
+                    config.deviceId,
+                    json,
+                )
             }
             post {
                 refreshing.set(false)
@@ -92,9 +96,13 @@ class MonitorActionController(
                     appContext,
                     config,
                 ).execute("reconnect_tunnel", timeoutSeconds = 5L)
-                val json = controlSnapshotJson(result)
+                val json = controlSnapshotJson(config, result)
                 if (json != null) {
-                    store.setLastSnapshotJson(json)
+                    store.setLastSnapshotJson(
+                    config.desktopId,
+                    config.deviceId,
+                    json,
+                )
                 }
                 result to json
             }
@@ -152,6 +160,7 @@ class MonitorActionController(
     }
 
     private fun controlSnapshotJson(
+        config: PairingConfig,
         result: MonitorControlResult,
     ): String? {
         val root = result.snapshot ?: return null
@@ -160,7 +169,11 @@ class MonitorActionController(
             endpointUrl = result.endpointUrl,
             transportKind = result.transportKind,
         )
-        store.updateDirectEndpoints(snapshot.endpoints)
+        store.updateDirectEndpoints(
+            config.desktopId,
+            config.deviceId,
+            snapshot.endpoints,
+        )
         return StatusCodec.snapshot(snapshot)
     }
 

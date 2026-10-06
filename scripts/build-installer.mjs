@@ -1,6 +1,7 @@
 import fs from 'node:fs';
 import { spawn, spawnSync } from 'node:child_process';
 import path from 'node:path';
+import { toolchainEnv } from './toolchain-env.mjs';
 
 if (process.platform !== 'win32') {
   throw new Error('The NSIS installer build is configured for Windows.');
@@ -45,7 +46,7 @@ function runBundle() {
     if (certificateThumbprint) cliArgs.push('--config', signingConfig);
     const child = spawn(process.execPath, cliArgs, {
       cwd: process.cwd(),
-      env: process.env,
+      env: toolchainEnv(),
       windowsHide: true,
       stdio: ['inherit', 'pipe', 'pipe'],
     });
@@ -65,7 +66,7 @@ function runBundle() {
 function verifyAuthenticode(file) {
   const command = `$s=Get-AuthenticodeSignature -LiteralPath $env:CHATX_SIGNED_FILE; if($s.Status -ne 'Valid'){Write-Error ('Invalid Authenticode signature: '+$s.Status+' '+$s.StatusMessage); exit 1}; Write-Output $s.SignerCertificate.Thumbprint`;
   const result = spawnSync('powershell.exe', ['-NoLogo', '-NoProfile', '-NonInteractive', '-Command', command], {
-    env: { ...process.env, CHATX_SIGNED_FILE: file },
+    env: toolchainEnv({ CHATX_SIGNED_FILE: file }),
     encoding: 'utf8',
     windowsHide: true,
   });

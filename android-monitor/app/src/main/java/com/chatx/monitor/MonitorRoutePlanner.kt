@@ -16,7 +16,9 @@ object MonitorRoutePlanner {
         identity: PairingConfig,
         routes: PairingConfig = identity,
     ): List<MonitorRouteCandidate> = buildList {
-        routes.directEndpoints.forEach { endpoint ->
+        routes.directEndpoints
+            .filter(MonitorEndpoint::isSupportedDirectRoute)
+            .forEach { endpoint ->
             val snapshotUrl = directHttpsUrl(
                 endpoint.url,
                 "/v1/monitor/snapshot",
@@ -100,9 +102,8 @@ object MonitorRoutePlanner {
     ): Int {
         val directRank = when (candidate.kind) {
             "lan" -> 0
-            "tailscale" -> 1
-            "ipv6" -> 2
-            else -> 3
+            "ipv6" -> 1
+            else -> 2
         }
         return when (policy) {
             RoutePolicy.AUTO ->

@@ -351,8 +351,16 @@ pub(super) fn monitor_info_payload(app: &tauri::AppHandle, state: &AppState) -> 
         .and_then(|servers| servers.first())
         .map(|server| server.fingerprint_sha256.clone());
     let endpoints = if running {
-        let supports_ipv4 = servers.as_ref().is_some_and(|servers| servers.iter().any(|server| server.addr.is_ipv4()));
-        let supports_ipv6 = servers.as_ref().is_some_and(|servers| servers.iter().any(|server| server.addr.is_ipv6()));
+        let supports_ipv4 = servers
+            .as_ref()
+            .is_some_and(|servers| {
+                servers.iter().any(|server| server.addr.is_ipv4())
+            });
+        let supports_ipv6 = servers
+            .as_ref()
+            .is_some_and(|servers| {
+                servers.iter().any(|server| server.addr.is_ipv6())
+            });
         monitor_network::discover_monitor_endpoints(settings.monitor_port)
             .into_iter()
             .filter(|endpoint| {
@@ -449,6 +457,9 @@ pub(super) fn start_monitor_service(app: &tauri::AppHandle, state: &AppState) ->
     let snapshot_provider: monitor_server::SnapshotProvider = Arc::new(
         move |device_id, session_id, sequence| {
             let state = app_for_snapshot.state::<AppState>();
+            if !has_monitor_device(&app_for_snapshot, state.inner(), device_id) {
+                return Err("Monitor 设备已被撤销。".into());
+            }
             let plaintext = serde_json::to_vec(&monitor_status::payload(
                 &app_for_snapshot,
                 state.inner(),
@@ -478,25 +489,34 @@ pub(super) fn start_monitor_service(app: &tauri::AppHandle, state: &AppState) ->
                 continue;
             }
         };
-        match monitor_server::start_monitor_server(
-            bind,
-            identity.clone(),
-            desktop_id.clone(),
+        let handlers = monitor_server::MonitorHandlers::new(
             auth_checker.clone(),
             pair_handler.clone(),
             revoke_handler.clone(),
             control_handler.clone(),
             snapshot_provider.clone(),
+        );
+        match monitor_server::start_monitor_server(
+            bind,
+            identity.clone(),
+            desktop_id.clone(),
+            handlers,
         ) {
             Ok(server) => {
-                push_log(state, format!("手机 Monitor Server 已启动：WSS {}", server.addr));
+                push_log(
+                    state,
+                    format!("手机 Monitor Server 已启动：WSS {}", server.addr),
+                );
                 slot.push(server);
             }
             Err(error) => errors.push(error),
         }
     }
     if slot.is_empty() {
-        return Err(format!("Monitor Server 无法监听 IPv4/IPv6：{}", errors.join("；")));
+        return Err(format!(
+            "Monitor Server 无法监听 IPv4/IPv6：{}",
+            errors.join("；"),
+        ));
     }
     for error in errors {
         push_log(state, format!("Monitor Server 部分监听失败：{error}"));
@@ -524,14 +544,15 @@ pub(super) fn create_pairing(app: &tauri::AppHandle, state: &AppState) -> Result
         )
     };
 
-    let endpoints = monitor_network::discover_monitor_endpoints(settings.monitor_port)
-        .into_iter()
-        .filter(|endpoint| {
-            (endpoint.family == "ipv4" && supports_ipv4)
-                || (endpoint.family == "ipv6" && supports_ipv6)
-        })
-        .take(8)
-        .collect::<Vec<_>>();
+    let endpoints =
+        monitor_network::discover_monitor_endpoints(settings.monitor_port)
+            .into_iter()
+            .filter(|endpoint| {
+                (endpoint.family == "ipv4" && supports_ipv4)
+                    || (endpoint.family == "ipv6" && supports_ipv6)
+            })
+            .take(8)
+            .collect::<Vec<_>>();
     let direct_candidates = endpoints.into_iter().map(|endpoint| {
         let pair_url = endpoint.url.replace("/v1/ws/monitor", "/v1/ws/pair");
         json!({

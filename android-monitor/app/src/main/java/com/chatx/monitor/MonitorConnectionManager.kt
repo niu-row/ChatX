@@ -74,7 +74,11 @@ class MonitorConnectionManager(
     override fun close() = stop()
 
     fun updateRoutes(endpoints: List<MonitorEndpoint>) {
-        store.updateDirectEndpoints(endpoints)
+        store.updateDirectEndpoints(
+            config.desktopId,
+            config.deviceId,
+            endpoints,
+        )
     }
 
     fun reevaluatePolicy() {
@@ -156,7 +160,11 @@ class MonitorConnectionManager(
                 is FetchResult.Snapshot -> {
                     consecutiveFailures = 0
                     activeCandidate.set(candidate)
-                    store.setLastEndpoint(candidate.snapshotUrl)
+                    store.setLastEndpoint(
+                        config.desktopId,
+                        config.deviceId,
+                        candidate.snapshotUrl,
+                    )
                     listener.onTransportState(
                         MonitorTransportState(
                             phase = "connected",

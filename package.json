@@ -9,8 +9,8 @@
   },
   "scripts": {
     "desktop:prepare": "node scripts/prepare-desktop-bundle.mjs",
-    "desktop:dev": "npm run desktop:prepare && tauri dev",
-    "desktop:build": "npm run desktop:prepare && tauri build --no-bundle",
+    "desktop:dev": "npm run desktop:prepare && node scripts/tauri-tool.mjs dev",
+    "desktop:build": "npm run desktop:prepare && node scripts/tauri-tool.mjs build --no-bundle",
     "desktop:installer": "npm run desktop:prepare && node scripts/build-package.mjs",
     "desktop:release": "npm run desktop:prepare && node scripts/build-package.mjs --publish",
     "desktop:verify": "npm run desktop:prepare && npm run test:runtime",

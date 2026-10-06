@@ -24,6 +24,20 @@ class MonitorRoutePlannerTest {
                     host = "192.168.1.4",
                     url = "wss://192.168.1.4:18432/v1/ws/monitor",
                 ),
+                MonitorEndpoint(
+                    kind = "ipv6",
+                    family = "ipv6",
+                    interfaceName = "Ethernet",
+                    host = "2406:da1c:abcd::1",
+                    url = "wss://[2406:da1c:abcd::1]:18432/v1/ws/monitor",
+                ),
+                MonitorEndpoint(
+                    kind = "tailscale",
+                    family = "ipv4",
+                    interfaceName = "Tailscale",
+                    host = "100.64.1.2",
+                    url = "wss://100.64.1.2:18432/v1/ws/monitor",
+                ),
             ),
             relay = RelayEnrollment(
                 baseUrl = "https://relay.example.com",
@@ -35,9 +49,10 @@ class MonitorRoutePlannerTest {
     @Test
     fun candidatesDeriveDirectAndRelayUrlsFromOneSource() {
         val candidates = MonitorRoutePlanner.candidates(config())
-        assertEquals(2, candidates.size)
+        assertEquals(3, candidates.size)
+        assertTrue(candidates.none { it.kind == "tailscale" })
 
-        val direct = candidates.first { !it.relay }
+        val direct = candidates.first { it.kind == "lan" }
         assertTrue(
             direct.snapshotUrl.startsWith(
                 "https://192.168.1.4:18432/v1/monitor/snapshot?",
@@ -53,6 +68,13 @@ class MonitorRoutePlannerTest {
         assertTrue(
             direct.revokeUrl.startsWith(
                 "https://192.168.1.4:18432/v1/monitor/revoke?",
+            ),
+        )
+
+        val ipv6 = candidates.first { it.kind == "ipv6" }
+        assertTrue(
+            ipv6.snapshotUrl.startsWith(
+                "https://[2406:da1c:abcd::1]:18432/v1/monitor/snapshot?",
             ),
         )
 
@@ -72,7 +94,8 @@ class MonitorRoutePlannerTest {
     @Test
     fun orderingUsesTheSameSnapshotIdentityAcrossPolicies() {
         val candidates = MonitorRoutePlanner.candidates(config())
-        val direct = candidates.first { !it.relay }
+        val direct = candidates.first { it.kind == "lan" }
+        val ipv6 = candidates.first { it.kind == "ipv6" }
         val relay = candidates.first { it.relay }
 
         val auto = MonitorRoutePlanner.ordered(
@@ -82,6 +105,15 @@ class MonitorRoutePlannerTest {
             selector = null,
         )
         assertEquals(relay.snapshotUrl, auto.first().snapshotUrl)
+
+        val lanFirst = MonitorRoutePlanner.ordered(
+            values = candidates,
+            policy = RoutePolicy.LAN_FIRST,
+            lastEndpoint = ipv6.snapshotUrl,
+            selector = null,
+        )
+        assertEquals(direct.snapshotUrl, lanFirst.first().snapshotUrl)
+        assertEquals(ipv6.snapshotUrl, lanFirst[1].snapshotUrl)
 
         val relayFirst = MonitorRoutePlanner.ordered(
             values = candidates,

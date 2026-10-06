@@ -15,6 +15,7 @@ class MonitorService : Service() {
     private val timer = Executors.newSingleThreadScheduledExecutor()
     private lateinit var store: SecureStore
     private var connection: MonitorConnectionManager? = null
+    private var activePairing: PairingConfig? = null
 
     @Volatile
     private var transportReachable = false
@@ -57,6 +58,7 @@ class MonitorService : Service() {
         if (intent?.action == ACTION_RELOAD) {
             connection?.stop()
             connection = null
+            activePairing = null
             transportReachable = false
             startConnection()
             return START_STICKY
@@ -80,11 +82,13 @@ class MonitorService : Service() {
             )
             return
         }
+        activePairing = config
         connection = MonitorConnectionManager(
             applicationContext,
             config,
             object : MonitorConnectionManager.Listener {
                 override fun onTransportState(state: MonitorTransportState) {
+                    if (!isActivePairing(config)) return
                     when (state.phase) {
                         "connected" -> transportReachable = state.desktopOnline != false
                         "desktop_offline", "closed" -> transportReachable = false
@@ -94,12 +98,13 @@ class MonitorService : Service() {
                             transportReachable = false
                         }
                     }
-                    handleTransportState(state)
+                    handleTransportState(config, state)
                 }
 
                 override fun onSnapshot(snapshot: MonitorSnapshot) {
+                    if (!isActivePairing(config)) return
                     transportReachable = true
-                    handleSnapshot(snapshot)
+                    handleSnapshot(config, snapshot)
                 }
             },
         ).also { it.start() }
@@ -109,17 +114,29 @@ class MonitorService : Service() {
         store.setMonitorServiceRunning(false)
         connection?.stop()
         connection = null
+        activePairing = null
         timer.shutdownNow()
         super.onDestroy()
     }
 
     override fun onBind(intent: Intent?): IBinder? = null
 
-    private fun handleSnapshot(snapshot: MonitorSnapshot) {
+    private fun handleSnapshot(
+        config: PairingConfig,
+        snapshot: MonitorSnapshot,
+    ) {
+        if (!isActivePairing(config)) return
         if (isOlderThanStoredSnapshot(snapshot.serverTime)) return
         connection?.updateRoutes(snapshot.endpoints)
         val json = StatusCodec.snapshot(snapshot)
-        store.setLastSnapshotJson(json)
+        if (!store.setLastSnapshotJson(
+                config.desktopId,
+                config.deviceId,
+                json,
+            )
+        ) {
+            return
+        }
         NotificationCenter.updateForeground(
             this,
             StatusCodec.foregroundText(snapshot),
@@ -131,6 +148,13 @@ class MonitorService : Service() {
             store.continuousModeStartedAt(),
         ).forEach(::postAlert)
         broadcast(json)
+    }
+
+    private fun isActivePairing(config: PairingConfig): Boolean {
+        val active = activePairing ?: return false
+        return active.desktopId == config.desktopId &&
+            active.deviceId == config.deviceId &&
+            store.hasPairing(config.desktopId, config.deviceId)
     }
 
     private fun isOlderThanStoredSnapshot(serverTime: Long): Boolean {
@@ -145,15 +169,18 @@ class MonitorService : Service() {
         return previous > 0L && serverTime < previous
     }
 
-    private fun handleTransportState(state: MonitorTransportState) {
+    private fun handleTransportState(
+        config: PairingConfig,
+        state: MonitorTransportState,
+    ) {
+        if (!isActivePairing(config)) return
         if (state.phase == "degraded" && transportReachable) {
             return
         }
         val label = when (state.transportKind) {
             "lan" -> "LAN"
             "ipv6" -> "IPv6"
-            "tailscale" -> "Tailscale"
-            "relay" -> "ChatX Relay"
+            "relay" -> "服务器 Relay"
             else -> "HTTPS"
         }
         val text = when (state.phase) {
@@ -169,7 +196,14 @@ class MonitorService : Service() {
             state.phase in setOf("desktop_offline", "reconnecting", "degraded")
         ) {
             val json = StatusCodec.transportError(state)
-            store.setLastSnapshotJson(json)
+            if (!store.setLastSnapshotJson(
+                    config.desktopId,
+                    config.deviceId,
+                    json,
+                )
+            ) {
+                return
+            }
             broadcast(json)
             checkOfflineAlerts()
         }

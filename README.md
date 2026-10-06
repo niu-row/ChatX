@@ -113,13 +113,13 @@ connection.tunnelId
 
 桌面端“设置”页提供 Tunnel `Direct / System / Manual` 三种代理模式。`Direct` 会显式清除 ChatX 启动 `tunnel-client` 时继承到的 HTTP/SOCKS 代理变量；`System` 会在点击“应用网络设置”时读取当前 macOS / Windows 显式系统代理并固定为本次运行路由；`Manual` 支持 `http://`、`https://`、`socks5://`、`socks5h://` 的 `host:port` 地址。当前不保存代理账号密码，也不解析 PAC 自动代理脚本。
 
-手机公网 Monitor Relay 由 ChatX 的统一 `relay` 设置管理。macOS 会生成并维护 `~/Library/LaunchAgents/com.chatx.relay.plist`，使用 SSH reverse forwarding 把配置的公网端口映射到本机 Monitor HTTPS 端口。旧的 `state/monitor-relay.json` 仅用于一次迁移，不再作为独立配置源。Relay 状态会持续显示 LaunchAgent 进程、SSH 端口、公网 Monitor 端口和最近错误。
+手机公网 Monitor Relay 由 ChatX 的统一 `relay` 设置管理。Desktop 通过 HTTPS 注册并维持 WSS 会话，按设备上传端到端加密 Snapshot、路由受限控制与配对流量；Relay 只保存 token hash 和密文，不持有 Runtime Key。旧的 `state/monitor-relay.json` 仅用于一次迁移，不再作为独立配置源。Relay 健康状态独立于 Tunnel，并显示 Desktop 注册、WSS 会话和最近错误。
 
 Tunnel 健康状态同时参考本地 runtime `ready/health` 和 control-plane poll 日志。连续 poll 异常依次进入 `suspect` / `down`，恢复时通过 `poller recovered; polling operational` 回到 `healthy`，避免仅凭本地 `/readyz` 将上游断线误判成正常。
 
 ### Monitor 兼容矩阵
 
-当前 Desktop / Android Monitor 使用 pairing schema 3 和 wire protocol v1。Desktop 在 Relay Hello 中上报自身能力，Relay 仅向手机发布端到端实际可用的能力；Android 只有看到 `control.refresh_snapshot` / `control.reconnect_tunnel` 后才发送对应控制消息。缺少 capability 的旧 Desktop / Relay 会被视为 legacy：立即刷新回退到 HTTPS Snapshot，Tunnel 重连会明确报告版本不支持，而不是依赖超时猜测。
+当前 Desktop / Android Monitor 使用 pairing schema 3 和 wire protocol v1。Desktop 在 Relay Hello 中上报自身能力，Relay 仅向手机发布端到端实际可用的能力；Android 只有看到 `control.refresh_snapshot` / `control.reconnect_tunnel` 后才发送对应控制消息。设备远程撤销使用 `revoke.sync`：Relay 必须等 Desktop 本地撤销确认后才删除 Relay registry 并向手机返回成功。缺少 capability 的旧 Desktop / Relay 会被视为 legacy：立即刷新回退到 HTTPS Snapshot，Tunnel 重连或同步撤销会明确报告不支持，而不是依赖超时猜测。
 
 当前仓库版本组合为 Desktop 0.4.10、Android Monitor 0.3.5；两者版本号独立演进，兼容性以 pairing schema、wire protocol 和 capability 为准。
 
@@ -143,7 +143,7 @@ npm ci
 
 ChatX bundled Desktop Commander 会把 `HOME` / `USERPROFILE` 指向自己的隔离目录。通过 ChatX MCP 执行开发命令时，不能假设 `~/.cargo`、`~/.gradle` 或 `~/Library/Android` 属于真实登录用户；否则会误报 Rust、Java、Android SDK 或 Gradle 不存在。
 
-仓库统一使用 `scripts/dev-toolchain.mjs` 恢复 OS 账户真实主目录（Node `os.userInfo().homedir`），并从真实 HOME 定位 Cargo/Rustup、Android Studio JDK、Android SDK 和 Gradle 缓存。先运行：
+仓库统一使用 `scripts/toolchain-env.mjs` 恢复 OS 账户真实主目录（Node `os.userInfo().homedir`）；`dev-toolchain.mjs`、Tauri dev/build、installer/release 都复用这一环境，并从真实 HOME 定位 Cargo/Rustup、Android Studio JDK、Android SDK 和 Gradle 缓存。先运行：
 
 ```bash
 npm run dev:doctor
@@ -165,7 +165,7 @@ npm run test:local-full
 
 Tunnel 健康不再只看本地 `/healthz` / `readyz`，还会从当前 runtime 的 control-plane 日志持续读取 poll 成功、失败与恢复事件。状态分为 `healthy / suspect / down`，并独立记录连续 Control Plane 失败次数与实际 proxy source。
 
-手机公网 Relay 的唯一配置源是 `settings.json` 中的 `relay`。旧 `state/monitor-relay.json` 仅作为一次性迁移输入。macOS 下 ChatX 会管理 `~/Library/LaunchAgents/com.chatx.relay.plist` 与 state 目录中的 `relay-run.sh`，使用严格 SSH host-key 校验、5 秒 keepalive，并在重连前仅清理由 `sshd` 占用的同一远端反向转发端口，降低 stale reverse-forward 导致的重连循环。
+手机公网 Relay 的唯一配置源是 `settings.json` 中的 `relay`。旧 `state/monitor-relay.json` 仅作为一次性迁移输入。当前 Relay 使用 HTTPS/WSS：Desktop 注册后上传每设备 E2EE Snapshot，并通过长连接处理配对、受限控制和同步撤销；Relay 与 Tunnel 生命周期互相独立。Android release 只接受 HTTPS/WSS Relay URL，避免与系统 cleartext policy 冲突。
 
 静态检查：
 
@@ -179,7 +179,7 @@ npm test
 npm run desktop:verify
 ```
 
-`desktop:verify` 会先验证/解包锁定的 Desktop Commander MCPB，然后实际启动 bundled Desktop Commander，执行 MCP `initialize/tools/list`、Runtime Key 子进程隔离检查，以及文件写入、读取和 ripgrep 搜索 smoke test。它完全在本机运行，不依赖 GitHub Actions。
+`desktop:verify` 会先验证/解包锁定的 Desktop Commander MCPB，然后实际启动 bundled Desktop Commander，执行 MCP `initialize/tools/list`、Runtime Key 子进程隔离检查，以及文件写入、读取和 ripgrep 搜索 smoke test。所有联网运行资源下载都按 runtime lock 的 SHA-256（有大小时同时按大小）复核，并缓存在真实用户 `~/.chatx-cache/runtime/`；命中缓存仍重新校验，损坏缓存会自动丢弃。它完全在本机运行，不依赖 GitHub Actions。
 
 如果已经下载官方 MCPB，或构建环境不应重复访问网络，可以指定本地文件；文件仍必须与 `runtime-lock.json` 中的大小和 SHA-256 完全匹配：
 

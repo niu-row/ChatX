@@ -106,15 +106,18 @@ class PairingManager {
             )
         }
 
-        val completed = latch.await(12, TimeUnit.SECONDS)
-        scheduler.shutdownNow()
-        synchronized(sockets) {
-            sockets.forEach { socket -> socket.cancel() }
-        }
-        synchronized(clients) {
-            clients.forEach { client ->
-                client.dispatcher.executorService.shutdown()
-                client.connectionPool.evictAll()
+        val completed = try {
+            latch.await(12, TimeUnit.SECONDS)
+        } finally {
+            scheduler.shutdownNow()
+            synchronized(sockets) {
+                sockets.forEach { socket -> socket.cancel() }
+            }
+            synchronized(clients) {
+                clients.forEach { client ->
+                    client.dispatcher.executorService.shutdown()
+                    client.connectionPool.evictAll()
+                }
             }
         }
 

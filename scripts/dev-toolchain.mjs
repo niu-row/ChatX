@@ -1,14 +1,16 @@
 import fs from 'node:fs';
-import os from 'node:os';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
+import {
+  inheritedHome,
+  isWindows,
+  realHome,
+  toolchainEnv,
+} from './toolchain-env.mjs';
 
 const scriptDir = path.dirname(fileURLToPath(import.meta.url));
 const root = path.resolve(scriptDir, '..');
-const realHome = process.env.CHATX_REAL_HOME?.trim() || os.userInfo().homedir;
-const inheritedHome = process.env.HOME || process.env.USERPROFILE || '';
-const isWindows = process.platform === 'win32';
 
 function exists(file) {
   try { return fs.existsSync(file); } catch { return false; }
@@ -114,15 +116,7 @@ function run(command, args, options = {}) {
 }
 
 function baseEnv(extra = {}) {
-  const cargoDir = path.join(realHome, '.cargo', 'bin');
-  const sep = path.delimiter;
-  return {
-    ...process.env,
-    HOME: realHome,
-    USERPROFILE: realHome,
-    PATH: [cargoDir, process.env.PATH || ''].filter(Boolean).join(sep),
-    ...extra,
-  };
+  return toolchainEnv(extra);
 }
 function ensureGradle(version) {
   let gradle = cachedGradle(version);
@@ -167,7 +161,7 @@ function printDoctor() {
 function runCargoManifest(mode, manifestPath) {
   const cargo = rustTool('cargo');
   if (!cargo) throw new Error(`Rust cargo not found under real home: ${realHome}`);
-  run(cargo, [mode, '--manifest-path', manifestPath], { env: baseEnv() });
+  run(cargo, [mode, '--locked', '--manifest-path', manifestPath], { env: baseEnv() });
 }
 
 function runRust(mode) {

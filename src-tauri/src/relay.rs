@@ -46,19 +46,13 @@ fn snapshot_session_id() -> String {
     format!("s_{}_{}", std::process::id(), now_ms())
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct RelaySettings {
     #[serde(default)]
     pub enabled: bool,
     #[serde(default)]
     pub base_url: String,
-}
-
-impl Default for RelaySettings {
-    fn default() -> Self {
-        Self { enabled: false, base_url: String::new() }
-    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -69,7 +63,7 @@ pub struct RelayCredentials {
     pub desktop_token: String,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Default, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RelayStatus {
     pub enabled: bool,
@@ -82,23 +76,6 @@ pub struct RelayStatus {
     pub last_heartbeat_at: Option<u64>,
     pub reconnect_attempt: u32,
     pub last_error: String,
-}
-
-impl Default for RelayStatus {
-    fn default() -> Self {
-        Self {
-            enabled: false,
-            configured: false,
-            connected: false,
-            connecting: false,
-            desktop_id: None,
-            session_id: None,
-            connected_at: None,
-            last_heartbeat_at: None,
-            reconnect_attempt: 0,
-            last_error: String::new(),
-        }
-    }
 }
 
 #[derive(Debug, Clone)]
@@ -115,6 +92,30 @@ pub type RevokeHandler = Arc<dyn Fn(&str) -> Result<(), String> + Send + Sync>;
 pub type ControlHandler = Arc<
     dyn Fn(&str, EncryptedControlPayload) -> Result<EncryptedControlPayload, String> + Send + Sync
 >;
+
+#[derive(Clone)]
+pub struct RelayHandlers {
+    pub snapshot_provider: SnapshotProvider,
+    pub pairing_handler: PairingHandler,
+    pub revoke_handler: RevokeHandler,
+    pub control_handler: ControlHandler,
+}
+
+impl RelayHandlers {
+    pub fn new(
+        snapshot_provider: SnapshotProvider,
+        pairing_handler: PairingHandler,
+        revoke_handler: RevokeHandler,
+        control_handler: ControlHandler,
+    ) -> Self {
+        Self {
+            snapshot_provider,
+            pairing_handler,
+            revoke_handler,
+            control_handler,
+        }
+    }
+}
 
 pub struct RelayClientHandle {
     stop: Arc<AtomicBool>,
@@ -336,10 +337,7 @@ pub fn start_client(
     credentials: RelayCredentials,
     master_key: [u8; 32],
     status: Arc<Mutex<RelayStatus>>,
-    snapshot_provider: SnapshotProvider,
-    pairing_handler: PairingHandler,
-    revoke_handler: RevokeHandler,
-    control_handler: ControlHandler,
+    handlers: RelayHandlers,
 ) -> Result<RelayClientHandle, String> {
     validate(&settings)?;
     let stop = Arc::new(AtomicBool::new(false));
@@ -372,10 +370,7 @@ pub fn start_client(
                 credentials,
                 master_key,
                 thread_status,
-                snapshot_provider,
-                pairing_handler,
-                revoke_handler,
-                control_handler,
+                handlers,
                 thread_stop,
             ).await;
         });
@@ -392,10 +387,7 @@ async fn relay_loop(
     credentials: RelayCredentials,
     master_key: [u8; 32],
     status: Arc<Mutex<RelayStatus>>,
-    snapshot_provider: SnapshotProvider,
-    pairing_handler: PairingHandler,
-    revoke_handler: RevokeHandler,
-    control_handler: ControlHandler,
+    handlers: RelayHandlers,
     stop: Arc<AtomicBool>,
 ) {
     let uploader = tokio::spawn(snapshot_http_loop(
@@ -403,7 +395,7 @@ async fn relay_loop(
         credentials.clone(),
         master_key,
         status.clone(),
-        snapshot_provider,
+        handlers.snapshot_provider.clone(),
         stop.clone(),
     ));
 
@@ -413,9 +405,7 @@ async fn relay_loop(
             &settings,
             &credentials,
             status.clone(),
-            pairing_handler.clone(),
-            revoke_handler.clone(),
-            control_handler.clone(),
+            handlers.clone(),
             stop.clone(),
         ).await;
 
@@ -600,9 +590,7 @@ async fn relay_session(
     settings: &RelaySettings,
     credentials: &RelayCredentials,
     status: Arc<Mutex<RelayStatus>>,
-    pairing_handler: PairingHandler,
-    revoke_handler: RevokeHandler,
-    control_handler: ControlHandler,
+    handlers: RelayHandlers,
     stop: Arc<AtomicBool>,
 ) -> Result<(), String> {
     if let Ok(mut value) = status.lock() {
@@ -687,7 +675,7 @@ async fn relay_session(
                                 connection_id,
                                 payload,
                             }) => {
-                                let result = pairing_handler(PairingWsMessage::Pair {
+                                let result = (handlers.pairing_handler)(PairingWsMessage::Pair {
                                     pairing_id: pairing_id.clone(),
                                     payload,
                                 });
@@ -711,7 +699,7 @@ async fn relay_session(
                                 send_desktop_message(&mut socket, &response).await?;
                             }
                             Ok(DesktopServerMessage::DeviceRevoked { device_id }) => {
-                                if let Err(error) = revoke_handler(&device_id) {
+                                if let Err(error) = (handlers.revoke_handler)(&device_id) {
                                     set_error(
                                         &status,
                                         format!(
@@ -720,9 +708,32 @@ async fn relay_session(
                                     );
                                 }
                             }
+                            Ok(DesktopServerMessage::DeviceRevoke {
+                                device_id,
+                                request_id,
+                            }) => {
+                                let response = match (handlers.revoke_handler)(&device_id) {
+                                    Ok(()) => DesktopWsMessage::RevokeResult {
+                                        device_id,
+                                        request_id,
+                                    },
+                                    Err(error) => {
+                                        set_error(
+                                            &status,
+                                            format!("Monitor 设备撤销失败：{error}"),
+                                        );
+                                        DesktopWsMessage::RevokeError {
+                                            device_id,
+                                            request_id,
+                                            message: "desktop revoke failed".into(),
+                                        }
+                                    }
+                                };
+                                send_desktop_message(&mut socket, &response).await?;
+                            }
                             Ok(DesktopServerMessage::DeviceControl { device_id, request }) => {
                                 let request_id = request.request_id.clone();
-                                let response = match control_handler(&device_id, request) {
+                                let response = match (handlers.control_handler)(&device_id, request) {
                                     Ok(response) => DesktopWsMessage::ControlResponse {
                                         device_id,
                                         response,

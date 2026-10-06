@@ -2,7 +2,7 @@ use if_addrs::get_if_addrs;
 use serde::Serialize;
 use std::{
     collections::BTreeSet,
-    net::{IpAddr, Ipv4Addr, Ipv6Addr},
+    net::{IpAddr, Ipv6Addr},
 };
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
@@ -35,8 +35,14 @@ pub fn discover_monitor_endpoints(port: u16) -> Vec<MonitorEndpoint> {
             continue;
         }
         let (family, url) = match ip {
-            IpAddr::V4(_) => ("ipv4", format!("wss://{host}:{port}/v1/ws/monitor")),
-            IpAddr::V6(_) => ("ipv6", format!("wss://[{host}]:{port}/v1/ws/monitor")),
+            IpAddr::V4(_) => (
+                "ipv4",
+                format!("wss://{host}:{port}/v1/ws/monitor"),
+            ),
+            IpAddr::V6(_) => (
+                "ipv6",
+                format!("wss://[{host}]:{port}/v1/ws/monitor"),
+            ),
         };
         endpoints.push(MonitorEndpoint {
             kind,
@@ -58,30 +64,17 @@ pub fn discover_monitor_endpoints(port: u16) -> Vec<MonitorEndpoint> {
 fn endpoint_rank(kind: &str) -> u8 {
     match kind {
         "lan" => 0,
-        "tailscale" => 1,
-        "ipv6" => 2,
-        _ => 3,
+        "ipv6" => 1,
+        _ => 2,
     }
 }
 
 fn classify_ip(ip: IpAddr) -> Option<&'static str> {
     match ip {
-        IpAddr::V4(ip) if is_tailscale_v4(ip) => Some("tailscale"),
         IpAddr::V4(ip) if ip.is_private() => Some("lan"),
-        IpAddr::V6(ip) if is_tailscale_v6(ip) => Some("tailscale"),
         IpAddr::V6(ip) if is_global_v6(ip) => Some("ipv6"),
         _ => None,
     }
-}
-
-fn is_tailscale_v4(ip: Ipv4Addr) -> bool {
-    let octets = ip.octets();
-    octets[0] == 100 && (64..=127).contains(&octets[1])
-}
-
-fn is_tailscale_v6(ip: Ipv6Addr) -> bool {
-    let segments = ip.segments();
-    segments[0] == 0xfd7a && segments[1] == 0x115c && segments[2] == 0xa1e0
 }
 
 fn is_global_v6(ip: Ipv6Addr) -> bool {
@@ -96,26 +89,45 @@ fn is_global_v6(ip: Ipv6Addr) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::str::FromStr;
+    use std::{
+        net::Ipv4Addr,
+        str::FromStr,
+    };
 
     #[test]
-    fn classifies_lan_and_tailscale_ipv4() {
-        assert_eq!(classify_ip(IpAddr::V4(Ipv4Addr::new(192, 168, 1, 10))), Some("lan"));
-        assert_eq!(classify_ip(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2))), Some("lan"));
-        assert_eq!(classify_ip(IpAddr::V4(Ipv4Addr::new(172, 16, 0, 1))), Some("lan"));
-        assert_eq!(classify_ip(IpAddr::V4(Ipv4Addr::new(100, 64, 1, 2))), Some("tailscale"));
-        assert_eq!(classify_ip(IpAddr::V4(Ipv4Addr::new(100, 127, 255, 254))), Some("tailscale"));
-        assert_eq!(classify_ip(IpAddr::V4(Ipv4Addr::new(100, 128, 0, 1))), None);
+    fn keeps_private_lan_but_rejects_tailscale_ipv4() {
+        assert_eq!(
+            classify_ip(IpAddr::V4(Ipv4Addr::new(192, 168, 1, 10))),
+            Some("lan"),
+        );
+        assert_eq!(
+            classify_ip(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2))),
+            Some("lan"),
+        );
+        assert_eq!(
+            classify_ip(IpAddr::V4(Ipv4Addr::new(172, 16, 0, 1))),
+            Some("lan"),
+        );
+        assert_eq!(
+            classify_ip(IpAddr::V4(Ipv4Addr::new(100, 64, 1, 2))),
+            None,
+        );
     }
 
     #[test]
-    fn classifies_tailscale_and_public_ipv6() {
-        let tailscale = Ipv6Addr::from_str("fd7a:115c:a1e0::1234").unwrap();
-        let public = Ipv6Addr::from_str("2406:da1c:abcd::1").unwrap();
+    fn keeps_global_ipv6_but_rejects_tailscale_and_local_ipv6() {
+        let tailscale =
+            Ipv6Addr::from_str("fd7a:115c:a1e0::1234").unwrap();
+        let public =
+            Ipv6Addr::from_str("2406:da1c:abcd::1").unwrap();
         let ula = Ipv6Addr::from_str("fd00::1").unwrap();
         let link_local = Ipv6Addr::from_str("fe80::1").unwrap();
-        assert_eq!(classify_ip(IpAddr::V6(tailscale)), Some("tailscale"));
-        assert_eq!(classify_ip(IpAddr::V6(public)), Some("ipv6"));
+
+        assert_eq!(classify_ip(IpAddr::V6(tailscale)), None);
+        assert_eq!(
+            classify_ip(IpAddr::V6(public)),
+            Some("ipv6"),
+        );
         assert_eq!(classify_ip(IpAddr::V6(ula)), None);
         assert_eq!(classify_ip(IpAddr::V6(link_local)), None);
     }

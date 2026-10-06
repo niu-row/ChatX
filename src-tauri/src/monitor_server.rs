@@ -84,6 +84,33 @@ pub type ControlHandler = Arc<
 pub type SnapshotProvider =
     Arc<dyn Fn(&str, &str, u64) -> Result<EncryptedSnapshot, String> + Send + Sync>;
 
+#[derive(Clone)]
+pub struct MonitorHandlers {
+    auth_checker: AuthChecker,
+    pair_handler: PairHandler,
+    revoke_handler: RevokeHandler,
+    control_handler: ControlHandler,
+    snapshot_provider: SnapshotProvider,
+}
+
+impl MonitorHandlers {
+    pub fn new(
+        auth_checker: AuthChecker,
+        pair_handler: PairHandler,
+        revoke_handler: RevokeHandler,
+        control_handler: ControlHandler,
+        snapshot_provider: SnapshotProvider,
+    ) -> Self {
+        Self {
+            auth_checker,
+            pair_handler,
+            revoke_handler,
+            control_handler,
+            snapshot_provider,
+        }
+    }
+}
+
 struct ConnectionGuard(Arc<AtomicUsize>);
 
 impl Drop for ConnectionGuard {
@@ -182,22 +209,14 @@ pub fn start_monitor_server(
     bind: SocketAddr,
     identity: MonitorTlsIdentity,
     desktop_id: String,
-    auth_checker: AuthChecker,
-    pair_handler: PairHandler,
-    revoke_handler: RevokeHandler,
-    control_handler: ControlHandler,
-    snapshot_provider: SnapshotProvider,
+    handlers: MonitorHandlers,
 ) -> Result<MonitorServerHandle, String> {
     let listener = bind_monitor_listener(bind)?;
     start_monitor_server_with_listener(
         listener,
         identity,
         desktop_id,
-        auth_checker,
-        pair_handler,
-        revoke_handler,
-        control_handler,
-        snapshot_provider,
+        handlers,
     )
 }
 
@@ -224,11 +243,7 @@ fn start_monitor_server_with_listener(
     listener: TcpListener,
     identity: MonitorTlsIdentity,
     desktop_id: String,
-    auth_checker: AuthChecker,
-    pair_handler: PairHandler,
-    revoke_handler: RevokeHandler,
-    control_handler: ControlHandler,
-    snapshot_provider: SnapshotProvider,
+    handlers: MonitorHandlers,
 ) -> Result<MonitorServerHandle, String> {
     let addr = listener
         .local_addr()
@@ -252,11 +267,7 @@ fn start_monitor_server_with_listener(
                     }
                     let config = tls_config.clone();
                     let desktop_id = desktop_id.clone();
-                    let auth = auth_checker.clone();
-                    let pairing = pair_handler.clone();
-                    let revoke = revoke_handler.clone();
-                    let control = control_handler.clone();
-                    let snapshots = snapshot_provider.clone();
+                    let handlers = handlers.clone();
                     let connection_count = active_connections.clone();
                     thread::spawn(move || {
                         let _guard = ConnectionGuard(connection_count);
@@ -264,11 +275,7 @@ fn start_monitor_server_with_listener(
                             stream,
                             config,
                             &desktop_id,
-                            auth,
-                            pairing,
-                            revoke,
-                            control,
-                            snapshots,
+                            handlers,
                         ) {
                             eprintln!("ChatX Monitor WSS connection error: {error}");
                         }
@@ -491,15 +498,12 @@ fn handle_https_request<S: Write>(
     }
 }
 
+#[allow(clippy::result_large_err)]
 fn handle_connection(
     stream: TcpStream,
     config: Arc<ServerConfig>,
     desktop_id: &str,
-    auth_checker: AuthChecker,
-    pair_handler: PairHandler,
-    revoke_handler: RevokeHandler,
-    control_handler: ControlHandler,
-    snapshot_provider: SnapshotProvider,
+    handlers: MonitorHandlers,
 ) -> Result<(), String> {
     stream
         .set_nonblocking(false)
@@ -517,9 +521,9 @@ fn handle_connection(
             &mut tls,
             desktop_id,
             &head,
-            &auth_checker,
-            &revoke_handler,
-            &snapshot_provider,
+            &handlers.auth_checker,
+            &handlers.revoke_handler,
+            &handlers.snapshot_provider,
         );
         tls.conn.send_close_notify();
         let _ = tls.flush();
@@ -544,13 +548,15 @@ fn handle_connection(
                 &mut websocket,
                 desktop_id,
                 &request,
-                auth_checker,
-                revoke_handler,
-                control_handler,
-                snapshot_provider,
+                handlers.auth_checker,
+                handlers.revoke_handler,
+                handlers.control_handler,
+                handlers.snapshot_provider,
             )
         }
-        "/v1/ws/pair" => handle_pair_socket(&mut websocket, pair_handler),
+        "/v1/ws/pair" => {
+            handle_pair_socket(&mut websocket, handlers.pair_handler)
+        }
         _ => {
             let _ = send_json(
                 &mut websocket,
@@ -641,6 +647,16 @@ fn handle_monitor_socket<S: Read + Write>(
         if last_activity.elapsed() > IDLE_TIMEOUT {
             let _ = websocket.close(None);
             return Err("Monitor WSS heartbeat timeout。".into());
+        }
+        if !auth_checker(device_id, token) {
+            let _ = send_json(
+                websocket,
+                &DeviceServerMessage::Error {
+                    message: "device revoked".into(),
+                },
+            );
+            let _ = websocket.close(None);
+            return Err("Monitor WSS 设备授权已撤销。".into());
         }
 
         if last_snapshot.elapsed() >= SNAPSHOT_INTERVAL {
@@ -984,15 +1000,18 @@ mod tests {
                 ciphertext: "ciphertext".into(),
             })
         });
-        let server = start_monitor_server(
-            "127.0.0.1:0".parse().unwrap(),
-            identity.clone(),
-            desktop_id.clone(),
+        let handlers = MonitorHandlers::new(
             auth,
             pairing,
             revoke,
             control,
             snapshots,
+        );
+        let server = start_monitor_server(
+            "127.0.0.1:0".parse().unwrap(),
+            identity.clone(),
+            desktop_id.clone(),
+            handlers,
         ).unwrap();
 
         let mut roots = RootCertStore::empty();
@@ -1096,15 +1115,18 @@ mod tests {
                 ciphertext: "ciphertext".into(),
             })
         });
-        let server = start_monitor_server(
-            "127.0.0.1:0".parse().unwrap(),
-            identity.clone(),
-            desktop_id.clone(),
+        let handlers = MonitorHandlers::new(
             auth,
             pairing,
             revoke,
             control,
             snapshots,
+        );
+        let server = start_monitor_server(
+            "127.0.0.1:0".parse().unwrap(),
+            identity.clone(),
+            desktop_id.clone(),
+            handlers,
         ).unwrap();
 
         let mut roots = RootCertStore::empty();
@@ -1193,6 +1215,110 @@ mod tests {
                 if revoked_id == &device_id
         ));
         assert!(revoked.load(Ordering::SeqCst));
+
+        drop(websocket);
+        drop(server);
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn direct_wss_revalidates_auth_after_handshake() {
+        let dir = temp_dir("monitor-wss-revoke");
+        let identity = ensure_tls_identity(&dir).unwrap();
+        let desktop_id = "d_0123456789abcdef0123456789abcdef".to_string();
+        let device_id = "dev_0123456789abcdef".to_string();
+        let token = generate_monitor_token().unwrap();
+        let allowed = Arc::new(AtomicBool::new(true));
+        let allowed_for_auth = allowed.clone();
+        let auth_token = token.clone();
+        let auth_device = device_id.clone();
+        let auth: AuthChecker = Arc::new(move |candidate_device, candidate_token| {
+            allowed_for_auth.load(Ordering::SeqCst)
+                && candidate_device == auth_device
+                && candidate_token == auth_token
+        });
+        let pairing: PairHandler =
+            Arc::new(|_| Err("pairing disabled in test".into()));
+        let revoke: RevokeHandler = Arc::new(|_| Ok(()));
+        let control: ControlHandler =
+            Arc::new(|_, _| Err("control disabled in test".into()));
+        let snapshots: SnapshotProvider =
+            Arc::new(|_, session_id, sequence| {
+                Ok(EncryptedSnapshot {
+                    session_id: session_id.to_string(),
+                    sequence,
+                    generated_at: 123,
+                    nonce: "nonce".into(),
+                    ciphertext: "ciphertext".into(),
+                })
+            });
+        let handlers = MonitorHandlers::new(
+            auth,
+            pairing,
+            revoke,
+            control,
+            snapshots,
+        );
+        let server = start_monitor_server(
+            "127.0.0.1:0".parse().unwrap(),
+            identity.clone(),
+            desktop_id.clone(),
+            handlers,
+        ).unwrap();
+
+        let mut roots = RootCertStore::empty();
+        roots.add(CertificateDer::from(identity.certificate_der.clone())).unwrap();
+        let provider = rustls::crypto::ring::default_provider();
+        let config = ClientConfig::builder_with_provider(Arc::new(provider))
+            .with_safe_default_protocol_versions().unwrap()
+            .with_root_certificates(roots)
+            .with_no_client_auth();
+        let connection = ClientConnection::new(
+            Arc::new(config),
+            ServerName::try_from("localhost").unwrap().to_owned(),
+        ).unwrap();
+        let stream = TcpStream::connect(server.addr).unwrap();
+        let tls = StreamOwned::new(connection, stream);
+        let request = tungstenite::http::Request::builder()
+            .uri(format!(
+                "wss://localhost:{}/v1/ws/monitor?desktopId={desktop_id}&deviceId={device_id}",
+                server.addr.port(),
+            ))
+            .header("Host", format!("localhost:{}", server.addr.port()))
+            .header("Authorization", format!("Bearer {token}"))
+            .header("Connection", "Upgrade")
+            .header("Upgrade", "websocket")
+            .header("Sec-WebSocket-Version", "13")
+            .header("Sec-WebSocket-Key", "dGhlIHNhbXBsZSBub25jZQ==")
+            .body(())
+            .unwrap();
+        let (mut websocket, _) = tungstenite::client(request, tls).unwrap();
+        websocket.send(Message::Text(
+            serde_json::to_string(&DeviceWsMessage::Hello {
+                protocol_version: PROTOCOL_VERSION,
+                desktop_id,
+                device_id,
+            }).unwrap().into(),
+        )).unwrap();
+        assert!(matches!(
+            websocket.read().unwrap(),
+            Message::Text(_)
+        ));
+        assert!(matches!(
+            websocket.read().unwrap(),
+            Message::Text(_)
+        ));
+
+        allowed.store(false, Ordering::SeqCst);
+        let message = websocket.read().unwrap();
+        let Message::Text(text) = message else {
+            panic!("expected revoked authorization error");
+        };
+        assert!(matches!(
+            serde_json::from_str::<DeviceServerMessage>(&text).unwrap(),
+            DeviceServerMessage::Error { message }
+                if message == "device revoked"
+        ));
 
         drop(websocket);
         drop(server);

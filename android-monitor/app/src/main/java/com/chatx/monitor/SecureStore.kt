@@ -13,7 +13,7 @@ import javax.crypto.spec.GCMParameterSpec
 class SecureStore(context: Context) {
     private val prefs = context.getSharedPreferences("chatx_monitor", Context.MODE_PRIVATE)
 
-    fun savePairing(config: PairingConfig) {
+    fun savePairing(config: PairingConfig) = synchronized(PAIRING_LOCK) {
         val cipher = Cipher.getInstance(TRANSFORMATION)
         cipher.init(Cipher.ENCRYPT_MODE, getOrCreateKey())
         val encrypted = cipher.doFinal(config.toJson().toByteArray(Charsets.UTF_8))
@@ -22,10 +22,10 @@ class SecureStore(context: Context) {
             .putString("pairing_data", Base64.encodeToString(encrypted, Base64.NO_WRAP))
             .apply()
     }
-    fun loadPairing(): PairingConfig? {
-        val iv = prefs.getString("pairing_iv", null) ?: return null
-        val data = prefs.getString("pairing_data", null) ?: return null
-        return runCatching {
+    fun loadPairing(): PairingConfig? = synchronized(PAIRING_LOCK) {
+        val iv = prefs.getString("pairing_iv", null) ?: return@synchronized null
+        val data = prefs.getString("pairing_data", null) ?: return@synchronized null
+        runCatching {
             val cipher = Cipher.getInstance(TRANSFORMATION)
             cipher.init(
                 Cipher.DECRYPT_MODE,
@@ -37,7 +37,16 @@ class SecureStore(context: Context) {
         }.getOrNull()
     }
 
-    fun clearPairing() {
+    fun hasPairing(
+        expectedDesktopId: String,
+        expectedDeviceId: String,
+    ): Boolean = synchronized(PAIRING_LOCK) {
+        val current = loadPairing() ?: return@synchronized false
+        current.desktopId == expectedDesktopId &&
+            current.deviceId == expectedDeviceId
+    }
+
+    fun clearPairing() = synchronized(PAIRING_LOCK) {
         prefs.edit()
             .remove("pairing_iv")
             .remove("pairing_data")
@@ -50,22 +59,51 @@ class SecureStore(context: Context) {
             .apply()
     }
 
-    fun updateDirectEndpoints(endpoints: List<MonitorEndpoint>) {
-        if (endpoints.isEmpty()) return
-        val current = loadPairing() ?: return
+    fun updateDirectEndpoints(
+        expectedDesktopId: String,
+        expectedDeviceId: String,
+        endpoints: List<MonitorEndpoint>,
+    ): Boolean = synchronized(PAIRING_LOCK) {
+        if (endpoints.isEmpty()) return@synchronized false
+        val current = loadPairing() ?: return@synchronized false
+        if (
+            current.desktopId != expectedDesktopId ||
+            current.deviceId != expectedDeviceId
+        ) {
+            return@synchronized false
+        }
         val normalized = endpoints
             .filter {
-                it.url.startsWith("wss://") &&
+                it.isSupportedDirectRoute() &&
                     it.url.endsWith("/v1/ws/monitor")
             }
             .distinctBy { it.url }
-        if (normalized.isEmpty() || normalized == current.directEndpoints) return
+        if (
+            normalized.isEmpty() ||
+            normalized == current.directEndpoints
+        ) {
+            return@synchronized false
+        }
         savePairing(current.copy(directEndpoints = normalized))
+        true
     }
 
     fun getLastEndpoint(): String? = prefs.getString("last_endpoint", null)
-    fun setLastEndpoint(url: String) {
+
+    fun setLastEndpoint(
+        expectedDesktopId: String,
+        expectedDeviceId: String,
+        url: String,
+    ): Boolean = synchronized(PAIRING_LOCK) {
+        val current = loadPairing() ?: return@synchronized false
+        if (
+            current.desktopId != expectedDesktopId ||
+            current.deviceId != expectedDeviceId
+        ) {
+            return@synchronized false
+        }
         prefs.edit().putString("last_endpoint", url).apply()
+        true
     }
 
     fun getRoutePolicy(): RoutePolicy = runCatching {
@@ -121,8 +159,20 @@ class SecureStore(context: Context) {
         prefs.edit().putString("alert_thresholds", normalized).apply()
     }
 
-    fun setLastSnapshotJson(value: String) {
+    fun setLastSnapshotJson(
+        expectedDesktopId: String,
+        expectedDeviceId: String,
+        value: String,
+    ): Boolean = synchronized(PAIRING_LOCK) {
+        val current = loadPairing() ?: return@synchronized false
+        if (
+            current.desktopId != expectedDesktopId ||
+            current.deviceId != expectedDeviceId
+        ) {
+            return@synchronized false
+        }
         prefs.edit().putString("last_snapshot", value).apply()
+        true
     }
 
     fun getLastSnapshotJson(): String? = prefs.getString("last_snapshot", null)
@@ -240,6 +290,7 @@ class SecureStore(context: Context) {
     }
 
     companion object {
+        private val PAIRING_LOCK = Any()
         private const val KEY_ALIAS = "chatx-monitor-pairing"
         private const val TRANSFORMATION = "AES/GCM/NoPadding"
         private const val MAX_EVENTS = 100

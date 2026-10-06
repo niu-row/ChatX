@@ -1,3 +1,5 @@
+mod registry;
+
 use axum::{
     extract::{
         ws::{Message, WebSocket, WebSocketUpgrade},
@@ -13,15 +15,15 @@ use chatx_relay_protocol::{
     DesktopWsMessage, DeviceAuthorizeRequest, DeviceServerMessage, DeviceWsMessage,
     EncryptedControlPayload, EncryptedSnapshot, PairingRouteOpenRequest, PairingServerMessage,
     PairingWsMessage, CAPABILITY_CONTROL_RECONNECT, CAPABILITY_CONTROL_REFRESH,
-    CAPABILITY_SNAPSHOT, PROTOCOL_VERSION,
+    CAPABILITY_REVOKE_SYNC, CAPABILITY_SNAPSHOT, PROTOCOL_VERSION,
 };
-use ring::{digest, rand::{SecureRandom, SystemRandom}};
+use registry::{hash_matches, token_hash, DesktopRecord, DeviceRecord, Registry};
+use ring::rand::{SecureRandom, SystemRandom};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::{
     collections::HashMap,
     env,
-    fs,
     net::SocketAddr,
     path::{Path, PathBuf},
     sync::{Arc, Mutex},
@@ -37,10 +39,12 @@ const DEVICE_CHANNEL_CAPACITY: usize = 32;
 const DESKTOP_CHANNEL_CAPACITY: usize = 32;
 const PAIRING_TIMEOUT: Duration = Duration::from_secs(15);
 const CONTROL_TIMEOUT: Duration = Duration::from_secs(8);
+const REVOKE_TIMEOUT: Duration = Duration::from_secs(8);
 const MAX_DESKTOP_WS: usize = 64;
 const MAX_DEVICE_WS: usize = 512;
 const MAX_PAIRING_WS: usize = 64;
 const MAX_PENDING_CONTROLS: usize = 128;
+const MAX_PENDING_REVOKES: usize = 128;
 const CONTROL_MIN_INTERVAL_MS: u64 = 500;
 
 fn now_ms() -> u64 {
@@ -58,57 +62,9 @@ fn random_hex(bytes: usize) -> Result<String, String> {
     Ok(value.iter().map(|byte| format!("{byte:02x}")).collect())
 }
 
-fn token_hash(token: &str) -> String {
-    digest::digest(&digest::SHA256, token.as_bytes())
-        .as_ref()
-        .iter()
-        .map(|byte| format!("{byte:02x}"))
-        .collect()
-}
-
-fn constant_time_hex_eq(left: &str, right: &str) -> bool {
-    if left.len() != right.len() {
-        return false;
-    }
-    let mut diff = 0u8;
-    for (a, b) in left.as_bytes().iter().zip(right.as_bytes()) {
-        diff |= a ^ b;
-    }
-    diff == 0
-}
-
-fn hash_matches(token: &str, expected_hex: &str) -> bool {
-    constant_time_hex_eq(&token_hash(token), expected_hex)
-}
-
 fn bearer(headers: &HeaderMap) -> Option<&str> {
     let value = headers.get("authorization")?.to_str().ok()?;
     value.strip_prefix("Bearer ").map(str::trim).filter(|value| !value.is_empty())
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct DeviceRecord {
-    token_hash: String,
-    created_at: u64,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct DesktopRecord {
-    token_hash: String,
-    device_name: String,
-    app_version: String,
-    platform: String,
-    created_at: u64,
-    #[serde(default)]
-    devices: HashMap<String, DeviceRecord>,
-}
-
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-struct Registry {
-    #[serde(default)]
-    desktops: HashMap<String, DesktopRecord>,
 }
 
 #[derive(Debug, Clone)]
@@ -133,6 +89,7 @@ struct DesktopRoute {
 type RouteKey = (String, String);
 type ControlRouteKey = (String, String, String);
 type ControlSender = oneshot::Sender<Result<EncryptedControlPayload, String>>;
+type RevokeSender = oneshot::Sender<Result<(), String>>;
 
 fn routed_device_capabilities(route: Option<&DesktopRoute>) -> Vec<String> {
     let mut result = vec![CAPABILITY_SNAPSHOT.to_string()];
@@ -156,6 +113,12 @@ fn route_supports_control(route: &DesktopRoute) -> bool {
     })
 }
 
+fn route_supports_revoke(route: &DesktopRoute) -> bool {
+    route.capabilities.iter().any(|capability| {
+        capability == CAPABILITY_REVOKE_SYNC
+    })
+}
+
 #[derive(Clone)]
 struct AppState {
     registry: Arc<Mutex<Registry>>,
@@ -168,6 +131,7 @@ struct AppState {
     pairing_routes: Arc<RwLock<HashMap<RouteKey, PairingRoute>>>,
     pairing_connections: Arc<RwLock<HashMap<String, oneshot::Sender<PairingServerMessage>>>>,
     control_connections: Arc<RwLock<HashMap<ControlRouteKey, ControlSender>>>,
+    revoke_connections: Arc<RwLock<HashMap<ControlRouteKey, RevokeSender>>>,
     control_last_at: Arc<Mutex<HashMap<RouteKey, u64>>>,
     desktop_ws_slots: Arc<Semaphore>,
     device_ws_slots: Arc<Semaphore>,
@@ -175,12 +139,12 @@ struct AppState {
 }
 
 impl AppState {
-    fn load(registry_path: PathBuf, bootstrap_token: Option<String>) -> Self {
-        let registry = fs::read_to_string(&registry_path)
-            .ok()
-            .and_then(|text| serde_json::from_str::<Registry>(&text).ok())
-            .unwrap_or_default();
-        Self {
+    fn load(
+        registry_path: PathBuf,
+        bootstrap_token: Option<String>,
+    ) -> Result<Self, String> {
+        let registry = registry::load(&registry_path)?;
+        Ok(Self {
             registry: Arc::new(Mutex::new(registry)),
             registry_path,
             bootstrap_token_hash: bootstrap_token
@@ -193,25 +157,16 @@ impl AppState {
             pairing_routes: Arc::new(RwLock::new(HashMap::new())),
             pairing_connections: Arc::new(RwLock::new(HashMap::new())),
             control_connections: Arc::new(RwLock::new(HashMap::new())),
+            revoke_connections: Arc::new(RwLock::new(HashMap::new())),
             control_last_at: Arc::new(Mutex::new(HashMap::new())),
             desktop_ws_slots: Arc::new(Semaphore::new(MAX_DESKTOP_WS)),
             device_ws_slots: Arc::new(Semaphore::new(MAX_DEVICE_WS)),
             pairing_ws_slots: Arc::new(Semaphore::new(MAX_PAIRING_WS)),
-        }
+        })
     }
 
     fn save_registry(&self, registry: &Registry) -> Result<(), String> {
-        if let Some(parent) = self.registry_path.parent() {
-            fs::create_dir_all(parent)
-                .map_err(|error| format!("create relay data directory failed: {error}"))?;
-        }
-        let temp = self.registry_path.with_extension("json.tmp");
-        let text = serde_json::to_string_pretty(registry)
-            .map_err(|error| format!("serialize registry failed: {error}"))?;
-        fs::write(&temp, format!("{text}\n"))
-            .map_err(|error| format!("write relay registry failed: {error}"))?;
-        fs::rename(&temp, &self.registry_path)
-            .map_err(|error| format!("replace relay registry failed: {error}"))
+        registry::save(&self.registry_path, registry)
     }
 
     fn desktop_authorized(&self, desktop_id: &str, token: &str) -> bool {
@@ -324,6 +279,23 @@ impl AppState {
         snapshots.get(&key).cloned()
     }
 
+    async fn complete_revoke(
+        &self,
+        desktop_id: &str,
+        device_id: &str,
+        request_id: &str,
+        result: Result<(), String>,
+    ) {
+        let key = (
+            desktop_id.to_string(),
+            device_id.to_string(),
+            request_id.to_string(),
+        );
+        if let Some(sender) = self.revoke_connections.write().await.remove(&key) {
+            let _ = sender.send(result);
+        }
+    }
+
     async fn complete_control(
         &self,
         desktop_id: &str,
@@ -344,6 +316,67 @@ impl AppState {
 
 fn json_error(status: StatusCode, message: impl Into<String>) -> Response {
     (status, Json(json!({ "error": message.into() }))).into_response()
+}
+
+async fn request_desktop_revoke(
+    state: &AppState,
+    desktop_id: &str,
+    device_id: &str,
+) -> Result<(), String> {
+    let desktop_route = state.desktop_channels
+        .read().await.get(desktop_id).cloned()
+        .ok_or_else(|| "desktop offline; synchronized revoke unavailable".to_string())?;
+    if !route_supports_revoke(&desktop_route) {
+        return Err("desktop synchronized revoke capability unavailable".into());
+    }
+
+    let request_id = format!("r_{}", random_hex(16)?);
+    let key = (
+        desktop_id.to_string(),
+        device_id.to_string(),
+        request_id.clone(),
+    );
+    let (sender, receiver) = oneshot::channel();
+    {
+        let mut pending = state.revoke_connections.write().await;
+        if pending.len() >= MAX_PENDING_REVOKES {
+            return Err("revoke capacity reached".into());
+        }
+        pending.insert(key.clone(), sender);
+    }
+
+    if desktop_route.sender.send(DesktopServerMessage::DeviceRevoke {
+        device_id: device_id.to_string(),
+        request_id,
+    }).is_err() {
+        state.revoke_connections.write().await.remove(&key);
+        return Err("desktop revoke channel unavailable".into());
+    }
+
+    let result = tokio::time::timeout(REVOKE_TIMEOUT, receiver).await;
+    state.revoke_connections.write().await.remove(&key);
+    match result {
+        Ok(Ok(result)) => result,
+        _ => Err("desktop revoke timeout".into()),
+    }
+}
+
+async fn finalize_device_revoke(
+    state: &AppState,
+    desktop_id: &str,
+    device_id: &str,
+) -> Result<(), String> {
+    let key = (desktop_id.to_string(), device_id.to_string());
+    state.snapshots.write().await.remove(&key);
+    state.revoke_device_record(desktop_id, device_id)?;
+
+    if let Some(sender) = state.device_channels.read().await.get(&key).cloned() {
+        let _ = sender.send(DeviceServerMessage::Revoked {
+            device_id: device_id.to_string(),
+        });
+    }
+    state.device_channels.write().await.remove(&key);
+    Ok(())
 }
 
 async fn health(State(state): State<AppState>) -> impl IntoResponse {
@@ -381,7 +414,7 @@ async fn register_desktop(
     let Some(token) = bearer(&headers) else {
         return json_error(StatusCode::UNAUTHORIZED, "missing bearer token");
     };
-    if !constant_time_hex_eq(&token_hash(token), expected) {
+    if !hash_matches(token, expected) {
         return json_error(StatusCode::UNAUTHORIZED, "invalid bootstrap token");
     }
 
@@ -592,6 +625,29 @@ async fn desktop_socket(state: AppState, desktop_id: String, mut socket: WebSock
                                     Err(message.chars().take(240).collect()),
                                 ).await;
                             }
+                            DesktopWsMessage::RevokeResult {
+                                device_id,
+                                request_id,
+                            } => {
+                                state.complete_revoke(
+                                    &desktop_id,
+                                    &device_id,
+                                    &request_id,
+                                    Ok(()),
+                                ).await;
+                            }
+                            DesktopWsMessage::RevokeError {
+                                device_id,
+                                request_id,
+                                message,
+                            } => {
+                                state.complete_revoke(
+                                    &desktop_id,
+                                    &device_id,
+                                    &request_id,
+                                    Err(message.chars().take(240).collect()),
+                                ).await;
+                            }
                         }
                     }
                     Message::Ping(payload) => {
@@ -693,7 +749,7 @@ async fn device_snapshot_http(
     if let Some(record) = state.latest_snapshot(&desktop_id, &device_id).await {
         return Json(json!({
             "type": "snapshot",
-            "desktopOnline": true,
+            "desktopOnline": desktop_online,
             "serverTime": now_ms(),
             "receivedAt": record.received_at,
             "snapshot": record.snapshot,
@@ -720,24 +776,15 @@ async fn device_revoke_http(
     if !state.device_authorized(&desktop_id, &device_id, token) {
         return json_error(StatusCode::UNAUTHORIZED, "invalid device credential");
     }
-    let desktop_route = state.desktop_channels.read().await.get(&desktop_id).cloned();
-    let Some(desktop_route) = desktop_route else {
-        return json_error(
-            StatusCode::CONFLICT,
-            "desktop offline; synchronized revoke unavailable",
-        );
-    };
-    match state.revoke_device_record(&desktop_id, &device_id) {
-        Ok(true) => {
-            state.snapshots.write().await.remove(&(desktop_id, device_id.clone()));
-            let _ = desktop_route.sender.send(DesktopServerMessage::DeviceRevoked {
-                device_id: device_id.clone(),
-            });
-            Json(json!({ "type": "revoked", "deviceId": device_id })).into_response()
-        }
-        Ok(false) => json_error(StatusCode::NOT_FOUND, "device already revoked"),
-        Err(error) => json_error(StatusCode::INTERNAL_SERVER_ERROR, error),
+
+    if let Err(error) = request_desktop_revoke(&state, &desktop_id, &device_id).await {
+        return json_error(StatusCode::CONFLICT, error);
     }
+    if let Err(error) = finalize_device_revoke(&state, &desktop_id, &device_id).await {
+        return json_error(StatusCode::INTERNAL_SERVER_ERROR, error);
+    }
+
+    Json(json!({ "type": "revoked", "deviceId": device_id })).into_response()
 }
 
 async fn device_socket(
@@ -792,6 +839,15 @@ async fn device_socket(
     let mut last_activity = Instant::now();
 
     loop {
+        if !state.device_exists(&desktop_id, &device_id) {
+            let _ = send_json(
+                &mut socket,
+                &DeviceServerMessage::Revoked {
+                    device_id: device_id.clone(),
+                },
+            ).await;
+            break;
+        }
         tokio::select! {
             _ = heartbeat.tick() => {
                 if last_activity.elapsed() > WS_IDLE_TIMEOUT {
@@ -804,7 +860,12 @@ async fn device_socket(
             routed = receiver.recv() => {
                 match routed {
                     Ok(message) => {
+                        let revoked =
+                            matches!(&message, DeviceServerMessage::Revoked { .. });
                         if send_json(&mut socket, &message).await.is_err() {
+                            break;
+                        }
+                        if revoked {
                             break;
                         }
                     }
@@ -979,41 +1040,25 @@ async fn device_socket(
                                 }
                             }
                             DeviceWsMessage::RevokeSelf => {
-                                let desktop_route = state.desktop_channels
-                                    .read().await.get(&desktop_id).cloned();
-                                let Some(desktop_route) = desktop_route else {
+                                if let Err(error) =
+                                    request_desktop_revoke(&state, &desktop_id, &device_id).await
+                                {
                                     let _ = send_json(
                                         &mut socket,
-                                        &DeviceServerMessage::Error {
-                                            message: "desktop offline; synchronized revoke unavailable".into(),
-                                        },
+                                        &DeviceServerMessage::Error { message: error },
                                     ).await;
                                     break;
-                                };
-                                match state.revoke_device_record(&desktop_id, &device_id) {
-                                    Ok(true) => {
-                                        state.snapshots.write().await.remove(&(
-                                            desktop_id.clone(),
-                                            device_id.clone(),
-                                        ));
-                                        let _ = desktop_route.sender.send(
-                                            DesktopServerMessage::DeviceRevoked {
-                                                device_id: device_id.clone(),
-                                            },
-                                        );
+                                }
+                                match finalize_device_revoke(
+                                    &state,
+                                    &desktop_id,
+                                    &device_id,
+                                ).await {
+                                    Ok(()) => {
                                         let _ = send_json(
                                             &mut socket,
                                             &DeviceServerMessage::Revoked {
                                                 device_id: device_id.clone(),
-                                            },
-                                        ).await;
-                                        break;
-                                    }
-                                    Ok(false) => {
-                                        let _ = send_json(
-                                            &mut socket,
-                                            &DeviceServerMessage::Error {
-                                                message: "device already revoked".into(),
                                             },
                                         ).await;
                                         break;
@@ -1023,6 +1068,7 @@ async fn device_socket(
                                             &mut socket,
                                             &DeviceServerMessage::Error { message: error },
                                         ).await;
+                                        break;
                                     }
                                 }
                             }
@@ -1291,7 +1337,8 @@ async fn main() {
         .parse()
         .expect("CHATX_RELAY_BIND must be a valid socket address");
     let bootstrap = env::var("CHATX_RELAY_BOOTSTRAP_TOKEN").ok();
-    let state = AppState::load(registry_path(), bootstrap);
+    let state = AppState::load(registry_path(), bootstrap)
+        .expect("load ChatX relay registry");
 
     let app = Router::new()
         .route("/healthz", get(health))
@@ -1333,6 +1380,7 @@ async fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs;
 
     #[test]
     fn token_hash_is_stable_and_verifiable() {
@@ -1407,6 +1455,7 @@ mod tests {
             vec![CAPABILITY_SNAPSHOT.to_string()],
         );
         assert!(!route_supports_control(&legacy));
+        assert!(!route_supports_revoke(&legacy));
 
         let current = DesktopRoute {
             session_id: "s_current".into(),
@@ -1418,14 +1467,105 @@ mod tests {
             device_capabilities(),
         );
         assert!(route_supports_control(&current));
+        assert!(route_supports_revoke(&current));
+    }
+
+    #[test]
+    fn corrupt_registry_is_rejected_instead_of_reset() {
+        let path = std::env::temp_dir().join(format!(
+            "chatx-relay-corrupt-test-{}.json",
+            std::process::id(),
+        ));
+        fs::write(&path, "{ definitely-not-json").unwrap();
+        let result = AppState::load(path.clone(), None);
+        let _ = fs::remove_file(path);
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn synchronized_revoke_waits_for_desktop_ack_before_registry_delete() {
+        let path = std::env::temp_dir().join(format!(
+            "chatx-relay-revoke-ack-test-{}.json",
+            std::process::id(),
+        ));
+        let _ = fs::remove_file(&path);
+        let state = AppState::load(path.clone(), None).unwrap();
+        {
+            let mut registry = state.registry.lock().unwrap();
+            let mut devices = HashMap::new();
+            devices.insert(
+                "dev_a".into(),
+                DeviceRecord {
+                    token_hash: token_hash("device-secret"),
+                    created_at: 1,
+                },
+            );
+            registry.desktops.insert(
+                "d_a".into(),
+                DesktopRecord {
+                    token_hash: token_hash("desktop-secret"),
+                    device_name: "Desktop".into(),
+                    app_version: "0.4.10".into(),
+                    platform: "windows-x64".into(),
+                    created_at: 1,
+                    devices,
+                },
+            );
+            state.save_registry(&registry).unwrap();
+        }
+
+        let (desktop_sender, mut desktop_receiver) =
+            broadcast::channel(DESKTOP_CHANNEL_CAPACITY);
+        state.desktop_channels.write().await.insert(
+            "d_a".into(),
+            DesktopRoute {
+                session_id: "s_current".into(),
+                sender: desktop_sender,
+                capabilities: device_capabilities(),
+            },
+        );
+
+        let responder = state.clone();
+        let response_task = tokio::spawn(async move {
+            let message = desktop_receiver.recv().await.unwrap();
+            let DesktopServerMessage::DeviceRevoke {
+                device_id,
+                request_id,
+            } = message else {
+                panic!("expected synchronized revoke request");
+            };
+            assert_eq!(device_id, "dev_a");
+            responder.complete_revoke(
+                "d_a",
+                "dev_a",
+                &request_id,
+                Ok(()),
+            ).await;
+        });
+
+        assert!(state.device_exists("d_a", "dev_a"));
+        request_desktop_revoke(&state, "d_a", "dev_a")
+            .await
+            .unwrap();
+        response_task.await.unwrap();
+        assert!(state.device_exists("d_a", "dev_a"));
+
+        finalize_device_revoke(&state, "d_a", "dev_a")
+            .await
+            .unwrap();
+        assert!(!state.device_exists("d_a", "dev_a"));
+        let _ = fs::remove_file(path);
     }
 
     #[tokio::test]
     async fn control_completion_is_scoped_by_desktop_device_and_request() {
         let state = AppState::load(
-            std::env::temp_dir().join("chatx-relay-control-test.json"),
+            std::env::temp_dir().join(format!(
+                "chatx-relay-control-test-{}.json",
+                std::process::id(),
+            )),
             None,
-        );
+        ).unwrap();
         let request_id = "c_0123456789abcdef".to_string();
         let key_a = ("d_a".into(), "dev_a".into(), request_id.clone());
         let key_b = ("d_a".into(), "dev_b".into(), request_id.clone());
@@ -1461,5 +1601,36 @@ mod tests {
             Err("denied".into()),
         ).await;
         assert_eq!(receiver_b.await.unwrap().unwrap_err(), "denied");
+    }
+
+    #[tokio::test]
+    async fn revoke_completion_is_correlated_and_idempotent() {
+        let state = AppState::load(
+            std::env::temp_dir().join(format!(
+                "chatx-relay-revoke-test-{}.json",
+                std::process::id(),
+            )),
+            None,
+        ).unwrap();
+        let request_id = "r_0123456789abcdef".to_string();
+        let key = ("d_a".into(), "dev_a".into(), request_id.clone());
+        let (sender, receiver) = oneshot::channel();
+        state.revoke_connections.write().await.insert(key, sender);
+
+        state.complete_revoke(
+            "d_a",
+            "dev_a",
+            &request_id,
+            Ok(()),
+        ).await;
+        assert!(receiver.await.unwrap().is_ok());
+
+        state.complete_revoke(
+            "d_a",
+            "dev_a",
+            &request_id,
+            Ok(()),
+        ).await;
+        assert!(state.revoke_connections.read().await.is_empty());
     }
 }

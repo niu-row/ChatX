@@ -126,8 +126,7 @@ object StatusCodec {
     private fun transportLabel(kind: String): String = when (kind) {
         "lan" -> "LAN"
         "ipv6" -> "IPv6"
-        "tailscale" -> "Tailscale"
-        "relay" -> "ChatX Relay"
+        "relay" -> "服务器 Relay"
         else -> "HTTPS"
     }
 }

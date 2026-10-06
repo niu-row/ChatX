@@ -5,6 +5,7 @@ import path from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { createRequire } from 'node:module';
 import { pathToFileURL } from 'node:url';
+import { realHome } from './toolchain-env.mjs';
 
 const root = process.cwd();
 const resourceDir = path.join(root, 'src-tauri', 'resources');
@@ -50,9 +51,39 @@ function run(label, command, args, options = {}) {
   return result;
 }
 
-async function download(url, target, label) {
+function validateCachedDownload(file, expectedSha256, expectedSize = null) {
+  if (!fs.existsSync(file)) return false;
+  if (expectedSize != null && fs.statSync(file).size !== expectedSize) {
+    return false;
+  }
+  return sha256(file) === expectedSha256;
+}
+
+async function download(
+  url,
+  target,
+  label,
+  expectedSha256,
+  expectedSize = null,
+) {
+  if (!/^[0-9a-f]{64}$/i.test(expectedSha256 ?? '')) {
+    throw new Error(`${label} cache key requires a locked SHA-256.`);
+  }
+  const cacheDir = path.join(realHome, '.chatx-cache', 'runtime');
+  const cacheFile = path.join(
+    cacheDir,
+    `${expectedSha256.toLowerCase()}-${path.basename(target)}`,
+  );
+  fs.mkdirSync(cacheDir, { recursive: true });
+  if (validateCachedDownload(cacheFile, expectedSha256, expectedSize)) {
+    fs.copyFileSync(cacheFile, target);
+    return;
+  }
+  fs.rmSync(cacheFile, { force: true });
+
+  const partial = `${target}.part`;
+  fs.rmSync(partial, { force: true });
   if (process.platform === 'darwin') {
-    const partial = `${target}.part`;
     run(
       `${label} download`,
       '/usr/bin/curl',
@@ -69,12 +100,48 @@ async function download(url, target, label) {
       ],
       { timeout: 300_000 },
     );
-    fs.renameSync(partial, target);
-    return;
+  } else {
+    let lastError = null;
+    for (let attempt = 1; attempt <= 5; attempt += 1) {
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), 60_000);
+      try {
+        const response = await fetch(url, {
+          redirect: 'follow',
+          signal: controller.signal,
+        });
+        if (!response.ok) {
+          throw new Error(
+            `${label} download failed: HTTP ${response.status} ${response.statusText}`,
+          );
+        }
+        fs.writeFileSync(
+          partial,
+          Buffer.from(await response.arrayBuffer()),
+        );
+        lastError = null;
+        break;
+      } catch (error) {
+        lastError = error;
+        fs.rmSync(partial, { force: true });
+        if (attempt < 5) {
+          await new Promise((resolve) =>
+            setTimeout(resolve, attempt * 2_000),
+          );
+        }
+      } finally {
+        clearTimeout(timer);
+      }
+    }
+    if (lastError) throw lastError;
   }
-  const response = await fetch(url, { redirect: 'follow' });
-  if (!response.ok) throw new Error(`${label} download failed: HTTP ${response.status} ${response.statusText}`);
-  fs.writeFileSync(target, Buffer.from(await response.arrayBuffer()));
+
+  if (!validateCachedDownload(partial, expectedSha256, expectedSize)) {
+    fs.rmSync(partial, { force: true });
+    throw new Error(`${label} downloaded bytes do not match the runtime lock.`);
+  }
+  fs.copyFileSync(partial, cacheFile);
+  fs.renameSync(partial, target);
 }
 
 function extractZip(label, archive, destination) {
@@ -140,7 +207,13 @@ async function acquireDesktopCommanderArchive() {
     if (!fs.existsSync(source)) throw new Error(`DESKTOP_COMMANDER_MCPB_PATH does not exist: ${source}`);
     fs.copyFileSync(source, target);
   } else {
-    await download(dc.releaseUrl, target, 'Desktop Commander release');
+    await download(
+      dc.releaseUrl,
+      target,
+      'Desktop Commander release',
+      dc.sha256,
+      dc.size,
+    );
   }
   requireLocked('Desktop Commander MCPB size', fs.statSync(target).size, dc.size);
   requireLocked('Desktop Commander MCPB SHA-256', sha256(target), dc.sha256);
@@ -162,7 +235,12 @@ async function prepareNodeRuntime() {
 
   const archive = path.join(resourceDir, node.archive);
   const extractDir = path.join(resourceDir, '.node-extract');
-  await download(node.archiveUrl, archive, 'Node.js runtime');
+  await download(
+    node.archiveUrl,
+    archive,
+    'Node.js runtime',
+    node.archiveSha256,
+  );
   requireLocked('Node archive SHA-256', sha256(archive), node.archiveSha256);
   fs.mkdirSync(extractDir, { recursive: true });
   try {
@@ -239,7 +317,13 @@ async function prepareTunnelClientRuntime() {
 
   const archive = path.join(resourceDir, tunnel.releaseAsset);
   const extractDir = path.join(resourceDir, '.tunnel-client-extract');
-  await download(tunnel.releaseUrl, archive, 'OpenAI tunnel-client');
+  await download(
+    tunnel.releaseUrl,
+    archive,
+    'OpenAI tunnel-client',
+    tunnel.sha256,
+    tunnel.size,
+  );
   requireLocked('tunnel-client release size', fs.statSync(archive).size, tunnel.size);
   requireLocked('tunnel-client release SHA-256', sha256(archive), tunnel.sha256);
   try {

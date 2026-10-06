@@ -7,7 +7,7 @@ ChatX Monitor 是以只读监控为主的 ChatX Desktop 手机客户端，并提
 - 扫描桌面端本地生成的配对二维码，或粘贴配对 JSON。
 - 使用 Android Keystore + AES-GCM 保存 Monitor Token 和 TLS 指纹。
 - 对 ChatX 自签名 TLS 证书执行 SHA-256 certificate pinning。
-- 动态维护 LAN、Tailscale、Public IPv6 与 ChatX Relay endpoint；Relay 在线时会同步 Desktop 最新地址。
+- 仅维护 LAN Direct、IPv6 Direct 与服务器 ChatX Relay 三类 endpoint；Relay 在线时会同步 Desktop 最新 LAN / IPv6 地址。
 - 支持 LAN 优先、Relay 优先、自动稳定路径、手动首选四种连接策略，并在切换前先验证新路径。
 - 连接页并行执行轻量 HTTPS Snapshot 请求，直接验证当前监控路径。
 - 前台服务通过短连接 HTTPS 获取加密 Snapshot，刷新间隔可选 10 / 15 / 30 / 60 秒；快照过期与离线确认阈值也可配置，稳态监控不依赖常驻 WSS。
@@ -15,6 +15,9 @@ ChatX Monitor 是以只读监控为主的 ChatX Desktop 手机客户端，并提
 - Tunnel 异常时可从手机发起受限的 E2EE 重连请求；Desktop 明确停止连接时手机不能覆盖连接意图，Runtime Key 始终只保留在 Desktop。
 - 控制连接使用单次总超时并跨候选路径复用同一 requestId；Desktop 对相同密文请求返回幂等缓存结果。
 - 通过 `hello_ack.capabilities` 协商控制能力；旧端缺少 capability 时立即刷新自动回退 HTTPS Snapshot，远程重连明确提示版本不支持。
+- Relay 设备撤销使用 `revoke.sync`，只有 Desktop 本地凭据撤销确认后 Relay 才删除远端凭据并向手机返回成功；已撤销的 Direct/Relay 会话会停止接收新 Snapshot。
+- Android release 仅接受 HTTPS/WSS Relay URL；LAN Direct 继续使用证书指纹固定的 HTTPS/WSS。
+- 配对、撤销和手动控制使用生命周期绑定的 controller；旧配对产生的异步 endpoint/Snapshot 结果不能覆盖或复活已删除/已替换的 pairing。
 - 区分 Host Offline、Tunnel Down、MCP GAP、MCP STALLED。
 - 支持 1 / 2 / 3 / 5 分钟中断告警与恢复通知。
 

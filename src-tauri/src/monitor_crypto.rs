@@ -183,6 +183,7 @@ pub fn decrypt_snapshot(
     Ok(plaintext.to_vec())
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn encrypt_control_payload(
     device_key: &[u8; 32],
     desktop_id: &str,
