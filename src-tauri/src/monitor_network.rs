@@ -95,7 +95,7 @@ mod tests {
     };
 
     #[test]
-    fn keeps_private_lan_but_rejects_tailscale_ipv4() {
+    fn keeps_private_lan_and_ignores_non_lan_ipv4() {
         assert_eq!(
             classify_ip(IpAddr::V4(Ipv4Addr::new(192, 168, 1, 10))),
             Some("lan"),
@@ -109,21 +109,18 @@ mod tests {
             Some("lan"),
         );
         assert_eq!(
-            classify_ip(IpAddr::V4(Ipv4Addr::new(100, 64, 1, 2))),
+            classify_ip(IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8))),
             None,
         );
     }
 
     #[test]
-    fn keeps_global_ipv6_but_rejects_tailscale_and_local_ipv6() {
-        let tailscale =
-            Ipv6Addr::from_str("fd7a:115c:a1e0::1234").unwrap();
+    fn keeps_global_ipv6_and_ignores_local_ipv6() {
         let public =
             Ipv6Addr::from_str("2406:da1c:abcd::1").unwrap();
         let ula = Ipv6Addr::from_str("fd00::1").unwrap();
         let link_local = Ipv6Addr::from_str("fe80::1").unwrap();
 
-        assert_eq!(classify_ip(IpAddr::V6(tailscale)), None);
         assert_eq!(
             classify_ip(IpAddr::V6(public)),
             Some("ipv6"),

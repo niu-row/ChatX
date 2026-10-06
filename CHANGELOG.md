@@ -13,7 +13,7 @@
 - Relay device revocation is now synchronized: Relay waits for an explicit Desktop acknowledgement before deleting the Relay credential, then terminates active device sessions.
 - Relay registry persistence is fail-closed on corruption and uses a recoverable backup during Windows replacement.
 - Android pairing/revoke work moved into a lifecycle-bound controller; pairing-derived endpoint/snapshot writes are conditional on the currently paired Desktop/device identity.
-- Monitor routing is reduced to three supported paths only: private LAN IPv4, global IPv6 Direct, and server Relay; Tailscale/other Direct routes are filtered from discovery, pairing, storage, routing, and UI.
+- Monitor routing is reduced to three supported paths only: private LAN IPv4, global IPv6 Direct, and server Relay; all other Direct route variants are removed from discovery, pairing, storage, routing, and UI.
 - Desktop secret handling is isolated in `secrets.rs`; Monitor Master Key corruption is surfaced instead of silently rotating device E2EE material, and Runtime Key persistence is committed only after a successful Tunnel connection.
 - Desktop build/package entry points share a real-user HOME/Cargo/Rustup environment, Cargo verification uses `--locked`, and locked runtime downloads use a SHA-verified persistent cache.
 - CI now uses the runtime-locked Node 24.16.0 and exercises Desktop runtime verification plus the production no-bundle build on Windows; Gradle wrapper bytes are SHA-256 pinned.

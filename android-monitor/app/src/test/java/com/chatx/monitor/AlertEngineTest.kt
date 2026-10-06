@@ -43,7 +43,7 @@ class AlertEngineTest {
             lastCallStartedAt = lastCallFinishedAt?.minus(100L),
             lastCallFinishedAt = lastCallFinishedAt,
         ),
-        endpointUrl = "https://100.64.0.1:18432",
+        endpointUrl = "https://192.168.1.20:18432",
         receivedAt = receivedAt,
     )
     @Test

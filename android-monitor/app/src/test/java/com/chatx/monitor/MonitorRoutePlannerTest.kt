@@ -31,13 +31,6 @@ class MonitorRoutePlannerTest {
                     host = "2406:da1c:abcd::1",
                     url = "wss://[2406:da1c:abcd::1]:18432/v1/ws/monitor",
                 ),
-                MonitorEndpoint(
-                    kind = "tailscale",
-                    family = "ipv4",
-                    interfaceName = "Tailscale",
-                    host = "100.64.1.2",
-                    url = "wss://100.64.1.2:18432/v1/ws/monitor",
-                ),
             ),
             relay = RelayEnrollment(
                 baseUrl = "https://relay.example.com",
@@ -50,7 +43,6 @@ class MonitorRoutePlannerTest {
     fun candidatesDeriveDirectAndRelayUrlsFromOneSource() {
         val candidates = MonitorRoutePlanner.candidates(config())
         assertEquals(3, candidates.size)
-        assertTrue(candidates.none { it.kind == "tailscale" })
 
         val direct = candidates.first { it.kind == "lan" }
         assertTrue(

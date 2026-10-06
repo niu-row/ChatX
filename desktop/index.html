@@ -146,7 +146,7 @@
           <div class="setting-row">
             <div class="setting-copy">
               <strong>Direct HTTPS Monitor</strong>
-              <p>手机在 LAN、IPv6 或 Tailscale 下通过短连接 HTTPS 读取状态；公网时自动切换到 ChatX Relay。</p>
+              <p>手机通过 LAN 或 IPv6 Direct 的短连接 HTTPS 读取状态；不可直连时自动切换到服务器 Relay。</p>
               <small>所有 Snapshot 均使用设备独立密钥进行 AES-256-GCM 端到端加密，Direct 与 Relay 使用同一协议。</small>
             </div>
             <label class="switch" title="手机监控">
@@ -174,7 +174,7 @@
           </div>
           <div id="monitorPairing" class="monitor-pairing" hidden>
             <div class="section-head compact">
-              <div><strong>添加手机</strong><small>扫码后自动选择 LAN / IPv6 / Tailscale / ChatX Relay 路径。</small></div>
+              <div><strong>添加手机</strong><small>扫码后自动选择 LAN / IPv6 Direct / 服务器 Relay 路径。</small></div>
               <button id="copyMonitorPairing" class="ghost">复制</button>
             </div>
             <div id="monitorPairingQr" class="monitor-pairing-qr"></div>
