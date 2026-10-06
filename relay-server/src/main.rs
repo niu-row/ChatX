@@ -9,9 +9,11 @@ use axum::{
     Json, Router,
 };
 use chatx_relay_protocol::{
-    DesktopRegisterRequest, DesktopRegisterResponse, DesktopServerMessage, DesktopWsMessage,
-    DeviceAuthorizeRequest, DeviceServerMessage, DeviceWsMessage, EncryptedSnapshot,
-    PairingRouteOpenRequest, PairingServerMessage, PairingWsMessage, PROTOCOL_VERSION,
+    device_capabilities, DesktopRegisterRequest, DesktopRegisterResponse, DesktopServerMessage,
+    DesktopWsMessage, DeviceAuthorizeRequest, DeviceServerMessage, DeviceWsMessage,
+    EncryptedControlPayload, EncryptedSnapshot, PairingRouteOpenRequest, PairingServerMessage,
+    PairingWsMessage, CAPABILITY_CONTROL_RECONNECT, CAPABILITY_CONTROL_REFRESH,
+    CAPABILITY_SNAPSHOT, PROTOCOL_VERSION,
 };
 use ring::{digest, rand::{SecureRandom, SystemRandom}};
 use serde::{Deserialize, Serialize};
@@ -25,15 +27,21 @@ use std::{
     sync::{Arc, Mutex},
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
-use tokio::sync::{broadcast, oneshot, RwLock};
+use tokio::sync::{broadcast, oneshot, RwLock, Semaphore};
 
-const SNAPSHOT_TTL_MS: u64 = 60_000;
+const SNAPSHOT_TTL_MS: u64 = 180_000;
 const WS_HEARTBEAT: Duration = Duration::from_secs(15);
 const WS_IDLE_TIMEOUT: Duration = Duration::from_secs(45);
 const MAX_BODY_BYTES: usize = 64 * 1024;
 const DEVICE_CHANNEL_CAPACITY: usize = 32;
 const DESKTOP_CHANNEL_CAPACITY: usize = 32;
 const PAIRING_TIMEOUT: Duration = Duration::from_secs(15);
+const CONTROL_TIMEOUT: Duration = Duration::from_secs(8);
+const MAX_DESKTOP_WS: usize = 64;
+const MAX_DEVICE_WS: usize = 512;
+const MAX_PAIRING_WS: usize = 64;
+const MAX_PENDING_CONTROLS: usize = 128;
+const CONTROL_MIN_INTERVAL_MS: u64 = 500;
 
 fn now_ms() -> u64 {
     SystemTime::now()
@@ -119,9 +127,34 @@ struct PairingRoute {
 struct DesktopRoute {
     session_id: String,
     sender: broadcast::Sender<DesktopServerMessage>,
+    capabilities: Vec<String>,
 }
 
 type RouteKey = (String, String);
+type ControlRouteKey = (String, String, String);
+type ControlSender = oneshot::Sender<Result<EncryptedControlPayload, String>>;
+
+fn routed_device_capabilities(route: Option<&DesktopRoute>) -> Vec<String> {
+    let mut result = vec![CAPABILITY_SNAPSHOT.to_string()];
+    let Some(route) = route else {
+        return result;
+    };
+    for capability in device_capabilities() {
+        if capability != CAPABILITY_SNAPSHOT
+            && route.capabilities.iter().any(|value| value == &capability)
+        {
+            result.push(capability);
+        }
+    }
+    result
+}
+
+fn route_supports_control(route: &DesktopRoute) -> bool {
+    route.capabilities.iter().any(|capability| {
+        capability == CAPABILITY_CONTROL_REFRESH
+            || capability == CAPABILITY_CONTROL_RECONNECT
+    })
+}
 
 #[derive(Clone)]
 struct AppState {
@@ -134,6 +167,11 @@ struct AppState {
     snapshots: Arc<RwLock<HashMap<RouteKey, SnapshotRecord>>>,
     pairing_routes: Arc<RwLock<HashMap<RouteKey, PairingRoute>>>,
     pairing_connections: Arc<RwLock<HashMap<String, oneshot::Sender<PairingServerMessage>>>>,
+    control_connections: Arc<RwLock<HashMap<ControlRouteKey, ControlSender>>>,
+    control_last_at: Arc<Mutex<HashMap<RouteKey, u64>>>,
+    desktop_ws_slots: Arc<Semaphore>,
+    device_ws_slots: Arc<Semaphore>,
+    pairing_ws_slots: Arc<Semaphore>,
 }
 
 impl AppState {
@@ -154,6 +192,11 @@ impl AppState {
             snapshots: Arc::new(RwLock::new(HashMap::new())),
             pairing_routes: Arc::new(RwLock::new(HashMap::new())),
             pairing_connections: Arc::new(RwLock::new(HashMap::new())),
+            control_connections: Arc::new(RwLock::new(HashMap::new())),
+            control_last_at: Arc::new(Mutex::new(HashMap::new())),
+            desktop_ws_slots: Arc::new(Semaphore::new(MAX_DESKTOP_WS)),
+            device_ws_slots: Arc::new(Semaphore::new(MAX_DEVICE_WS)),
+            pairing_ws_slots: Arc::new(Semaphore::new(MAX_PAIRING_WS)),
         }
     }
 
@@ -280,6 +323,23 @@ impl AppState {
         }
         snapshots.get(&key).cloned()
     }
+
+    async fn complete_control(
+        &self,
+        desktop_id: &str,
+        device_id: &str,
+        request_id: &str,
+        result: Result<EncryptedControlPayload, String>,
+    ) {
+        let key = (
+            desktop_id.to_string(),
+            device_id.to_string(),
+            request_id.to_string(),
+        );
+        if let Some(sender) = self.control_connections.write().await.remove(&key) {
+            let _ = sender.send(result);
+        }
+    }
 }
 
 fn json_error(status: StatusCode, message: impl Into<String>) -> Response {
@@ -374,7 +434,14 @@ async fn desktop_ws(
     if !state.desktop_authorized(&query.desktop_id, token) {
         return json_error(StatusCode::UNAUTHORIZED, "invalid desktop credential");
     }
-    ws.on_upgrade(move |socket| desktop_socket(state, query.desktop_id, socket))
+    let permit = match state.desktop_ws_slots.clone().try_acquire_owned() {
+        Ok(value) => value,
+        Err(_) => return json_error(StatusCode::SERVICE_UNAVAILABLE, "desktop websocket capacity reached"),
+    };
+    ws.on_upgrade(move |socket| async move {
+        let _permit = permit;
+        desktop_socket(state, query.desktop_id, socket).await;
+    })
 }
 
 async fn desktop_socket(state: AppState, desktop_id: String, mut socket: WebSocket) {
@@ -383,6 +450,7 @@ async fn desktop_socket(state: AppState, desktop_id: String, mut socket: WebSock
     let Ok(DesktopWsMessage::Hello {
         protocol_version,
         desktop_id: hello_id,
+        capabilities,
         ..
     }) = serde_json::from_str::<DesktopWsMessage>(&text) else {
         return;
@@ -404,6 +472,7 @@ async fn desktop_socket(state: AppState, desktop_id: String, mut socket: WebSock
         DesktopRoute {
             session_id: session_id.clone(),
             sender: desktop_sender,
+            capabilities,
         },
     );
     state.broadcast_desktop_presence(&desktop_id, true).await;
@@ -411,6 +480,7 @@ async fn desktop_socket(state: AppState, desktop_id: String, mut socket: WebSock
     let ack = DesktopServerMessage::HelloAck {
         session_id: session_id.clone(),
         server_time: now_ms(),
+        capabilities: device_capabilities(),
     };
     if send_json(&mut socket, &ack).await.is_err() {
         remove_online_if_current(&state, &desktop_id, &session_id).await;
@@ -501,6 +571,27 @@ async fn desktop_socket(state: AppState, desktop_id: String, mut socket: WebSock
                                     });
                                 }
                             }
+                            DesktopWsMessage::ControlResponse { device_id, response } => {
+                                let request_id = response.request_id.clone();
+                                state.complete_control(
+                                    &desktop_id,
+                                    &device_id,
+                                    &request_id,
+                                    Ok(response),
+                                ).await;
+                            }
+                            DesktopWsMessage::ControlError {
+                                device_id,
+                                request_id,
+                                message,
+                            } => {
+                                state.complete_control(
+                                    &desktop_id,
+                                    &device_id,
+                                    &request_id,
+                                    Err(message.chars().take(240).collect()),
+                                ).await;
+                            }
                         }
                     }
                     Message::Ping(payload) => {
@@ -555,7 +646,14 @@ async fn device_ws(
     if !state.device_authorized(&query.desktop_id, &query.device_id, token) {
         return json_error(StatusCode::UNAUTHORIZED, "invalid device credential");
     }
-    ws.on_upgrade(move |socket| device_socket(state, query.desktop_id, query.device_id, socket))
+    let permit = match state.device_ws_slots.clone().try_acquire_owned() {
+        Ok(value) => value,
+        Err(_) => return json_error(StatusCode::SERVICE_UNAVAILABLE, "device websocket capacity reached"),
+    };
+    ws.on_upgrade(move |socket| async move {
+        let _permit = permit;
+        device_socket(state, query.desktop_id, query.device_id, socket).await;
+    })
 }
 
 async fn desktop_snapshot_http(
@@ -668,7 +766,10 @@ async fn device_socket(
         Ok(value) => format!("s_{value}"),
         Err(_) => return,
     };
-    let desktop_online = state.online_desktops.read().await.contains_key(&desktop_id);
+    let desktop_route = state.desktop_channels
+        .read().await.get(&desktop_id).cloned();
+    let desktop_online = desktop_route.is_some();
+    let capabilities = routed_device_capabilities(desktop_route.as_ref());
     let sender = state.route_sender(&desktop_id, &device_id).await;
     let mut receiver = sender.subscribe();
 
@@ -676,6 +777,7 @@ async fn device_socket(
         session_id,
         server_time: now_ms(),
         desktop_online,
+        capabilities,
     }).await.is_err() {
         return;
     }
@@ -747,6 +849,134 @@ async fn device_socket(
                                 let _ = send_json(&mut socket, &DeviceServerMessage::Pong {
                                     server_time: now_ms(),
                                 }).await;
+                            }
+                            DeviceWsMessage::Control { request } => {
+                                let now = now_ms();
+                                let valid_id = request.request_id.starts_with("c_")
+                                    && request.request_id.len() >= 18
+                                    && request.request_id.len() <= 80
+                                    && request.request_id[2..].bytes().all(|byte| byte.is_ascii_hexdigit());
+                                let valid_time = request.issued_at <= now.saturating_add(30_000)
+                                    && request.expires_at >= now
+                                    && request.expires_at <= request.issued_at.saturating_add(60_000);
+                                if !valid_id || !valid_time {
+                                    let _ = send_json(
+                                        &mut socket,
+                                        &DeviceServerMessage::Error {
+                                            message: "invalid control request".into(),
+                                        },
+                                    ).await;
+                                    continue;
+                                }
+                                let rate_key = (desktop_id.clone(), device_id.clone());
+                                let rate_limited = state.control_last_at.lock()
+                                    .map(|mut values| {
+                                        values.retain(|_, at| now.saturating_sub(*at) <= 60_000);
+                                        let limited = values.get(&rate_key)
+                                            .is_some_and(|at| now.saturating_sub(*at) < CONTROL_MIN_INTERVAL_MS);
+                                        if !limited {
+                                            values.insert(rate_key.clone(), now);
+                                        }
+                                        limited
+                                    })
+                                    .unwrap_or(true);
+                                if rate_limited {
+                                    let _ = send_json(
+                                        &mut socket,
+                                        &DeviceServerMessage::Error {
+                                            message: "control request rate limited".into(),
+                                        },
+                                    ).await;
+                                    continue;
+                                }
+                                let desktop_route = state.desktop_channels
+                                    .read().await.get(&desktop_id).cloned();
+                                let Some(desktop_route) = desktop_route else {
+                                    let _ = send_json(
+                                        &mut socket,
+                                        &DeviceServerMessage::Error {
+                                            message: "desktop offline; control unavailable".into(),
+                                        },
+                                    ).await;
+                                    continue;
+                                };
+                                if !route_supports_control(&desktop_route) {
+                                    let _ = send_json(
+                                        &mut socket,
+                                        &DeviceServerMessage::Error {
+                                            message: "desktop control capability unavailable".into(),
+                                        },
+                                    ).await;
+                                    continue;
+                                }
+                                let request_id = request.request_id.clone();
+                                let control_key = (
+                                    desktop_id.clone(),
+                                    device_id.clone(),
+                                    request_id.clone(),
+                                );
+                                let (sender, receiver) = oneshot::channel();
+                                {
+                                    let mut pending = state.control_connections.write().await;
+                                    if pending.len() >= MAX_PENDING_CONTROLS {
+                                        let _ = send_json(
+                                            &mut socket,
+                                            &DeviceServerMessage::Error {
+                                                message: "control capacity reached".into(),
+                                            },
+                                        ).await;
+                                        continue;
+                                    }
+                                    if pending.contains_key(&control_key) {
+                                        let _ = send_json(
+                                            &mut socket,
+                                            &DeviceServerMessage::Error {
+                                                message: "duplicate control request".into(),
+                                            },
+                                        ).await;
+                                        continue;
+                                    }
+                                    pending.insert(control_key.clone(), sender);
+                                }
+                                if desktop_route.sender.send(
+                                    DesktopServerMessage::DeviceControl {
+                                        device_id: device_id.clone(),
+                                        request,
+                                    },
+                                ).is_err() {
+                                    state.control_connections.write().await.remove(&control_key);
+                                    let _ = send_json(
+                                        &mut socket,
+                                        &DeviceServerMessage::Error {
+                                            message: "desktop control channel unavailable".into(),
+                                        },
+                                    ).await;
+                                    continue;
+                                }
+                                let result = tokio::time::timeout(CONTROL_TIMEOUT, receiver).await;
+                                state.control_connections.write().await.remove(&control_key);
+                                match result {
+                                    Ok(Ok(Ok(response))) => {
+                                        let _ = send_json(
+                                            &mut socket,
+                                            &DeviceServerMessage::ControlResult { response },
+                                        ).await;
+                                    }
+                                    Ok(Ok(Err(message))) => {
+                                        let _ = send_json(
+                                            &mut socket,
+                                            &DeviceServerMessage::Error { message },
+                                        ).await;
+                                    }
+                                    _ => {
+                                        let _ = send_json(
+                                            &mut socket,
+                                            &DeviceServerMessage::Error {
+                                                message: "desktop control timeout".into(),
+                                            },
+                                        ).await;
+                                    }
+                                }
                             }
                             DeviceWsMessage::RevokeSelf => {
                                 let desktop_route = state.desktop_channels
@@ -887,8 +1117,13 @@ async fn pairing_ws(
     if !hash_matches(token, &route.token_hash) {
         return json_error(StatusCode::UNAUTHORIZED, "invalid pairing route token");
     }
-    ws.on_upgrade(move |socket| {
-        pairing_socket(state, query.desktop_id, query.pairing_id, socket)
+    let permit = match state.pairing_ws_slots.clone().try_acquire_owned() {
+        Ok(value) => value,
+        Err(_) => return json_error(StatusCode::SERVICE_UNAVAILABLE, "pairing websocket capacity reached"),
+    };
+    ws.on_upgrade(move |socket| async move {
+        let _permit = permit;
+        pairing_socket(state, query.desktop_id, query.pairing_id, socket).await;
     })
 }
 
@@ -1152,5 +1387,79 @@ mod tests {
         });
         let text = serde_json::to_string(&registry).unwrap();
         assert!(!text.contains("secret"));
+    }
+
+    #[test]
+    fn device_control_capabilities_require_online_desktop_support() {
+        assert_eq!(
+            routed_device_capabilities(None),
+            vec![CAPABILITY_SNAPSHOT.to_string()],
+        );
+
+        let (sender, _) = broadcast::channel(1);
+        let legacy = DesktopRoute {
+            session_id: "s_legacy".into(),
+            sender: sender.clone(),
+            capabilities: Vec::new(),
+        };
+        assert_eq!(
+            routed_device_capabilities(Some(&legacy)),
+            vec![CAPABILITY_SNAPSHOT.to_string()],
+        );
+        assert!(!route_supports_control(&legacy));
+
+        let current = DesktopRoute {
+            session_id: "s_current".into(),
+            sender,
+            capabilities: device_capabilities(),
+        };
+        assert_eq!(
+            routed_device_capabilities(Some(&current)),
+            device_capabilities(),
+        );
+        assert!(route_supports_control(&current));
+    }
+
+    #[tokio::test]
+    async fn control_completion_is_scoped_by_desktop_device_and_request() {
+        let state = AppState::load(
+            std::env::temp_dir().join("chatx-relay-control-test.json"),
+            None,
+        );
+        let request_id = "c_0123456789abcdef".to_string();
+        let key_a = ("d_a".into(), "dev_a".into(), request_id.clone());
+        let key_b = ("d_a".into(), "dev_b".into(), request_id.clone());
+        let (sender_a, receiver_a) = oneshot::channel();
+        let (sender_b, receiver_b) = oneshot::channel();
+        {
+            let mut pending = state.control_connections.write().await;
+            pending.insert(key_a, sender_a);
+            pending.insert(key_b.clone(), sender_b);
+        }
+
+        let response = EncryptedControlPayload {
+            request_id: request_id.clone(),
+            issued_at: 1,
+            expires_at: 2,
+            nonce: "nonce".into(),
+            ciphertext: "ciphertext".into(),
+        };
+        state.complete_control(
+            "d_a",
+            "dev_a",
+            &request_id,
+            Ok(response.clone()),
+        ).await;
+
+        assert_eq!(receiver_a.await.unwrap().unwrap(), response);
+        assert!(state.control_connections.read().await.contains_key(&key_b));
+
+        state.complete_control(
+            "d_a",
+            "dev_b",
+            &request_id,
+            Err("denied".into()),
+        ).await;
+        assert_eq!(receiver_b.await.unwrap().unwrap_err(), "denied");
     }
 }

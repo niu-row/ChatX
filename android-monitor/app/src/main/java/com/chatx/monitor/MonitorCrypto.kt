@@ -1,9 +1,10 @@
 package com.chatx.monitor
 
-import android.util.Base64
 import java.security.SecureRandom
+import java.util.Base64
 import org.json.JSONObject
 import javax.crypto.Cipher
+import javax.crypto.Mac
 import javax.crypto.spec.GCMParameterSpec
 import javax.crypto.spec.SecretKeySpec
 
@@ -19,6 +20,33 @@ data class EncryptedPairingFrame(
     companion object {
         fun parse(root: JSONObject): EncryptedPairingFrame =
             EncryptedPairingFrame(
+                nonce = root.getString("nonce"),
+                ciphertext = root.getString("ciphertext"),
+            )
+    }
+}
+
+data class EncryptedControlFrame(
+    val requestId: String,
+    val issuedAt: Long,
+    val expiresAt: Long,
+    val nonce: String,
+    val ciphertext: String,
+) {
+    fun toJson(): JSONObject = JSONObject().apply {
+        put("requestId", requestId)
+        put("issuedAt", issuedAt)
+        put("expiresAt", expiresAt)
+        put("nonce", nonce)
+        put("ciphertext", ciphertext)
+    }
+
+    companion object {
+        fun parse(root: JSONObject): EncryptedControlFrame =
+            EncryptedControlFrame(
+                requestId = root.getString("requestId"),
+                issuedAt = root.getLong("issuedAt"),
+                expiresAt = root.getLong("expiresAt"),
                 nonce = root.getString("nonce"),
                 ciphertext = root.getString("ciphertext"),
             )
@@ -81,6 +109,103 @@ object MonitorCrypto {
         return JSONObject(clear.toString(Charsets.UTF_8))
     }
 
+    fun encryptControl(
+        config: PairingConfig,
+        requestId: String,
+        direction: String,
+        issuedAt: Long,
+        expiresAt: Long,
+        payload: JSONObject,
+    ): EncryptedControlFrame =
+        encryptControlBytes(
+            config = config,
+            requestId = requestId,
+            direction = direction,
+            issuedAt = issuedAt,
+            expiresAt = expiresAt,
+            plaintext = payload.toString().toByteArray(Charsets.UTF_8),
+        )
+
+    internal fun encryptControlBytes(
+        config: PairingConfig,
+        requestId: String,
+        direction: String,
+        issuedAt: Long,
+        expiresAt: Long,
+        plaintext: ByteArray,
+    ): EncryptedControlFrame {
+        val deviceKey = decodeUrlBase64(config.deviceKey)
+        require(deviceKey.size == 32) { "Device E2EE Key 长度无效。" }
+        val controlKey = deriveControlKey(deviceKey, config.deviceId)
+        val nonce = ByteArray(12).also(SecureRandom()::nextBytes)
+        val cipher = Cipher.getInstance("AES/GCM/NoPadding")
+        cipher.init(
+            Cipher.ENCRYPT_MODE,
+            SecretKeySpec(controlKey, "AES"),
+            GCMParameterSpec(128, nonce),
+        )
+        cipher.updateAAD(
+            controlAad(
+                config,
+                requestId,
+                direction,
+                issuedAt,
+                expiresAt,
+            ),
+        )
+        val encrypted = cipher.doFinal(plaintext)
+        return EncryptedControlFrame(
+            requestId = requestId,
+            issuedAt = issuedAt,
+            expiresAt = expiresAt,
+            nonce = encodeUrlBase64(nonce),
+            ciphertext = encodeUrlBase64(encrypted),
+        )
+    }
+
+    fun decryptControl(
+        config: PairingConfig,
+        direction: String,
+        frame: EncryptedControlFrame,
+    ): JSONObject =
+        JSONObject(
+            decryptControlBytes(
+                config = config,
+                direction = direction,
+                frame = frame,
+            ).toString(Charsets.UTF_8),
+        )
+
+    internal fun decryptControlBytes(
+        config: PairingConfig,
+        direction: String,
+        frame: EncryptedControlFrame,
+    ): ByteArray {
+        val deviceKey = decodeUrlBase64(config.deviceKey)
+        require(deviceKey.size == 32) { "Device E2EE Key 长度无效。" }
+        val controlKey = deriveControlKey(deviceKey, config.deviceId)
+        val nonce = decodeUrlBase64(frame.nonce)
+        require(nonce.size == 12) { "Control nonce 长度无效。" }
+        val cipher = Cipher.getInstance("AES/GCM/NoPadding")
+        cipher.init(
+            Cipher.DECRYPT_MODE,
+            SecretKeySpec(controlKey, "AES"),
+            GCMParameterSpec(128, nonce),
+        )
+        cipher.updateAAD(
+            controlAad(
+                config,
+                frame.requestId,
+                direction,
+                frame.issuedAt,
+                frame.expiresAt,
+            ),
+        )
+        return cipher.doFinal(
+            decodeUrlBase64(frame.ciphertext),
+        )
+    }
+
     fun encryptPairing(
         pairingCode: String,
         pairingId: String,
@@ -131,6 +256,31 @@ object MonitorCrypto {
         "chatx-monitor-v1|pairing|$pairingId|$direction"
             .toByteArray(Charsets.UTF_8)
 
+    private fun controlAad(
+        config: PairingConfig,
+        requestId: String,
+        direction: String,
+        issuedAt: Long,
+        expiresAt: Long,
+    ): ByteArray =
+        (
+            "chatx-monitor-v1|control|$direction|" +
+                "${config.desktopId}|${config.deviceId}|$requestId|" +
+                "$issuedAt|$expiresAt"
+        ).toByteArray(Charsets.UTF_8)
+
+    private fun deriveControlKey(
+        deviceKey: ByteArray,
+        deviceId: String,
+    ): ByteArray {
+        val mac = Mac.getInstance("HmacSHA256")
+        mac.init(SecretKeySpec(deviceKey, "HmacSHA256"))
+        return mac.doFinal(
+            "chatx-monitor-control-v1|$deviceId"
+                .toByteArray(Charsets.UTF_8),
+        )
+    }
+
     private fun decodeHex(value: String): ByteArray {
         val normalized = value.trim().lowercase()
         require(normalized.length % 2 == 0) { "Hex 编码无效。" }
@@ -141,14 +291,8 @@ object MonitorCrypto {
     }
 
     private fun encodeUrlBase64(value: ByteArray): String =
-        Base64.encodeToString(
-            value,
-            Base64.URL_SAFE or Base64.NO_WRAP or Base64.NO_PADDING,
-        )
+        Base64.getUrlEncoder().withoutPadding().encodeToString(value)
 
     private fun decodeUrlBase64(value: String): ByteArray =
-        Base64.decode(
-            value,
-            Base64.URL_SAFE or Base64.NO_WRAP or Base64.NO_PADDING,
-        )
+        Base64.getUrlDecoder().decode(value)
 }

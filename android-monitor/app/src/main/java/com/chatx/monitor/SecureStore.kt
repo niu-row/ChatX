@@ -149,10 +149,37 @@ class SecureStore(context: Context) {
     }
 
     fun getPollIntervalSeconds(): Long =
-        prefs.getLong("poll_interval_seconds", 15L).coerceIn(10L, 60L)
+        prefs.getLong("poll_interval_seconds", 10L)
+            .takeIf { it in setOf(10L, 15L, 30L, 60L) }
+            ?: 10L
 
     fun setPollIntervalSeconds(seconds: Long) {
-        prefs.edit().putLong("poll_interval_seconds", seconds.coerceIn(10L, 60L)).apply()
+        val value = seconds.takeIf {
+            it in setOf(10L, 15L, 30L, 60L)
+        } ?: 10L
+        prefs.edit().putLong("poll_interval_seconds", value).apply()
+    }
+
+    fun getSnapshotStaleSeconds(): Long =
+        prefs.getLong("snapshot_stale_seconds", 90L)
+            .takeIf { it in setOf(30L, 60L, 90L, 180L) }
+            ?: 90L
+
+    fun setSnapshotStaleSeconds(seconds: Long) {
+        val value = seconds.takeIf {
+            it in setOf(30L, 60L, 90L, 180L)
+        } ?: 90L
+        prefs.edit().putLong("snapshot_stale_seconds", value).apply()
+    }
+
+    fun getOfflineFailureThreshold(): Int =
+        prefs.getInt("offline_failure_threshold", 3)
+            .takeIf { it in setOf(2, 3, 5) }
+            ?: 3
+
+    fun setOfflineFailureThreshold(value: Int) {
+        val normalized = value.takeIf { it in setOf(2, 3, 5) } ?: 3
+        prefs.edit().putInt("offline_failure_threshold", normalized).apply()
     }
 
     fun appendEvent(event: MonitorEvent) {

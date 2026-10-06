@@ -1,19 +1,19 @@
 #![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
 
 mod monitor;
+mod monitor_control;
+mod monitor_manager;
+mod monitor_status;
 mod monitor_crypto;
 mod monitor_network;
 mod monitor_server;
 mod relay;
 
-use chatx_relay_protocol::{PairingServerMessage, PairingWsMessage};
-use qrcode::{render::svg, QrCode};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::{
     collections::BTreeSet,
     fs,
-    io::{Read, Seek, SeekFrom},
     path::{Path, PathBuf},
     process::{Command, Output, Stdio},
     sync::{atomic::{AtomicBool, AtomicU32, Ordering}, Arc, Mutex},
@@ -151,24 +151,6 @@ impl Default for Settings {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct MonitorDeviceRecord {
-    id: String,
-    name: String,
-    token_hash: String,
-    created_at: u64,
-    last_seen_at: Option<u64>,
-}
-
-#[derive(Debug, Clone)]
-struct MonitorPairingGrant {
-    pairing_id: String,
-    pairing_code: String,
-    code_hash: String,
-    expires_at: u64,
-}
-
 #[derive(Default)]
 struct AppState {
     logs: Mutex<Vec<String>>,
@@ -179,9 +161,8 @@ struct AppState {
     runtime_snapshot: Mutex<monitor::TunnelSnapshot>,
     relay_status: Arc<Mutex<relay::RelayStatus>>,
     relay_client: Mutex<Option<relay::RelayClientHandle>>,
-    monitor_servers: Mutex<Vec<monitor_server::MonitorServerHandle>>,
-    monitor_pairing: Mutex<Option<MonitorPairingGrant>>,
-    monitor_devices: Mutex<Option<Vec<MonitorDeviceRecord>>>,
+    monitor: monitor_manager::State,
+    monitor_control: monitor_control::State,
     session_runtime_key: Mutex<Option<String>>,
     runtime_operation: Mutex<()>,
     permission_results: Mutex<Option<Value>>,
@@ -262,6 +243,7 @@ fn tcp_probe(host: &str, port: u16) -> bool {
     })
 }
 
+#[cfg(target_os = "macos")]
 fn proxy_value(text: &str, key: &str) -> Option<String> {
     let prefix = format!("{key} : ");
     text.lines()
@@ -445,8 +427,6 @@ fn monitor_identity_path(app: &tauri::AppHandle) -> Result<PathBuf, String> { Ok
 fn monitor_devices_path(app: &tauri::AppHandle) -> Result<PathBuf, String> { Ok(state_dir(app)?.join("monitor-devices.json")) }
 fn secret_path(app: &tauri::AppHandle) -> Result<PathBuf, String> { Ok(state_dir(app)?.join("runtime-key.dpapi")) }
 #[cfg(windows)]
-fn monitor_secret_path(app: &tauri::AppHandle) -> Result<PathBuf, String> { Ok(state_dir(app)?.join("monitor-token.dpapi")) }
-#[cfg(windows)]
 fn monitor_master_secret_path(app: &tauri::AppHandle) -> Result<PathBuf, String> { Ok(state_dir(app)?.join("monitor-master-key.dpapi")) }
 #[cfg(windows)]
 fn relay_secret_path(app: &tauri::AppHandle) -> Result<PathBuf, String> { Ok(state_dir(app)?.join("relay-credentials.dpapi")) }
@@ -455,136 +435,6 @@ fn call_history_path(app: &tauri::AppHandle) -> Result<PathBuf, String> {
 }
 fn monitor_activity_path(app: &tauri::AppHandle) -> Result<PathBuf, String> {
     Ok(desktop_commander_home(app)?.join(".chatx-monitor").join("activity.json"))
-}
-
-fn parse_recent_monitor_history(text: &str, limit: usize) -> Vec<Value> {
-    text.lines()
-        .rev()
-        .filter_map(|line| serde_json::from_str::<Value>(line).ok())
-        .filter_map(|record| {
-            let tool_name = record.get("toolName")?.as_str()?.to_string();
-            let timestamp = record.get("timestamp").and_then(Value::as_str).map(str::to_string);
-            let duration_ms = record.get("duration").and_then(Value::as_u64);
-            let success = record.get("output")
-                .and_then(|output| output.get("isError"))
-                .and_then(Value::as_bool) != Some(true);
-            Some(json!({
-                "toolName": tool_name,
-                "timestamp": timestamp,
-                "startedAt": Value::Null,
-                "durationMs": duration_ms,
-                "success": success,
-                "running": false
-            }))
-        })
-        .take(limit)
-        .collect()
-}
-
-fn read_history_tail(path: &Path, max_bytes: u64) -> String {
-    let Ok(mut file) = fs::File::open(path) else { return String::new(); };
-    let Ok(metadata) = file.metadata() else { return String::new(); };
-    let len = metadata.len();
-    let start = len.saturating_sub(max_bytes);
-    if file.seek(SeekFrom::Start(start)).is_err() {
-        return String::new();
-    }
-    let mut bytes = Vec::new();
-    if file.read_to_end(&mut bytes).is_err() {
-        return String::new();
-    }
-    let mut text = String::from_utf8_lossy(&bytes).to_string();
-    if start > 0 {
-        if let Some(index) = text.find('\n') {
-            text = text[index + 1..].to_string();
-        }
-    }
-    text
-}
-
-fn recent_monitor_calls(
-    app: &tauri::AppHandle,
-    activity: Option<&monitor::ActivitySnapshot>,
-    now_ms: u64,
-) -> Vec<Value> {
-    const LIMIT: usize = 20;
-    let mut calls = Vec::new();
-    if let Some(activity) = activity {
-        for call in activity.in_flight_calls.iter().take(LIMIT) {
-            calls.push(json!({
-                "id": call.id,
-                "toolName": call.tool_name,
-                "timestamp": Value::Null,
-                "startedAt": call.started_at,
-                "durationMs": now_ms.saturating_sub(call.started_at),
-                "success": Value::Null,
-                "running": true
-            }));
-        }
-        if calls.is_empty() && activity.in_flight > 0 {
-            if let (Some(tool_name), Some(started_at)) = (
-                activity.last_tool_name.as_ref(),
-                activity.last_call_started_at,
-            ) {
-                calls.push(json!({
-                    "toolName": tool_name,
-                    "timestamp": Value::Null,
-                    "startedAt": started_at,
-                    "durationMs": now_ms.saturating_sub(started_at),
-                    "success": Value::Null,
-                    "running": true
-                }));
-            }
-        }
-    }
-    if calls.len() < LIMIT {
-        if let Ok(path) = call_history_path(app) {
-            let tail = read_history_tail(&path, 256 * 1024);
-            calls.extend(parse_recent_monitor_history(&tail, LIMIT - calls.len()));
-        }
-    }
-    calls
-}
-
-fn monitor_status_payload(app: &tauri::AppHandle, state: &AppState) -> Value {
-    let now_ms = timestamp_ms();
-    let activity = monitor_activity_path(app).ok()
-        .and_then(|path| monitor::read_activity_snapshot(&path));
-    let mcp_status = monitor::evaluate_activity(activity.as_ref(), now_ms);
-    let recent_calls = recent_monitor_calls(app, activity.as_ref(), now_ms);
-    let mut mcp = serde_json::to_value(mcp_status).unwrap_or_else(|_| json!({}));
-    if let Value::Object(object) = &mut mcp {
-        object.insert("recentCalls".into(), Value::Array(recent_calls));
-    }
-    let tunnel = state.runtime_snapshot.lock()
-        .map(|snapshot| snapshot.clone()).unwrap_or_default();
-    let settings = load_settings(app);
-    let endpoints = monitor_network::discover_monitor_endpoints(settings.monitor_port);
-    json!({
-        "schemaVersion": 1,
-        "serverTime": now_ms,
-        "endpoints": endpoints,
-        "chatx": {"version": APP_VERSION, "platform": format!("{}-{}", std::env::consts::OS, std::env::consts::ARCH)},
-        "host": host_snapshot(),
-        "tunnel": {
-            "state": tunnel.state,
-            "health": tunnel.health,
-            "active": tunnel.active,
-            "updatedAt": tunnel.updated_at,
-            "lastProbeAt": tunnel.last_probe_at,
-            "lastSuccessfulProbeAt": tunnel.last_successful_probe_at,
-            "consecutiveFailures": tunnel.consecutive_failures,
-            "controlPlaneState": tunnel.control_plane_state,
-            "controlPlaneReason": tunnel.control_plane_reason,
-            "controlPlaneFailures": tunnel.control_plane_failures,
-            "proxyMode": tunnel.proxy_mode,
-            "proxySource": tunnel.proxy_source,
-            "desiredConnected": state.desired_connected.load(Ordering::SeqCst),
-            "reconnecting": state.reconnecting.load(Ordering::SeqCst),
-            "reconnectAttempt": state.reconnect_attempt.load(Ordering::SeqCst)
-        },
-        "mcp": mcp
-    })
 }
 
 fn runtime_key_saved(app: &tauri::AppHandle) -> bool {
@@ -743,6 +593,7 @@ fn output_text(output: &Output) -> String {
     if stdout.is_empty() { stderr } else if stderr.is_empty() { stdout } else { format!("{stdout}\n{stderr}") }
 }
 
+#[cfg(any(target_os = "macos", test))]
 fn pmset_disables_sleep(text: &str) -> bool {
     text.lines().any(|line| {
         let mut parts = line.split_whitespace();
@@ -753,6 +604,7 @@ fn pmset_disables_sleep(text: &str) -> bool {
     })
 }
 
+#[cfg(any(target_os = "macos", test))]
 fn shell_quote(value: &str) -> String {
     format!("'{}'", value.replace('\'', "'\\''"))
 }
@@ -985,459 +837,6 @@ fn read_relay_credentials(_app: &tauri::AppHandle) -> Result<relay::RelayCredent
     Err("安全读取 Relay Credential 当前仅支持 Windows 和 macOS。".into())
 }
 
-fn load_monitor_devices_from_disk(app: &tauri::AppHandle) -> Vec<MonitorDeviceRecord> {
-    let Ok(path) = monitor_devices_path(app) else { return Vec::new(); };
-    let Ok(text) = fs::read_to_string(path) else { return Vec::new(); };
-    serde_json::from_str::<Vec<MonitorDeviceRecord>>(&text).unwrap_or_default()
-}
-
-fn save_monitor_devices(
-    app: &tauri::AppHandle,
-    devices: &[MonitorDeviceRecord],
-) -> Result<(), String> {
-    let path = monitor_devices_path(app)?;
-    let temp = path.with_extension(format!("json.{}.tmp", std::process::id()));
-    let text = serde_json::to_string_pretty(devices)
-        .map_err(|e| format!("序列化 Monitor 设备失败：{e}"))?;
-    fs::write(&temp, format!("{text}\n"))
-        .map_err(|e| format!("保存 Monitor 设备临时文件失败：{e}"))?;
-    #[cfg(windows)]
-    if path.exists() {
-        fs::remove_file(&path).map_err(|e| format!("替换 Monitor 设备文件失败：{e}"))?;
-    }
-    fs::rename(&temp, &path).map_err(|e| format!("更新 Monitor 设备失败：{e}"))
-}
-
-fn monitor_devices_snapshot(
-    app: &tauri::AppHandle,
-    state: &AppState,
-) -> Vec<MonitorDeviceRecord> {
-    let Ok(mut registry) = state.monitor_devices.lock() else { return Vec::new(); };
-    if registry.is_none() {
-        *registry = Some(load_monitor_devices_from_disk(app));
-    }
-    registry.as_ref().cloned().unwrap_or_default()
-}
-
-fn revoke_monitor_device_local(
-    app: &tauri::AppHandle,
-    state: &AppState,
-    device_id: &str,
-) -> Result<bool, String> {
-    let mut registry = state.monitor_devices.lock()
-        .map_err(|_| "Monitor 设备状态锁已损坏。".to_string())?;
-    if registry.is_none() {
-        *registry = Some(load_monitor_devices_from_disk(app));
-    }
-    let devices = registry.as_mut()
-        .ok_or_else(|| "Monitor 设备状态不可用。".to_string())?;
-    let previous = devices.clone();
-    devices.retain(|device| device.id != device_id);
-    if devices.len() == previous.len() {
-        return Ok(false);
-    }
-    if let Err(error) = save_monitor_devices(app, devices) {
-        *devices = previous;
-        return Err(error);
-    }
-    drop(registry);
-    push_log(state, format!("已撤销手机 Monitor 设备：{device_id}"));
-    Ok(true)
-}
-
-fn revoke_monitor_device_everywhere(
-    app: &tauri::AppHandle,
-    state: &AppState,
-    device_id: &str,
-) -> Result<bool, String> {
-    let settings = load_settings(app);
-    let relay_credentials = read_relay_credentials(app).ok();
-    let relay_matches = if !settings.relay.base_url.trim().is_empty() {
-        relay_credentials.as_ref().is_some_and(|credentials| {
-            relay::normalized_base_url(&credentials.base_url).ok()
-                == relay::normalized_base_url(&settings.relay.base_url).ok()
-        })
-    } else {
-        false
-    };
-
-    if relay_matches {
-        if let Some(credentials) = relay_credentials.as_ref() {
-            relay::revoke_device(&settings.relay, credentials, device_id)
-                .map_err(|error| {
-                    format!(
-                        "Relay 端设备撤销失败，本地凭据保持有效；请确认 Relay 可达后重试：{error}"
-                    )
-                })?;
-        }
-    }
-
-    match revoke_monitor_device_local(app, state, device_id) {
-        Ok(removed) => Ok(removed),
-        Err(error) => {
-            if relay_matches {
-                if let (Some(credentials), Ok(master_key)) = (
-                    relay_credentials.as_ref(),
-                    ensure_monitor_master_key(app),
-                ) {
-                    if let Ok(relay_token) =
-                        monitor_crypto::derive_relay_token(&master_key, device_id)
-                    {
-                        let _ = relay::authorize_device(
-                            &settings.relay,
-                            credentials,
-                            device_id,
-                            &relay_token,
-                        );
-                    }
-                }
-            }
-            Err(error)
-        }
-    }
-}
-
-fn monitor_device_token_authorized(
-    app: &tauri::AppHandle,
-    state: &AppState,
-    device_id: &str,
-    token: &str,
-) -> bool {
-    let Ok(mut registry) = state.monitor_devices.lock() else { return false; };
-    if registry.is_none() {
-        *registry = Some(load_monitor_devices_from_disk(app));
-    }
-    let Some(devices) = registry.as_mut() else { return false; };
-    let now = timestamp_ms();
-    let Some(index) = devices.iter().position(|device| {
-        device.id == device_id
-            && monitor_server::verify_token_hash_hex(token, &device.token_hash)
-    }) else {
-        return false;
-    };
-    let should_update = devices[index].last_seen_at
-        .map(|seen| now.saturating_sub(seen) >= 60_000)
-        .unwrap_or(true);
-    if should_update {
-        let previous = devices[index].last_seen_at;
-        devices[index].last_seen_at = Some(now);
-        if save_monitor_devices(app, devices).is_err() {
-            devices[index].last_seen_at = previous;
-        }
-    }
-    true
-}
-
-fn complete_monitor_pairing(
-    app: &tauri::AppHandle,
-    state: &AppState,
-    payload: Value,
-) -> Result<Value, String> {
-    let code = payload.get("pairingCode")
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .ok_or_else(|| "缺少 pairingCode。".to_string())?;
-    let raw_name = payload.get("deviceName")
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .unwrap_or("Android Device");
-    let name = raw_name.chars().take(80).collect::<String>();
-
-    let mut pairing = state.monitor_pairing.lock()
-        .map_err(|_| "Monitor 配对状态锁已损坏。".to_string())?;
-    let Some(grant) = pairing.as_ref() else {
-        return Err("当前没有有效的配对请求。".into());
-    };
-    if timestamp_ms() > grant.expires_at {
-        *pairing = None;
-        return Err("配对二维码已过期，请在 ChatX 中重新生成。".into());
-    }
-    if !monitor_server::verify_token_hash_hex(code, &grant.code_hash) {
-        return Err("配对码无效。".into());
-    }
-    let pairing_id = grant.pairing_id.clone();
-    *pairing = None;
-    drop(pairing);
-
-    let mut registry = state.monitor_devices.lock()
-        .map_err(|_| "Monitor 设备状态锁已损坏。".to_string())?;
-    if registry.is_none() {
-        *registry = Some(load_monitor_devices_from_disk(app));
-    }
-    let devices = registry.as_mut()
-        .ok_or_else(|| "Monitor 设备状态不可用。".to_string())?;
-    if devices.len() >= 32 {
-        return Err("已配对设备数量已达到上限 32。".into());
-    }
-    let master_key = ensure_monitor_master_key(app)?;
-    let random_id = monitor_server::generate_monitor_token()?;
-    let device_id = format!("dev_{}", &random_id[..24]);
-    let direct_token = monitor_crypto::derive_direct_token(&master_key, &device_id)?;
-    let relay_token = monitor_crypto::derive_relay_token(&master_key, &device_id)?;
-    let device_key = monitor_crypto::device_key_b64(&master_key, &device_id)?;
-    let token_hash = monitor_server::token_hash_hex(&direct_token);
-    let settings = load_settings(app);
-    let relay_enrollment = if settings.relay.enabled {
-        if let Some(credentials) = relay_credentials_for_settings(app, &settings) {
-            relay::authorize_device(&settings.relay, &credentials, &device_id, &relay_token)?;
-            Some(json!({
-                "baseUrl": settings.relay.base_url,
-                "desktopId": credentials.desktop_id,
-                "deviceToken": relay_token
-            }))
-        } else {
-            None
-        }
-    } else {
-        None
-    };
-
-    let now = timestamp_ms();
-    let previous = devices.clone();
-    devices.push(MonitorDeviceRecord {
-        id: device_id.clone(),
-        name: name.clone(),
-        token_hash,
-        created_at: now,
-        last_seen_at: Some(now),
-    });
-    if let Err(error) = save_monitor_devices(app, devices) {
-        if settings.relay.enabled {
-            if let Ok(credentials) = read_relay_credentials(app) {
-                let _ = relay::revoke_device(&settings.relay, &credentials, &device_id);
-            }
-        }
-        *devices = previous;
-        return Err(error);
-    }
-    if settings.relay.enabled {
-        if let Ok(credentials) = read_relay_credentials(app) {
-            let _ = relay::delete_pairing_route(
-                &settings.relay,
-                &credentials,
-                &pairing_id,
-            );
-        }
-    }
-    push_log(state, format!("手机 Monitor 已配对设备：{name} ({device_id})"));
-    Ok(json!({
-        "schemaVersion": 3,
-        "deviceId": device_id,
-        "deviceName": name,
-        "directToken": direct_token,
-        "deviceKey": device_key,
-        "relay": relay_enrollment
-    }))
-}
-
-fn handle_encrypted_monitor_pairing(
-    app: &tauri::AppHandle,
-    state: &AppState,
-    message: PairingWsMessage,
-) -> Result<PairingServerMessage, String> {
-    let PairingWsMessage::Pair { pairing_id, payload } = message;
-    let grant = {
-        let mut pairing = state.monitor_pairing.lock()
-            .map_err(|_| "Monitor 配对状态锁已损坏。".to_string())?;
-        let Some(grant) = pairing.as_ref() else {
-            return Err("当前没有有效的配对请求。".into());
-        };
-        if timestamp_ms() > grant.expires_at {
-            *pairing = None;
-            return Err("配对二维码已过期，请在 ChatX 中重新生成。".into());
-        }
-        if grant.pairing_id != pairing_id {
-            return Err("Pairing route 无效。".into());
-        }
-        grant.clone()
-    };
-
-    let plaintext = monitor_crypto::decrypt_pairing_payload(
-        &grant.pairing_code,
-        &pairing_id,
-        "request",
-        &payload,
-    )?;
-    let request = serde_json::from_slice::<Value>(&plaintext)
-        .map_err(|_| "Pairing E2EE payload 不是有效 JSON。".to_string())?;
-    let result = complete_monitor_pairing(app, state, request)?;
-    let clear = serde_json::to_vec(&result)
-        .map_err(|e| format!("序列化 Pairing result 失败：{e}"))?;
-    let payload = monitor_crypto::encrypt_pairing_payload(
-        &grant.pairing_code,
-        &pairing_id,
-        "response",
-        &clear,
-    )?;
-    Ok(PairingServerMessage::PairResult { pairing_id, payload })
-}
-
-fn monitor_tls_dir(app: &tauri::AppHandle) -> Result<PathBuf, String> {
-    Ok(state_dir(app)?.join("monitor-tls"))
-}
-
-fn monitor_info_payload(app: &tauri::AppHandle, state: &AppState) -> Value {
-    let settings = load_settings(app);
-    let servers = state.monitor_servers.lock().ok();
-    let running = servers.as_ref().is_some_and(|servers| !servers.is_empty());
-    let bind_addresses = servers.as_ref().map(|servers| {
-        servers.iter().map(|server| server.addr.to_string()).collect::<Vec<_>>()
-    }).unwrap_or_default();
-    let fingerprint = servers.as_ref()
-        .and_then(|servers| servers.first())
-        .map(|server| server.fingerprint_sha256.clone());
-    let endpoints = if running {
-        let supports_ipv4 = servers.as_ref().is_some_and(|servers| servers.iter().any(|server| server.addr.is_ipv4()));
-        let supports_ipv6 = servers.as_ref().is_some_and(|servers| servers.iter().any(|server| server.addr.is_ipv6()));
-        monitor_network::discover_monitor_endpoints(settings.monitor_port)
-            .into_iter()
-            .filter(|endpoint| {
-                (endpoint.family == "ipv4" && supports_ipv4)
-                    || (endpoint.family == "ipv6" && supports_ipv6)
-            })
-            .collect::<Vec<_>>()
-    } else {
-        Vec::new()
-    };
-    let devices = monitor_devices_snapshot(app, state).into_iter().map(|device| json!({
-        "id": device.id,
-        "name": device.name,
-        "createdAt": device.created_at,
-        "lastSeenAt": device.last_seen_at
-    })).collect::<Vec<_>>();
-    json!({
-        "enabled": settings.monitor_enabled,
-        "port": settings.monitor_port,
-        "running": running,
-        "desktopId": ensure_monitor_desktop_id(app).ok(),
-        "protocol": "chatx-monitor-wss-v1",
-        "encryption": "AES-256-GCM",
-        "bindAddress": if bind_addresses.is_empty() { None } else { Some(bind_addresses.join(" · ")) },
-        "bindAddresses": bind_addresses,
-        "fingerprintSha256": fingerprint,
-        "devices": devices,
-        "endpoints": endpoints
-    })
-}
-
-fn start_monitor_service(app: &tauri::AppHandle, state: &AppState) -> Result<(), String> {
-    let settings = load_settings(app);
-    if !settings.monitor_enabled {
-        return Ok(());
-    }
-    if settings.monitor_port < 1024 {
-        return Err("Monitor 端口必须为 1024-65535。".into());
-    }
-    let mut slot = state.monitor_servers.lock()
-        .map_err(|_| "Monitor Server 状态锁已损坏。".to_string())?;
-    if !slot.is_empty() {
-        return Ok(());
-    }
-
-    let identity = monitor_server::ensure_tls_identity(&monitor_tls_dir(app)?)?;
-    let desktop_id = ensure_monitor_desktop_id(app)?;
-    let master_key = ensure_monitor_master_key(app)?;
-
-    let app_for_auth = app.clone();
-    let auth_checker: monitor_server::AuthChecker = Arc::new(move |device_id, candidate| {
-        let state = app_for_auth.state::<AppState>();
-        monitor_device_token_authorized(
-            &app_for_auth,
-            state.inner(),
-            device_id,
-            candidate,
-        )
-    });
-
-    let app_for_pair = app.clone();
-    let pair_handler: monitor_server::PairHandler = Arc::new(move |message| {
-        let state = app_for_pair.state::<AppState>();
-        handle_encrypted_monitor_pairing(&app_for_pair, state.inner(), message)
-    });
-
-    let app_for_revoke = app.clone();
-    let revoke_handler: monitor_server::RevokeHandler = Arc::new(move |device_id| {
-        let state = app_for_revoke.state::<AppState>();
-        revoke_monitor_device_everywhere(
-            &app_for_revoke,
-            state.inner(),
-            device_id,
-        ).and_then(|removed| {
-            if removed { Ok(()) } else { Err("没有找到该已配对设备。".into()) }
-        })
-    });
-
-    let app_for_snapshot = app.clone();
-    let snapshot_desktop_id = desktop_id.clone();
-    let snapshot_provider: monitor_server::SnapshotProvider = Arc::new(
-        move |device_id, session_id, sequence| {
-            let state = app_for_snapshot.state::<AppState>();
-            let plaintext = serde_json::to_vec(&monitor_status_payload(
-                &app_for_snapshot,
-                state.inner(),
-            )).map_err(|e| format!("序列化 Monitor Snapshot 失败：{e}"))?;
-            monitor_crypto::encrypt_snapshot(
-                &master_key,
-                &snapshot_desktop_id,
-                device_id,
-                session_id,
-                sequence,
-                timestamp_ms(),
-                &plaintext,
-            )
-        },
-    );
-
-    let binds = [
-        format!("0.0.0.0:{}", settings.monitor_port),
-        format!("[::]:{}", settings.monitor_port),
-    ];
-    let mut errors = Vec::new();
-    for bind_text in binds {
-        let bind = match bind_text.parse() {
-            Ok(bind) => bind,
-            Err(error) => {
-                errors.push(format!("{bind_text}: {error}"));
-                continue;
-            }
-        };
-        match monitor_server::start_monitor_server(
-            bind,
-            identity.clone(),
-            desktop_id.clone(),
-            auth_checker.clone(),
-            pair_handler.clone(),
-            revoke_handler.clone(),
-            snapshot_provider.clone(),
-        ) {
-            Ok(server) => {
-                push_log(state, format!("手机 Monitor Server 已启动：WSS {}", server.addr));
-                slot.push(server);
-            }
-            Err(error) => errors.push(error),
-        }
-    }
-    if slot.is_empty() {
-        return Err(format!("Monitor Server 无法监听 IPv4/IPv6：{}", errors.join("；")));
-    }
-    for error in errors {
-        push_log(state, format!("Monitor Server 部分监听失败：{error}"));
-    }
-    Ok(())
-}
-
-fn stop_monitor_service(state: &AppState) -> Result<(), String> {
-    let servers = {
-        let mut slot = state.monitor_servers.lock()
-            .map_err(|_| "Monitor Server 状态锁已损坏。".to_string())?;
-        std::mem::take(&mut *slot)
-    };
-    drop(servers);
-    push_log(state, "手机 Monitor Server 已停止");
-    Ok(())
-}
 
 fn clear_runtime_key(app: &tauri::AppHandle) -> Result<(), String> {
     #[cfg(target_os = "macos")]
@@ -1706,6 +1105,24 @@ mod tests {
     }
 
     #[test]
+    fn explicit_stop_blocks_any_start_that_requires_connection_intent() {
+        let state = AppState::default();
+        let mut settings = Settings::default();
+        settings.connection_intent = true;
+
+        state.desired_connected.store(false, Ordering::SeqCst);
+        assert!(ensure_runtime_start_intent(&state, &settings, true).is_err());
+
+        state.desired_connected.store(true, Ordering::SeqCst);
+        settings.connection_intent = false;
+        assert!(ensure_runtime_start_intent(&state, &settings, true).is_err());
+
+        settings.connection_intent = true;
+        assert!(ensure_runtime_start_intent(&state, &settings, true).is_ok());
+        assert!(ensure_runtime_start_intent(&state, &Settings::default(), false).is_ok());
+    }
+
+    #[test]
     fn runtime_key_remote_status_distinguishes_auth_failures() {
         assert!(runtime_key_remote_status(200).ok);
         assert_eq!(runtime_key_remote_status(401).state, "invalid");
@@ -1814,7 +1231,7 @@ mod tests {
             r#"{"timestamp":"2026-09-23T00:00:01.000Z","toolName":"write_file","arguments":{"content":"secret-input"},"output":{"isError":true},"duration":84}"#,
             "\n"
         );
-        let calls = parse_recent_monitor_history(text, 10);
+        let calls = monitor_status::parse_recent_history(text, 10);
         assert_eq!(calls.len(), 2);
         assert_eq!(calls[0]["toolName"], "write_file");
         assert_eq!(calls[0]["success"], false);
@@ -1962,7 +1379,7 @@ fn runtime_proxy_source(payload: &Value) -> String {
     let Some(log_path) = payload.pointer("/local/log/path").and_then(Value::as_str) else {
         return String::new();
     };
-    let tail = read_history_tail(Path::new(log_path), 512 * 1024);
+    let tail = monitor_status::read_history_tail(Path::new(log_path), 512 * 1024);
     let mut instance_id: Option<String> = None;
     for line in tail.lines().rev() {
         let Ok(event) = serde_json::from_str::<Value>(line) else { continue; };
@@ -2016,7 +1433,7 @@ fn control_plane_observation(payload: &Value) -> ControlPlaneObservation {
     let Some(log_path) = payload.pointer("/local/log/path").and_then(Value::as_str) else {
         return fallback;
     };
-    let tail = read_history_tail(Path::new(log_path), 512 * 1024);
+    let tail = monitor_status::read_history_tail(Path::new(log_path), 512 * 1024);
     if tail.is_empty() {
         return fallback;
     }
@@ -2171,44 +1588,15 @@ fn update_runtime_snapshot(
     desired_connected: bool,
     settings: &Settings,
 ) {
-    let now = timestamp_ms();
     if let Ok(mut snapshot) = state.runtime_snapshot.lock() {
-        let local_failures = if observation.active || !desired_connected {
-            0
-        } else {
-            snapshot.consecutive_failures.saturating_add(1)
-        };
-        let failures = if observation.control_plane.consecutive_failures > 0 {
-            observation.control_plane.consecutive_failures
-        } else {
-            local_failures
-        };
-        snapshot.state = observation.state.clone();
-        snapshot.active = observation.active;
-        snapshot.last_error = observation.error.clone();
-        snapshot.updated_at = now;
-        snapshot.last_probe_at = now;
-        snapshot.consecutive_failures = failures;
-        snapshot.control_plane_state = observation.control_plane.state.clone();
-        snapshot.control_plane_reason = observation.control_plane.reason.clone();
-        snapshot.control_plane_failures = observation.control_plane.consecutive_failures;
-        snapshot.proxy_mode = settings.proxy.mode.clone();
-        snapshot.proxy_source = observation.proxy_source.clone();
-
-        if !desired_connected {
-            snapshot.health = "stopped".into();
-        } else if observation.control_plane.state == "down" {
-            snapshot.health = "down".into();
-        } else if matches!(observation.control_plane.state.as_str(), "suspect" | "starting") {
-            snapshot.health = "suspect".into();
-        } else if observation.active {
-            snapshot.last_successful_probe_at = now;
-            snapshot.health = "healthy".into();
-        } else if failures >= if observation.runtime_alive { 8 } else { 2 } {
-            snapshot.health = "down".into();
-        } else {
-            snapshot.health = "suspect".into();
-        }
+        let next = monitor_status::project_runtime_snapshot(
+            &snapshot,
+            observation,
+            desired_connected,
+            settings,
+            true,
+        );
+        *snapshot = next;
     }
 }
 
@@ -2222,15 +1610,36 @@ fn reconnect_delay_secs(attempt: u32) -> u64 {
     }
 }
 
+fn ensure_runtime_start_intent(
+    state: &AppState,
+    settings: &Settings,
+    required: bool,
+) -> Result<(), String> {
+    if required
+        && (!settings.connection_intent
+            || !state.desired_connected.load(Ordering::SeqCst))
+    {
+        return Err("Tunnel 连接意图已取消，拒绝重新启动。".into());
+    }
+    Ok(())
+}
+
 fn start_runtime_connection(
     app: &tauri::AppHandle,
     state: &AppState,
     tunnel_id: &str,
     key: &str,
     reconnect: bool,
+    require_connection_intent: bool,
 ) -> Result<(), String> {
     let _operation = state.runtime_operation.lock().map_err(|_| "Tunnel 操作锁已损坏。".to_string())?;
-    if reconnect && (!state.desired_connected.load(Ordering::SeqCst) || !load_settings(app).auto_reconnect) {
+    let current_settings = load_settings(app);
+    ensure_runtime_start_intent(
+        state,
+        &current_settings,
+        require_connection_intent,
+    )?;
+    if reconnect && !current_settings.auto_reconnect {
         return Ok(());
     }
 
@@ -2376,7 +1785,7 @@ fn start_reconnect_monitor(app: tauri::AppHandle) {
                 continue;
             }
 
-            match start_runtime_connection(&app, state.inner(), &settings.tunnel_id, &key, true) {
+            match start_runtime_connection(&app, state.inner(), &settings.tunnel_id, &key, true, true) {
                 Ok(()) if state.desired_connected.load(Ordering::SeqCst) => {
                     push_log(&state, format!("第 {attempt} 次自动重连命令已完成"));
                     state.reconnect_attempt.store(0, Ordering::SeqCst);
@@ -2566,7 +1975,7 @@ fn get_mcp_live_status(app: tauri::AppHandle) -> Result<Value, String> {
     let activity = monitor_activity_path(&app).ok()
         .and_then(|path| monitor::read_activity_snapshot(&path));
     let status = monitor::evaluate_activity(activity.as_ref(), now_ms);
-    let recent_calls = recent_monitor_calls(&app, activity.as_ref(), now_ms);
+    let recent_calls = monitor_status::recent_calls(&app, activity.as_ref(), now_ms);
     Ok(json!({
         "serverTime": now_ms,
         "status": status,
@@ -2779,19 +2188,20 @@ fn start_relay_client_for_settings(
     let app_for_snapshot = app.clone();
     let snapshot_provider: relay::SnapshotProvider = Arc::new(move || {
         let state = app_for_snapshot.state::<AppState>();
-        let devices = monitor_devices_snapshot(&app_for_snapshot, state.inner());
-        if devices.is_empty() {
+        let device_ids =
+            monitor_manager::monitor_device_ids(&app_for_snapshot, state.inner());
+        if device_ids.is_empty() {
             return Vec::new();
         }
-        let payload = match serde_json::to_vec(&monitor_status_payload(
+        let payload = match serde_json::to_vec(&monitor_status::payload(
             &app_for_snapshot,
             state.inner(),
         )) {
             Ok(value) => value,
             Err(_) => return Vec::new(),
         };
-        devices.into_iter().map(|device| relay::SnapshotSource {
-            device_id: device.id,
+        device_ids.into_iter().map(|device_id| relay::SnapshotSource {
+            device_id,
             plaintext: payload.clone(),
         }).collect()
     });
@@ -2799,18 +2209,31 @@ fn start_relay_client_for_settings(
     let app_for_pair = app.clone();
     let pairing_handler: relay::PairingHandler = Arc::new(move |message| {
         let state = app_for_pair.state::<AppState>();
-        handle_encrypted_monitor_pairing(&app_for_pair, state.inner(), message)
+        monitor_manager::handle_encrypted_monitor_pairing(&app_for_pair, state.inner(), message)
     });
 
     let app_for_revoke = app.clone();
     let revoke_handler: relay::RevokeHandler = Arc::new(move |device_id| {
         let state = app_for_revoke.state::<AppState>();
-        revoke_monitor_device_local(
+        monitor_manager::revoke_monitor_device_local(
             &app_for_revoke,
             state.inner(),
             device_id,
         ).map(|_| ())
     });
+
+    let app_for_control = app.clone();
+    let control_handler: relay::ControlHandler = Arc::new(
+        move |device_id, request| {
+            let state = app_for_control.state::<AppState>();
+            monitor_control::handle(
+                &app_for_control,
+                state.inner(),
+                device_id,
+                request,
+            )
+        },
+    );
 
     let handle = relay::start_client(
         settings.relay.clone(),
@@ -2820,6 +2243,7 @@ fn start_relay_client_for_settings(
         snapshot_provider,
         pairing_handler,
         revoke_handler,
+        control_handler,
     )?;
     let mut slot = state.relay_client.lock()
         .map_err(|_| "Relay Client 状态锁已损坏。".to_string())?;
@@ -3025,6 +2449,7 @@ fn set_network_settings(
             &next.tunnel_id,
             key,
             false,
+            true,
         ) {
             let _ = save_settings(&app, &previous);
             let _ = start_runtime_connection(
@@ -3033,6 +2458,7 @@ fn set_network_settings(
                 &previous.tunnel_id,
                 key,
                 false,
+                true,
             );
             let _ = start_relay_client_for_settings(&app, state.inner());
             return Err(format!("应用 Tunnel 代理失败，已回滚原配置：{error}"));
@@ -3064,7 +2490,7 @@ fn set_network_settings(
 
 #[tauri::command]
 fn get_monitor_info(app: tauri::AppHandle, state: State<'_, AppState>) -> Result<Value, String> {
-    Ok(monitor_info_payload(&app, state.inner()))
+    Ok(monitor_manager::monitor_info_payload(&app, state.inner()))
 }
 
 #[tauri::command]
@@ -3088,14 +2514,14 @@ fn set_monitor_enabled(
     }
     let restart = previous.monitor_enabled && enabled && previous.monitor_port != settings.monitor_port;
     if restart || !enabled {
-        stop_monitor_service(state.inner())?;
+        monitor_manager::stop_monitor_service(state.inner())?;
     }
     save_settings(&app, &settings)?;
     if enabled {
-        if let Err(error) = start_monitor_service(&app, state.inner()) {
+        if let Err(error) = monitor_manager::start_monitor_service(&app, state.inner()) {
             let _ = save_settings(&app, &previous);
             if previous.monitor_enabled {
-                let _ = start_monitor_service(&app, state.inner());
+                let _ = monitor_manager::start_monitor_service(&app, state.inner());
             }
             return Err(error);
         }
@@ -3104,140 +2530,12 @@ fn set_monitor_enabled(
     if !enabled {
         stop_relay_client(state.inner());
     }
-    Ok(monitor_info_payload(&app, state.inner()))
+    Ok(monitor_manager::monitor_info_payload(&app, state.inner()))
 }
 
 #[tauri::command]
 fn create_monitor_pairing(app: tauri::AppHandle, state: State<'_, AppState>) -> Result<Value, String> {
-    let settings = load_settings(&app);
-    if !settings.monitor_enabled {
-        return Err("请先开启手机连接。".into());
-    }
-    start_monitor_service(&app, state.inner())?;
-
-    let (supports_ipv4, supports_ipv6, fingerprint_sha256) = {
-        let servers = state.monitor_servers.lock()
-            .map_err(|_| "Monitor Server 状态锁已损坏。".to_string())?;
-        if servers.is_empty() {
-            return Err("Monitor WSS Server 未运行。".into());
-        }
-        (
-            servers.iter().any(|server| server.addr.is_ipv4()),
-            servers.iter().any(|server| server.addr.is_ipv6()),
-            servers[0].fingerprint_sha256.clone(),
-        )
-    };
-
-    let endpoints = monitor_network::discover_monitor_endpoints(settings.monitor_port)
-        .into_iter()
-        .filter(|endpoint| {
-            (endpoint.family == "ipv4" && supports_ipv4)
-                || (endpoint.family == "ipv6" && supports_ipv6)
-        })
-        .take(8)
-        .collect::<Vec<_>>();
-    let direct_candidates = endpoints.into_iter().map(|endpoint| {
-        let pair_url = endpoint.url.replace("/v1/ws/monitor", "/v1/ws/pair");
-        json!({
-            "kind": endpoint.kind,
-            "family": endpoint.family,
-            "interface": endpoint.interface,
-            "host": endpoint.host,
-            "url": pair_url
-        })
-    }).collect::<Vec<_>>();
-
-    let desktop_id = ensure_monitor_desktop_id(&app)?;
-    let pairing_code = monitor_server::generate_monitor_token()?;
-    let pairing_random = monitor_server::generate_monitor_token()?;
-    let pairing_id = format!("p_{}", &pairing_random[..24]);
-    let expires_at = timestamp_ms().saturating_add(5 * 60_000);
-
-    let mut relay_pairing = None;
-    let mut relay_error = None;
-    if settings.relay.enabled {
-        match read_relay_credentials(&app) {
-            Ok(credentials)
-                if credentials.desktop_id == desktop_id
-                    && relay::normalized_base_url(&credentials.base_url).ok()
-                        == relay::normalized_base_url(&settings.relay.base_url).ok() =>
-            {
-                let route_token = monitor_server::generate_monitor_token()?;
-                match relay::open_pairing_route(
-                    &settings.relay,
-                    &credentials,
-                    &pairing_id,
-                    &route_token,
-                    expires_at,
-                ) {
-                    Ok(()) => {
-                        relay_pairing = Some(json!({
-                            "baseUrl": settings.relay.base_url,
-                            "url": relay::pairing_ws_url(
-                                &settings.relay,
-                                &credentials,
-                                &pairing_id,
-                            )?,
-                            "desktopId": desktop_id,
-                            "pairingId": pairing_id,
-                            "routeToken": route_token
-                        }));
-                    }
-                    Err(error) => relay_error = Some(error),
-                }
-            }
-            Ok(_) => relay_error = Some(
-                "Relay Credential 与当前 Desktop 身份或 Relay URL 不匹配。".into()
-            ),
-            Err(error) => relay_error = Some(error),
-        }
-    }
-
-    if direct_candidates.is_empty() && relay_pairing.is_none() {
-        return Err(relay_error.unwrap_or_else(|| {
-            "没有发现可用的 Direct WSS 路径，ChatX Relay 也不可用。".into()
-        }));
-    }
-
-    {
-        let mut grant = state.monitor_pairing.lock()
-            .map_err(|_| "Monitor 配对状态锁已损坏。".to_string())?;
-        *grant = Some(MonitorPairingGrant {
-            pairing_id: pairing_id.clone(),
-            pairing_code: pairing_code.clone(),
-            code_hash: monitor_server::token_hash_hex(&pairing_code),
-            expires_at,
-        });
-    }
-
-    let pairing = json!({
-        "schemaVersion": 3,
-        "protocol": "chatx-monitor-wss-v1",
-        "scheme": "wss",
-        "desktopId": desktop_id,
-        "port": settings.monitor_port,
-        "directCandidates": direct_candidates,
-        "relayPairing": relay_pairing,
-        "relayPairingError": relay_error,
-        "fingerprintSha256": fingerprint_sha256,
-        "pairingId": pairing_id,
-        "pairingCode": pairing_code,
-        "expiresAt": expires_at
-    });
-    let pairing_text = serde_json::to_string(&pairing)
-        .map_err(|e| format!("生成配对 JSON 失败：{e}"))?;
-    let qr = QrCode::new(pairing_text.as_bytes())
-        .map_err(|e| format!("生成配对二维码失败：{e}"))?;
-    let qr_svg = qr.render::<svg::Color>()
-        .min_dimensions(280, 280)
-        .dark_color(svg::Color("#111827"))
-        .light_color(svg::Color("#ffffff"))
-        .build();
-    let mut result = pairing;
-    result.as_object_mut()
-        .ok_or_else(|| "生成配对资料失败。".to_string())?
-        .insert("qrSvg".into(), Value::String(qr_svg));
-    Ok(result)
+    monitor_manager::create_pairing(&app, state.inner())
 }
 
 #[tauri::command]
@@ -3250,58 +2548,14 @@ fn revoke_monitor_device(
     if device_id.is_empty() {
         return Err("设备 ID 不能为空。".into());
     }
-
-    let settings = load_settings(&app);
-    let relay_credentials = read_relay_credentials(&app).ok();
-    if !settings.relay.base_url.trim().is_empty() {
-        if let Some(credentials) = relay_credentials.as_ref() {
-            if relay::normalized_base_url(&credentials.base_url)?
-                == relay::normalized_base_url(&settings.relay.base_url)?
-            {
-                relay::revoke_device(&settings.relay, credentials, device_id)
-                    .map_err(|error| {
-                        format!(
-                            "Relay 端设备撤销失败，本地凭据保持有效；请确认 Relay 可达后重试：{error}"
-                        )
-                    })?;
-            }
-        }
-    }
-
-    let mut registry = state.monitor_devices.lock()
-        .map_err(|_| "Monitor 设备状态锁已损坏。".to_string())?;
-    if registry.is_none() {
-        *registry = Some(load_monitor_devices_from_disk(&app));
-    }
-    let devices = registry.as_mut()
-        .ok_or_else(|| "Monitor 设备状态不可用。".to_string())?;
-    let previous = devices.clone();
-    devices.retain(|device| device.id != device_id);
-    if devices.len() == previous.len() {
+    if !monitor_manager::revoke_monitor_device_everywhere(
+        &app,
+        state.inner(),
+        device_id,
+    )? {
         return Err("没有找到该已配对设备。".into());
     }
-    if let Err(error) = save_monitor_devices(&app, devices) {
-        if let (Some(credentials), Ok(master_key)) = (
-            relay_credentials.as_ref(),
-            ensure_monitor_master_key(&app),
-        ) {
-            if let Ok(relay_token) =
-                monitor_crypto::derive_relay_token(&master_key, device_id)
-            {
-                let _ = relay::authorize_device(
-                    &settings.relay,
-                    credentials,
-                    device_id,
-                    &relay_token,
-                );
-            }
-        }
-        *devices = previous;
-        return Err(error);
-    }
-    drop(registry);
-    push_log(state.inner(), format!("已撤销手机 Monitor 设备：{device_id}"));
-    Ok(monitor_info_payload(&app, state.inner()))
+    Ok(monitor_manager::monitor_info_payload(&app, state.inner()))
 }
 
 #[tauri::command]
@@ -3395,7 +2649,7 @@ fn connect_tunnel(app: tauri::AppHandle, state: State<'_, AppState>, tunnel_id: 
         *session_key = Some(key.clone());
     }
 
-    if let Err(error) = start_runtime_connection(&app, state.inner(), &tunnel_id, &key, false) {
+    if let Err(error) = start_runtime_connection(&app, state.inner(), &tunnel_id, &key, false, false) {
         cancel_connection_intent(state.inner());
         return Err(error);
     }
@@ -3577,7 +2831,7 @@ fn stop_on_exit(app: &tauri::AppHandle) {
     let state = app.state::<AppState>();
     state.quitting.store(true, Ordering::SeqCst);
     stop_relay_client(state.inner());
-    let _ = stop_monitor_service(state.inner());
+    let _ = monitor_manager::stop_monitor_service(state.inner());
     // Exiting ChatX stops the local runtime but preserves the persisted
     // connection intent. Only an explicit Stop action clears that intent.
     cancel_connection_intent(state.inner());
@@ -3648,7 +2902,7 @@ fn main() {
         let settings = load_settings(&handle);
         let state = handle.state::<AppState>();
         if settings.monitor_enabled {
-            match start_monitor_service(&handle, state.inner()) {
+            match monitor_manager::start_monitor_service(&handle, state.inner()) {
                 Ok(()) => {
                     if let Ok(dir) = state_dir(&handle) {
                         let _ = fs::remove_file(dir.join("monitor-startup-error.log"));

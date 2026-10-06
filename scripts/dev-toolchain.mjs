@@ -164,10 +164,23 @@ function printDoctor() {
     cachedGradleZip: cachedGradleZip(version),
   }, null, 2));
 }
-function runRust(mode) {
+function runCargoManifest(mode, manifestPath) {
   const cargo = rustTool('cargo');
   if (!cargo) throw new Error(`Rust cargo not found under real home: ${realHome}`);
-  run(cargo, [mode, '--manifest-path', 'src-tauri/Cargo.toml'], { env: baseEnv() });
+  run(cargo, [mode, '--manifest-path', manifestPath], { env: baseEnv() });
+}
+
+function runRust(mode) {
+  runCargoManifest(mode, 'src-tauri/Cargo.toml');
+}
+
+function runRelayTests() {
+  runCargoManifest('test', 'relay-protocol/Cargo.toml');
+  runCargoManifest('test', 'relay-server/Cargo.toml');
+}
+
+function runBatch(command, args, options = {}) {
+  run('cmd.exe', ['/d', '/c', 'call', command, ...args], options);
 }
 
 function runAndroidTests() {
@@ -179,15 +192,30 @@ function runAndroidTests() {
   const gradle = ensureGradle(version);
   const env = baseEnv({ JAVA_HOME: jdk, ANDROID_HOME: sdk, ANDROID_SDK_ROOT: sdk });
   if (gradle) {
-    run(gradle, ['lintDebug', 'test', '--no-daemon'], { cwd: path.join(root, 'android-monitor'), env });
+    if (isWindows && gradle.toLowerCase().endsWith('.bat')) {
+      runBatch(gradle, ['lintDebug', 'test', '--no-daemon'], { cwd: path.join(root, 'android-monitor'), env });
+    } else {
+      run(gradle, ['lintDebug', 'test', '--no-daemon'], { cwd: path.join(root, 'android-monitor'), env });
+    }
     return;
   }
   const wrapper = path.join(root, 'android-monitor', isWindows ? 'gradlew.bat' : 'gradlew');
-  run(wrapper, ['lintDebug', 'test', '--no-daemon'], { cwd: path.join(root, 'android-monitor'), env });
+  const options = { cwd: path.join(root, 'android-monitor'), env };
+  if (isWindows) runBatch(wrapper, ['lintDebug', 'test', '--no-daemon'], options);
+  else run(wrapper, ['lintDebug', 'test', '--no-daemon'], options);
 }
 
 function runNpmTests() {
-  run(isWindows ? 'npm.cmd' : 'npm', ['test'], { env: baseEnv() });
+  const npmExecPath = process.env.npm_execpath?.trim();
+  if (npmExecPath && exists(npmExecPath)) {
+    run(process.execPath, [npmExecPath, 'test'], { env: baseEnv() });
+    return;
+  }
+  if (isWindows) {
+    run('cmd.exe', ['/d', '/s', '/c', 'npm test'], { env: baseEnv() });
+    return;
+  }
+  run('npm', ['test'], { env: baseEnv() });
 }
 
 function runGitDiffCheck() {
@@ -209,9 +237,13 @@ try {
     case 'android-test':
       runAndroidTests();
       break;
+    case 'relay-test':
+      runRelayTests();
+      break;
     case 'local-full':
       runNpmTests();
       runRust('test');
+      runRelayTests();
       runAndroidTests();
       runGitDiffCheck();
       break;

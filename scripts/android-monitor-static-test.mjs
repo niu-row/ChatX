@@ -9,6 +9,9 @@ const store = fs.readFileSync(`${base}/SecureStore.kt`, 'utf8');
 const service = fs.readFileSync(`${base}/MonitorService.kt`, 'utf8');
 const connection = fs.readFileSync(`${base}/MonitorConnectionManager.kt`, 'utf8');
 const crypto = fs.readFileSync(`${base}/MonitorCrypto.kt`, 'utf8');
+const control = fs.readFileSync(`${base}/MonitorControlClient.kt`, 'utf8');
+const actions = fs.readFileSync(`${base}/MonitorActionController.kt`, 'utf8');
+const routePlanner = fs.readFileSync(`${base}/MonitorRoutePlanner.kt`, 'utf8');
 const tls = fs.readFileSync(`${base}/PinnedTls.kt`, 'utf8');
 const repository = fs.readFileSync(`${base}/MonitorRepository.kt`, 'utf8');
 const parser = fs.readFileSync(`${base}/MonitorSnapshotParser.kt`, 'utf8');
@@ -17,6 +20,10 @@ const alerts = fs.readFileSync(`${base}/AlertEngine.kt`, 'utf8');
 const codec = fs.readFileSync(`${base}/StatusCodec.kt`, 'utf8');
 const uiKit = fs.readFileSync(`${base}/UiKit.kt`, 'utf8');
 const routePolicy = fs.readFileSync(`${base}/RoutePolicy.kt`, 'utf8');
+const cryptoTest = fs.readFileSync(
+  `${root}/app/src/test/java/com/chatx/monitor/MonitorCryptoTest.kt`,
+  'utf8',
+);
 
 function requireText(label, text, needle) {
   if (!text.includes(needle)) throw new Error(`${label} is missing: ${needle}`);
@@ -47,6 +54,9 @@ requireText('SecureStore.kt', store, '"AndroidKeyStore"');
 requireText('SecureStore.kt', store, 'AES/GCM/NoPadding');
 requireText('SecureStore.kt', store, 'updateDirectEndpoints');
 requireText('SecureStore.kt', store, 'it.url.startsWith("wss://")');
+requireText('SecureStore.kt', store, 'getPollIntervalSeconds');
+requireText('SecureStore.kt', store, 'getSnapshotStaleSeconds');
+requireText('SecureStore.kt', store, 'getOfflineFailureThreshold');
 
 requireText('PinnedTls.kt', tls, 'MessageDigest.getInstance("SHA-256")');
 requireText('PinnedTls.kt', tls, 'MessageDigest.isEqual');
@@ -55,20 +65,60 @@ requireText('PinnedTls.kt', tls, 'hostnameVerifier { _, _ -> true }');
 
 requireText('MonitorCrypto.kt', crypto, 'AES/GCM/NoPadding');
 requireText('MonitorCrypto.kt', crypto, 'chatx-monitor-v1|snapshot|');
+requireText('MonitorCrypto.kt', crypto, 'chatx-monitor-control-v1');
+requireText('MonitorCrypto.kt', crypto, 'fun encryptControl(');
+requireText('MonitorCrypto.kt', crypto, 'fun decryptControl(');
+requireText('MonitorCrypto.kt', crypto, 'encryptControlBytes');
+requireText('MonitorCrypto.kt', crypto, 'decryptControlBytes');
+requireText('MonitorCrypto.kt', crypto, 'Base64.getUrlEncoder()');
 requireText('MonitorCrypto.kt', crypto, 'config.desktopId');
 requireText('MonitorCrypto.kt', crypto, 'config.deviceId');
+requireText('MonitorCryptoTest.kt', cryptoTest, 'controlRoundTripBindsDeviceDirectionAndTimeWindow');
+requireText('MonitorControlClient.kt', control, '"refresh_snapshot"');
+requireText('MonitorControlClient.kt', control, '"reconnect_tunnel"');
+requireText('MonitorControlClient.kt', control, 'WssClients.direct');
+requireText('MonitorControlClient.kt', control, 'WssClients.relay');
+requireText('MonitorControlClient.kt', control, 'MonitorCrypto.encryptControl');
+requireText('MonitorControlClient.kt', control, 'MonitorCrypto.decryptControl');
+requireText('MonitorControlClient.kt', control, 'deadlineNanos');
+requireText('MonitorControlClient.kt', control, 'timeoutMillis');
+requireText('MonitorControlClient.kt', control, 'root.optJSONArray("capabilities")');
+requireText('MonitorControlClient.kt', control, 'root.optBoolean("desktopOnline", false)');
+requireText('MonitorControlClient.kt', control, '"control.reconnect_tunnel"');
+requireText('MonitorControlClient.kt', control, 'MonitorRoutePlanner.candidates(config)');
+requireText('MonitorControlClient.kt', control, 'MonitorRoutePlanner.ordered(');
+rejectText('MonitorControlClient.kt', control, 'private fun routeRank(');
+rejectText('MonitorControlClient.kt', control, 'private fun candidates()');
+
+requireText('MonitorActionController.kt', actions, 'class MonitorActionController(');
+requireText('MonitorActionController.kt', actions, 'MonitorControlClient(');
+requireText('MonitorActionController.kt', actions, '.execute("refresh_snapshot"');
+requireText('MonitorActionController.kt', actions, '.execute("reconnect_tunnel"');
+requireText('MonitorActionController.kt', actions, 'Executors.newFixedThreadPool(3)');
+requireText('MonitorActionController.kt', actions, 'override fun close()');
+
+requireText('MonitorRoutePlanner.kt', routePlanner, 'object MonitorRoutePlanner');
+requireText('MonitorRoutePlanner.kt', routePlanner, '/v1/monitor/snapshot');
+requireText('MonitorRoutePlanner.kt', routePlanner, '/revoke-self');
+requireText('MonitorRoutePlanner.kt', routePlanner, 'RoutePolicy.RELAY_FIRST');
+requireText('MonitorRoutePlanner.kt', routePlanner, 'selectorMatches(');
 
 requireText('MonitorConnectionManager.kt', connection, 'WssClients.direct');
 requireText('MonitorConnectionManager.kt', connection, 'WssClients.relay');
 rejectText('MonitorConnectionManager.kt', connection, 'newWebSocket');
 rejectText('MonitorConnectionManager.kt', connection, 'WebSocketListener');
 requireText('MonitorConnectionManager.kt', connection, 'orderedCandidates(candidates)');
+requireText('MonitorConnectionManager.kt', connection, 'MonitorRoutePlanner.candidates(config, latest)');
+requireText('MonitorConnectionManager.kt', connection, 'MonitorRoutePlanner.ordered(');
+rejectText('MonitorConnectionManager.kt', connection, 'private fun routeRank(');
+rejectText('MonitorConnectionManager.kt', connection, 'private fun directHttpsUrl(');
 requireText('MonitorConnectionManager.kt', connection, 'fun updateRoutes(endpoints: List<MonitorEndpoint>)');
-requireText('MonitorConnectionManager.kt', connection, 'POLL_INTERVAL_SECONDS = 10L');
-requireText('MonitorConnectionManager.kt', connection, 'SNAPSHOT_STALE_MS = 90_000L');
+requireText('MonitorConnectionManager.kt', connection, 'store.getPollIntervalSeconds()');
+requireText('MonitorConnectionManager.kt', connection, 'store.getSnapshotStaleSeconds()');
+requireText('MonitorConnectionManager.kt', connection, 'store.getOfflineFailureThreshold()');
 requireText('MonitorConnectionManager.kt', connection, 'fun probeOnce(');
-requireText('MonitorConnectionManager.kt', connection, '/v1/monitor/snapshot');
-requireText('MonitorConnectionManager.kt', connection, '/revoke-self');
+requireText('MonitorRoutePlanner.kt', routePlanner, '/v1/monitor/snapshot');
+requireText('MonitorRoutePlanner.kt', routePlanner, '/revoke-self');
 requireText('MonitorConnectionManager.kt', connection, '"revoked"');
 requireText('MonitorConnectionManager.kt', connection, 'fun revokePairing(');
 requireText('MonitorConnectionManager.kt', connection, 'MonitorCrypto.decryptSnapshot');
@@ -77,6 +127,15 @@ requireText('MonitorService.kt', service, '正在建立 ChatX HTTPS 监控');
 requireText('MonitorService.kt', service, 'FOREGROUND_SERVICE_TYPE_CONNECTED_DEVICE');
 requireText('MonitorService.kt', service, 'store.continuousModeStartedAt()');
 requireText('MonitorService.kt', service, 'store.appendEvent');
+requireText('MonitorService.kt', service, 'ACTION_RELOAD');
+requireText('MonitorService.kt', service, 'store.getOfflineFailureThreshold()');
+requireText('MonitorService.kt', service, 'isOlderThanStoredSnapshot');
+if (
+  service.indexOf('if (isOlderThanStoredSnapshot(snapshot.serverTime)) return') >
+  service.indexOf('connection?.updateRoutes(snapshot.endpoints)')
+) {
+  throw new Error('MonitorService freshness check must happen before route mutation');
+}
 rejectText('MonitorService.kt', service, 'scheduleWithFixedDelay');
 rejectText('MonitorService.kt', service, 'fetchSnapshot()');
 
@@ -106,13 +165,23 @@ requireText('MainActivity.kt', activity, 'showRoutePolicyDialog');
 requireText('MainActivity.kt', activity, 'showManualRouteDialog');
 requireText('MainActivity.kt', activity, 'LAN 优先');
 requireText('MainActivity.kt', activity, '公网 Relay 优先');
+requireText('MainActivity.kt', activity, 'MonitorActionController');
+requireText('MainActivity.kt', activity, 'actions.refresh(config)');
+requireText('MainActivity.kt', activity, 'actions.reconnect(config)');
+rejectText('MainActivity.kt', activity, 'MonitorControlClient(');
+rejectText('MainActivity.kt', activity, '.execute("refresh_snapshot"');
+rejectText('MainActivity.kt', activity, '.execute("reconnect_tunnel"');
+requireText('MainActivity.kt', activity, 'showPollIntervalDialog');
+requireText('MainActivity.kt', activity, 'showSnapshotStaleDialog');
+requireText('MainActivity.kt', activity, 'showOfflineFailureDialog');
+requireText('MainActivity.kt', activity, 'MonitorService.reload(this)');
 rejectText(
   'MainActivity.kt',
   activity,
   'ui.margin(width = 0, weight = 1f, top = 16',
 );
 requireText('MainActivity.kt', activity, 'hero.addView(metrics, ui.margin(top = 16))');
-requireText('MainActivity.kt', activity, 'serviceCard.addView(actions, ui.margin(top = 16))');
+requireText('MainActivity.kt', activity, 'serviceCard.addView(serviceActions, ui.margin(top = 16))');
 requireText('MainActivity.kt', activity, 'ACCESS_LOCAL_NETWORK');
 requireText('MainActivity.kt', activity, 'POST_NOTIFICATIONS');
 requireText('AlertEngine.kt', alerts, 'AlertType.MCP_GAP');

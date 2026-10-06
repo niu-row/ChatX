@@ -1,8 +1,9 @@
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
-use chatx_relay_protocol::{EncryptedPairingPayload, EncryptedSnapshot};
+use chatx_relay_protocol::{EncryptedControlPayload, EncryptedPairingPayload, EncryptedSnapshot};
 use ring::{
     aead,
     hkdf,
+    hmac,
     rand::{SecureRandom, SystemRandom},
 };
 
@@ -77,6 +78,15 @@ pub fn device_key_b64(
     device_id: &str,
 ) -> Result<String, String> {
     Ok(URL_SAFE_NO_PAD.encode(derive_device_key(master_key, device_id)?))
+}
+
+pub fn derive_control_key(device_key: &[u8; 32], device_id: &str) -> [u8; 32] {
+    let key = hmac::Key::new(hmac::HMAC_SHA256, device_key);
+    let message = format!("chatx-monitor-control-v1|{device_id}");
+    let tag = hmac::sign(&key, message.as_bytes());
+    let mut out = [0u8; 32];
+    out.copy_from_slice(tag.as_ref());
+    out
 }
 
 fn derive(
@@ -173,6 +183,83 @@ pub fn decrypt_snapshot(
     Ok(plaintext.to_vec())
 }
 
+pub fn encrypt_control_payload(
+    device_key: &[u8; 32],
+    desktop_id: &str,
+    device_id: &str,
+    request_id: &str,
+    direction: &str,
+    issued_at: u64,
+    expires_at: u64,
+    plaintext: &[u8],
+) -> Result<EncryptedControlPayload, String> {
+    let control_key = derive_control_key(device_key, device_id);
+    let unbound = aead::UnboundKey::new(&aead::AES_256_GCM, &control_key)
+        .map_err(|_| "初始化 Monitor Control E2EE 失败。".to_string())?;
+    let key = aead::LessSafeKey::new(unbound);
+    let mut nonce_bytes = [0u8; NONCE_LEN];
+    SystemRandom::new()
+        .fill(&mut nonce_bytes)
+        .map_err(|_| "生成 Monitor Control nonce 失败。".to_string())?;
+    let mut ciphertext = plaintext.to_vec();
+    let aad = control_aad(
+        desktop_id,
+        device_id,
+        request_id,
+        direction,
+        issued_at,
+        expires_at,
+    );
+    key.seal_in_place_append_tag(
+        aead::Nonce::assume_unique_for_key(nonce_bytes),
+        aead::Aad::from(aad.as_bytes()),
+        &mut ciphertext,
+    ).map_err(|_| "加密 Monitor Control payload 失败。".to_string())?;
+    Ok(EncryptedControlPayload {
+        request_id: request_id.to_string(),
+        issued_at,
+        expires_at,
+        nonce: URL_SAFE_NO_PAD.encode(nonce_bytes),
+        ciphertext: URL_SAFE_NO_PAD.encode(ciphertext),
+    })
+}
+
+pub fn decrypt_control_payload(
+    device_key: &[u8; 32],
+    desktop_id: &str,
+    device_id: &str,
+    direction: &str,
+    payload: &EncryptedControlPayload,
+) -> Result<Vec<u8>, String> {
+    let control_key = derive_control_key(device_key, device_id);
+    let nonce = URL_SAFE_NO_PAD.decode(&payload.nonce)
+        .map_err(|_| "Monitor Control nonce 编码无效。".to_string())?;
+    if nonce.len() != NONCE_LEN {
+        return Err("Monitor Control nonce 长度无效。".into());
+    }
+    let mut nonce_bytes = [0u8; NONCE_LEN];
+    nonce_bytes.copy_from_slice(&nonce);
+    let mut ciphertext = URL_SAFE_NO_PAD.decode(&payload.ciphertext)
+        .map_err(|_| "Monitor Control ciphertext 编码无效。".to_string())?;
+    let unbound = aead::UnboundKey::new(&aead::AES_256_GCM, &control_key)
+        .map_err(|_| "初始化 Monitor Control E2EE 失败。".to_string())?;
+    let key = aead::LessSafeKey::new(unbound);
+    let aad = control_aad(
+        desktop_id,
+        device_id,
+        &payload.request_id,
+        direction,
+        payload.issued_at,
+        payload.expires_at,
+    );
+    let clear = key.open_in_place(
+        aead::Nonce::assume_unique_for_key(nonce_bytes),
+        aead::Aad::from(aad.as_bytes()),
+        &mut ciphertext,
+    ).map_err(|_| "Monitor Control E2EE 验证失败。".to_string())?;
+    Ok(clear.to_vec())
+}
+
 pub fn encrypt_pairing_payload(
     pairing_code: &str,
     pairing_id: &str,
@@ -228,6 +315,19 @@ pub fn decrypt_pairing_payload(
 
 fn pairing_aad(pairing_id: &str, direction: &str) -> String {
     format!("chatx-monitor-v1|pairing|{pairing_id}|{direction}")
+}
+
+fn control_aad(
+    desktop_id: &str,
+    device_id: &str,
+    request_id: &str,
+    direction: &str,
+    issued_at: u64,
+    expires_at: u64,
+) -> String {
+    format!(
+        "chatx-monitor-v1|control|{direction}|{desktop_id}|{device_id}|{request_id}|{issued_at}|{expires_at}"
+    )
 }
 
 fn snapshot_aad(
@@ -291,6 +391,44 @@ mod tests {
             &pairing_code,
             pairing_id,
             "response",
+            &encrypted,
+        ).is_err());
+    }
+
+    #[test]
+    fn control_round_trip_binds_device_direction_and_time_window() {
+        let master = [8u8; 32];
+        let key = derive_device_key(&master, "dev_a").unwrap();
+        let encrypted = encrypt_control_payload(
+            &key,
+            "d_a",
+            "dev_a",
+            "c_0123456789abcdef",
+            "request",
+            1_000,
+            31_000,
+            br#"{"action":"refresh_snapshot"}"#,
+        ).unwrap();
+        let clear = decrypt_control_payload(
+            &key,
+            "d_a",
+            "dev_a",
+            "request",
+            &encrypted,
+        ).unwrap();
+        assert_eq!(clear, br#"{"action":"refresh_snapshot"}"#);
+        assert!(decrypt_control_payload(
+            &key,
+            "d_a",
+            "dev_a",
+            "response",
+            &encrypted,
+        ).is_err());
+        assert!(decrypt_control_payload(
+            &key,
+            "d_a",
+            "dev_b",
+            "request",
             &encrypted,
         ).is_err());
     }

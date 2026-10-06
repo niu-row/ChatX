@@ -1,6 +1,6 @@
 use chatx_relay_protocol::{
-    DeviceServerMessage, DeviceWsMessage, EncryptedSnapshot, PairingServerMessage,
-    PairingWsMessage, PROTOCOL_VERSION,
+    device_capabilities, DeviceServerMessage, DeviceWsMessage, EncryptedControlPayload,
+    EncryptedSnapshot, PairingServerMessage, PairingWsMessage, PROTOCOL_VERSION,
 };
 use rcgen::{generate_simple_self_signed, CertifiedKey};
 use ring::rand::{SecureRandom, SystemRandom};
@@ -78,6 +78,9 @@ pub fn verify_token_hash_hex(token: &str, expected_hex: &str) -> bool {
 pub type AuthChecker = Arc<dyn Fn(&str, &str) -> bool + Send + Sync>;
 pub type PairHandler = Arc<dyn Fn(PairingWsMessage) -> Result<PairingServerMessage, String> + Send + Sync>;
 pub type RevokeHandler = Arc<dyn Fn(&str) -> Result<(), String> + Send + Sync>;
+pub type ControlHandler = Arc<
+    dyn Fn(&str, EncryptedControlPayload) -> Result<EncryptedControlPayload, String> + Send + Sync
+>;
 pub type SnapshotProvider =
     Arc<dyn Fn(&str, &str, u64) -> Result<EncryptedSnapshot, String> + Send + Sync>;
 
@@ -182,6 +185,7 @@ pub fn start_monitor_server(
     auth_checker: AuthChecker,
     pair_handler: PairHandler,
     revoke_handler: RevokeHandler,
+    control_handler: ControlHandler,
     snapshot_provider: SnapshotProvider,
 ) -> Result<MonitorServerHandle, String> {
     let listener = bind_monitor_listener(bind)?;
@@ -192,6 +196,7 @@ pub fn start_monitor_server(
         auth_checker,
         pair_handler,
         revoke_handler,
+        control_handler,
         snapshot_provider,
     )
 }
@@ -222,6 +227,7 @@ fn start_monitor_server_with_listener(
     auth_checker: AuthChecker,
     pair_handler: PairHandler,
     revoke_handler: RevokeHandler,
+    control_handler: ControlHandler,
     snapshot_provider: SnapshotProvider,
 ) -> Result<MonitorServerHandle, String> {
     let addr = listener
@@ -249,6 +255,7 @@ fn start_monitor_server_with_listener(
                     let auth = auth_checker.clone();
                     let pairing = pair_handler.clone();
                     let revoke = revoke_handler.clone();
+                    let control = control_handler.clone();
                     let snapshots = snapshot_provider.clone();
                     let connection_count = active_connections.clone();
                     thread::spawn(move || {
@@ -260,6 +267,7 @@ fn start_monitor_server_with_listener(
                             auth,
                             pairing,
                             revoke,
+                            control,
                             snapshots,
                         ) {
                             eprintln!("ChatX Monitor WSS connection error: {error}");
@@ -490,6 +498,7 @@ fn handle_connection(
     auth_checker: AuthChecker,
     pair_handler: PairHandler,
     revoke_handler: RevokeHandler,
+    control_handler: ControlHandler,
     snapshot_provider: SnapshotProvider,
 ) -> Result<(), String> {
     stream
@@ -537,6 +546,7 @@ fn handle_connection(
                 &request,
                 auth_checker,
                 revoke_handler,
+                control_handler,
                 snapshot_provider,
             )
         }
@@ -559,6 +569,7 @@ fn handle_monitor_socket<S: Read + Write>(
     request: &HandshakeContext,
     auth_checker: AuthChecker,
     revoke_handler: RevokeHandler,
+    control_handler: ControlHandler,
     snapshot_provider: SnapshotProvider,
 ) -> Result<(), String> {
     let query = parse_query(&request.path);
@@ -609,6 +620,7 @@ fn handle_monitor_socket<S: Read + Write>(
             session_id: session_id.clone(),
             server_time: now_ms(),
             desktop_online: true,
+            capabilities: device_capabilities(),
         },
     )?;
 
@@ -673,6 +685,22 @@ fn handle_monitor_socket<S: Read + Write>(
                                     server_time: now_ms(),
                                 },
                             )?;
+                        }
+                        DeviceWsMessage::Control { request } => {
+                            match control_handler(device_id, request) {
+                                Ok(response) => {
+                                    send_json(
+                                        websocket,
+                                        &DeviceServerMessage::ControlResult { response },
+                                    )?;
+                                }
+                                Err(message) => {
+                                    send_json(
+                                        websocket,
+                                        &DeviceServerMessage::Error { message },
+                                    )?;
+                                }
+                            }
                         }
                         DeviceWsMessage::RevokeSelf => {
                             revoke_handler(device_id)?;
@@ -946,6 +974,7 @@ mod tests {
         });
         let pairing: PairHandler = Arc::new(|_| Err("pairing disabled in test".into()));
         let revoke: RevokeHandler = Arc::new(|_| Ok(()));
+        let control: ControlHandler = Arc::new(|_, _| Err("control disabled in test".into()));
         let snapshots: SnapshotProvider = Arc::new(|_, session_id, sequence| {
             Ok(EncryptedSnapshot {
                 session_id: session_id.to_string(),
@@ -962,6 +991,7 @@ mod tests {
             auth,
             pairing,
             revoke,
+            control,
             snapshots,
         ).unwrap();
 
@@ -1045,6 +1075,18 @@ mod tests {
             revoked_for_handler.store(true, Ordering::SeqCst);
             Ok(())
         });
+        let control: ControlHandler = Arc::new(|candidate_device, request| {
+            if candidate_device != "dev_0123456789abcdef" {
+                return Err("unexpected control device".into());
+            }
+            Ok(EncryptedControlPayload {
+                request_id: request.request_id,
+                issued_at: request.issued_at,
+                expires_at: request.expires_at,
+                nonce: "response-nonce".into(),
+                ciphertext: "response-ciphertext".into(),
+            })
+        });
         let snapshots: SnapshotProvider = Arc::new(|_, session_id, sequence| {
             Ok(EncryptedSnapshot {
                 session_id: session_id.to_string(),
@@ -1061,6 +1103,7 @@ mod tests {
             auth,
             pairing,
             revoke,
+            control,
             snapshots,
         ).unwrap();
 
@@ -1110,6 +1153,29 @@ mod tests {
         assert!(matches!(
             serde_json::from_str::<DeviceServerMessage>(&snapshot).unwrap(),
             DeviceServerMessage::Snapshot { .. }
+        ));
+
+        let control_request = EncryptedControlPayload {
+            request_id: "c_0123456789abcdef".into(),
+            issued_at: 1_000,
+            expires_at: 31_000,
+            nonce: "request-nonce".into(),
+            ciphertext: "request-ciphertext".into(),
+        };
+        websocket.send(Message::Text(
+            serde_json::to_string(&DeviceWsMessage::Control {
+                request: control_request,
+            }).unwrap().into(),
+        )).unwrap();
+        let control_message = websocket.read().unwrap();
+        let Message::Text(control_message) = control_message else {
+            panic!("expected control result");
+        };
+        assert!(matches!(
+            serde_json::from_str::<DeviceServerMessage>(&control_message).unwrap(),
+            DeviceServerMessage::ControlResult { response }
+                if response.request_id == "c_0123456789abcdef"
+                    && response.ciphertext == "response-ciphertext"
         ));
 
         websocket.send(Message::Text(

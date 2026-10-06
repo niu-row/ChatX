@@ -1,5 +1,21 @@
 # Changelog
 
+## Unreleased
+
+### Changed
+
+- Android Monitor adds configurable polling/freshness/offline thresholds, compact recent events, true on-demand refresh, and allowlisted E2EE Tunnel reconnect control.
+- Monitor control retries are idempotent across Direct/Relay paths, advertise explicit capabilities, use a single operation deadline, and never override an explicit Desktop Stop.
+- On-demand Tunnel refresh performs a fresh read-only runtime probe without mutating the background health state machine or failure counters.
+- Relay control routing is scoped by desktop/device/request, with websocket capacity, pending-control limits, and per-device control throttling.
+- Canonical local verification now includes Relay protocol/server tests; CI runs the full Windows verification plus macOS Rust/Relay checks.
+- Android adds byte-level AES-GCM control tests, and stale background snapshots are rejected before endpoint mutation.
+
+### Security
+
+- Runtime Key remains Desktop-only; mobile control is restricted to `refresh_snapshot` and `reconnect_tunnel`.
+- Replayed identical encrypted control requests return the cached encrypted result, while conflicting reuse of a request ID is rejected.
+
 ## 0.3.0 - 2026-09-08
 
 ### Changed

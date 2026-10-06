@@ -6,7 +6,6 @@ import android.app.NotificationManager
 import android.app.PendingIntent
 import android.content.Context
 import android.content.Intent
-import android.os.Build
 
 object NotificationCenter {
     const val FOREGROUND_ID = 100
@@ -14,7 +13,6 @@ object NotificationCenter {
     private const val ALERT_CHANNEL = "chatx_alerts"
 
     fun createChannels(context: Context) {
-        if (Build.VERSION.SDK_INT < 26) return
         val manager = context.getSystemService(NotificationManager::class.java)
         manager.createNotificationChannel(
             NotificationChannel(
@@ -32,11 +30,7 @@ object NotificationCenter {
         )
     }
     fun foreground(context: Context, text: String): Notification {
-        val builder = if (Build.VERSION.SDK_INT >= 26) {
-            Notification.Builder(context, MONITOR_CHANNEL)
-        } else {
-            Notification.Builder(context)
-        }
+        val builder = Notification.Builder(context, MONITOR_CHANNEL)
         return builder
             .setSmallIcon(android.R.drawable.stat_notify_sync)
             .setContentTitle("ChatX Monitor")
@@ -53,11 +47,7 @@ object NotificationCenter {
     }
 
     fun postAlert(context: Context, event: AlertEvent) {
-        val builder = if (Build.VERSION.SDK_INT >= 26) {
-            Notification.Builder(context, ALERT_CHANNEL)
-        } else {
-            Notification.Builder(context)
-        }
+        val builder = Notification.Builder(context, ALERT_CHANNEL)
         val notification = builder
             .setSmallIcon(
                 if (event.type == AlertType.RECOVERED) {

@@ -8,6 +8,7 @@ import android.os.Build
 import android.os.IBinder
 import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
+import org.json.JSONObject
 
 class MonitorService : Service() {
     private val alertEngine = AlertEngine()
@@ -53,6 +54,13 @@ class MonitorService : Service() {
             stopSelf()
             return START_NOT_STICKY
         }
+        if (intent?.action == ACTION_RELOAD) {
+            connection?.stop()
+            connection = null
+            transportReachable = false
+            startConnection()
+            return START_STICKY
+        }
         if (intent?.action == ACTION_REEVALUATE) {
             if (connection == null) startConnection() else connection?.reevaluatePolicy()
             return START_STICKY
@@ -80,7 +88,9 @@ class MonitorService : Service() {
                     when (state.phase) {
                         "connected" -> transportReachable = state.desktopOnline != false
                         "desktop_offline", "closed" -> transportReachable = false
-                        "degraded" -> if (state.reconnectAttempt >= 3) {
+                        "degraded" -> if (
+                            state.reconnectAttempt >= store.getOfflineFailureThreshold()
+                        ) {
                             transportReachable = false
                         }
                     }
@@ -106,6 +116,7 @@ class MonitorService : Service() {
     override fun onBind(intent: Intent?): IBinder? = null
 
     private fun handleSnapshot(snapshot: MonitorSnapshot) {
+        if (isOlderThanStoredSnapshot(snapshot.serverTime)) return
         connection?.updateRoutes(snapshot.endpoints)
         val json = StatusCodec.snapshot(snapshot)
         store.setLastSnapshotJson(json)
@@ -120,6 +131,18 @@ class MonitorService : Service() {
             store.continuousModeStartedAt(),
         ).forEach(::postAlert)
         broadcast(json)
+    }
+
+    private fun isOlderThanStoredSnapshot(serverTime: Long): Boolean {
+        if (serverTime <= 0L) return false
+        val previous = store.getLastSnapshotJson()
+            ?.let { raw ->
+                runCatching {
+                    JSONObject(raw).optLong("serverTime", 0L)
+                }.getOrDefault(0L)
+            }
+            ?: 0L
+        return previous > 0L && serverTime < previous
     }
 
     private fun handleTransportState(state: MonitorTransportState) {
@@ -191,6 +214,7 @@ class MonitorService : Service() {
         const val EXTRA_STATUS_JSON = "status_json"
         private const val ACTION_STOP = "com.chatx.monitor.STOP"
         private const val ACTION_REEVALUATE = "com.chatx.monitor.REEVALUATE"
+        private const val ACTION_RELOAD = "com.chatx.monitor.RELOAD"
 
         fun start(context: Context) {
             val intent = Intent(context, MonitorService::class.java)
@@ -204,6 +228,12 @@ class MonitorService : Service() {
         fun reevaluate(context: Context) {
             context.startService(
                 Intent(context, MonitorService::class.java).setAction(ACTION_REEVALUATE),
+            )
+        }
+
+        fun reload(context: Context) {
+            context.startService(
+                Intent(context, MonitorService::class.java).setAction(ACTION_RELOAD),
             )
         }
 

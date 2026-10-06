@@ -117,6 +117,12 @@ connection.tunnelId
 
 Tunnel 健康状态同时参考本地 runtime `ready/health` 和 control-plane poll 日志。连续 poll 异常依次进入 `suspect` / `down`，恢复时通过 `poller recovered; polling operational` 回到 `healthy`，避免仅凭本地 `/readyz` 将上游断线误判成正常。
 
+### Monitor 兼容矩阵
+
+当前 Desktop / Android Monitor 使用 pairing schema 3 和 wire protocol v1。Desktop 在 Relay Hello 中上报自身能力，Relay 仅向手机发布端到端实际可用的能力；Android 只有看到 `control.refresh_snapshot` / `control.reconnect_tunnel` 后才发送对应控制消息。缺少 capability 的旧 Desktop / Relay 会被视为 legacy：立即刷新回退到 HTTPS Snapshot，Tunnel 重连会明确报告版本不支持，而不是依赖超时猜测。
+
+当前仓库版本组合为 Desktop 0.4.10、Android Monitor 0.3.5；两者版本号独立演进，兼容性以 pairing schema、wire protocol 和 capability 为准。
+
 ## 开发
 
 要求：

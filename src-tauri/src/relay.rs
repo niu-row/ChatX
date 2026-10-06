@@ -1,8 +1,8 @@
 use crate::monitor_crypto;
 use chatx_relay_protocol::{
-    DesktopRegisterRequest, DesktopRegisterResponse, DesktopServerMessage, DesktopWsMessage,
-    DeviceAuthorizeRequest, PairingRouteOpenRequest, PairingServerMessage, PairingWsMessage,
-    PROTOCOL_VERSION,
+    device_capabilities, DesktopRegisterRequest, DesktopRegisterResponse, DesktopServerMessage,
+    DesktopWsMessage, DeviceAuthorizeRequest, EncryptedControlPayload, PairingRouteOpenRequest,
+    PairingServerMessage, PairingWsMessage, PROTOCOL_VERSION,
 };
 use futures_util::{SinkExt, StreamExt};
 use serde::{Deserialize, Serialize};
@@ -112,6 +112,9 @@ pub type PairingHandler = Arc<
     dyn Fn(PairingWsMessage) -> Result<PairingServerMessage, String> + Send + Sync
 >;
 pub type RevokeHandler = Arc<dyn Fn(&str) -> Result<(), String> + Send + Sync>;
+pub type ControlHandler = Arc<
+    dyn Fn(&str, EncryptedControlPayload) -> Result<EncryptedControlPayload, String> + Send + Sync
+>;
 
 pub struct RelayClientHandle {
     stop: Arc<AtomicBool>,
@@ -336,6 +339,7 @@ pub fn start_client(
     snapshot_provider: SnapshotProvider,
     pairing_handler: PairingHandler,
     revoke_handler: RevokeHandler,
+    control_handler: ControlHandler,
 ) -> Result<RelayClientHandle, String> {
     validate(&settings)?;
     let stop = Arc::new(AtomicBool::new(false));
@@ -371,6 +375,7 @@ pub fn start_client(
                 snapshot_provider,
                 pairing_handler,
                 revoke_handler,
+                control_handler,
                 thread_stop,
             ).await;
         });
@@ -390,6 +395,7 @@ async fn relay_loop(
     snapshot_provider: SnapshotProvider,
     pairing_handler: PairingHandler,
     revoke_handler: RevokeHandler,
+    control_handler: ControlHandler,
     stop: Arc<AtomicBool>,
 ) {
     let uploader = tokio::spawn(snapshot_http_loop(
@@ -409,6 +415,7 @@ async fn relay_loop(
             status.clone(),
             pairing_handler.clone(),
             revoke_handler.clone(),
+            control_handler.clone(),
             stop.clone(),
         ).await;
 
@@ -595,6 +602,7 @@ async fn relay_session(
     status: Arc<Mutex<RelayStatus>>,
     pairing_handler: PairingHandler,
     revoke_handler: RevokeHandler,
+    control_handler: ControlHandler,
     stop: Arc<AtomicBool>,
 ) -> Result<(), String> {
     if let Ok(mut value) = status.lock() {
@@ -624,6 +632,7 @@ async fn relay_session(
         desktop_id: credentials.desktop_id.clone(),
         app_version: env!("CARGO_PKG_VERSION").to_string(),
         platform: format!("{}-{}", std::env::consts::OS, std::env::consts::ARCH),
+        capabilities: device_capabilities(),
     };
     send_desktop_message(&mut socket, &hello).await?;
 
@@ -710,6 +719,27 @@ async fn relay_session(
                                         ),
                                     );
                                 }
+                            }
+                            Ok(DesktopServerMessage::DeviceControl { device_id, request }) => {
+                                let request_id = request.request_id.clone();
+                                let response = match control_handler(&device_id, request) {
+                                    Ok(response) => DesktopWsMessage::ControlResponse {
+                                        device_id,
+                                        response,
+                                    },
+                                    Err(message) => {
+                                        set_error(
+                                            &status,
+                                            format!("Monitor 控制请求被拒绝：{message}"),
+                                        );
+                                        DesktopWsMessage::ControlError {
+                                            device_id,
+                                            request_id,
+                                            message: "desktop rejected control request".into(),
+                                        }
+                                    },
+                                };
+                                send_desktop_message(&mut socket, &response).await?;
                             }
                             Ok(DesktopServerMessage::Error { message }) => {
                                 set_error(&status, message);

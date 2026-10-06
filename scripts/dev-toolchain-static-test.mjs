@@ -11,9 +11,18 @@ for (const needle of [
   'Android Studio.app',
   "path.join(realHome, 'Library', 'Android', 'sdk')",
   'cachedGradleZip',
+  "gradle.toLowerCase().endsWith('.bat')",
+  "run('cmd.exe', ['/d', '/c', 'call', command, ...args]",
+  "if (isWindows) runBatch(wrapper",
   "['lintDebug', 'test', '--no-daemon']",
   "path.join(process.env.ProgramFiles || 'C:\\\\Program Files'",
   "run('git', ['diff', '--check']",
+  "process.env.npm_execpath?.trim()",
+  "run(process.execPath, [npmExecPath, 'test']",
+  "run('cmd.exe', ['/d', '/s', '/c', 'npm test']",
+  "runCargoManifest('test', 'relay-protocol/Cargo.toml')",
+  "runCargoManifest('test', 'relay-server/Cargo.toml')",
+  "case 'relay-test'",
   "case 'local-full'",
 ]) {
   assert.ok(script.includes(needle), `dev-toolchain.mjs is missing: ${needle}`);

@@ -41,11 +41,11 @@ class MainActivity : Activity() {
     private lateinit var ui: UiKit
     private lateinit var pageContent: LinearLayout
     private lateinit var bottomNav: LinearLayout
+    private lateinit var actions: MonitorActionController
     private var pairingInput: EditText? = null
     private var currentPage = Page.OVERVIEW
     private var latestStatusJson: String? = null
     private var endpointHealth: List<EndpointHealth>? = null
-    private var endpointTestRunning = false
     private var pendingStart = false
 
     private val statusReceiver = object : BroadcastReceiver() {
@@ -61,6 +61,7 @@ class MainActivity : Activity() {
         super.onCreate(savedInstanceState)
         store = SecureStore(this)
         ui = UiKit(this)
+        actions = buildActionController()
         latestStatusJson = store.getLastSnapshotJson()
         NotificationCenter.createChannels(this)
         setContentView(buildShell())
@@ -74,9 +75,37 @@ class MainActivity : Activity() {
     }
 
     override fun onDestroy() {
+        actions.close()
         unregisterReceiver(statusReceiver)
         super.onDestroy()
     }
+
+    private fun buildActionController(): MonitorActionController =
+        MonitorActionController(
+            applicationContext,
+            store,
+            object : MonitorActionController.Listener {
+                override fun onStateChanged() {
+                    if (::pageContent.isInitialized && !isDestroyed) {
+                        renderCurrentPage()
+                    }
+                }
+
+                override fun onSnapshot(json: String) {
+                    latestStatusJson = json
+                }
+
+                override fun onEndpointHealth(
+                    results: List<EndpointHealth>?,
+                ) {
+                    endpointHealth = results
+                }
+
+                override fun onToast(message: String) {
+                    if (!isDestroyed) toast(message)
+                }
+            },
+        )
 
     private fun buildShell(): View {
         val root = ui.column().apply {
@@ -402,6 +431,20 @@ class MainActivity : Activity() {
                 row.addView(copy, ui.margin(width = 0, weight = 1f, right = 8))
                 row.addView(ui.pill("ATTENTION", alert.third))
                 card.addView(row)
+                if (
+                    tunnelDown &&
+                    !tunnel.optBoolean("reconnecting", false)
+                ) {
+                    card.addView(
+                        ui.button(
+                            if (actions.isReconnecting()) "重连中…" else "立即重连 Tunnel",
+                            danger = true,
+                        ) {
+                            reconnectTunnel()
+                        },
+                        ui.margin(top = 12),
+                    )
+                }
                 pageContent.addView(card, ui.margin(bottom = 14))
             }
         }
@@ -426,12 +469,17 @@ class MainActivity : Activity() {
             ),
         )
         serviceCard.addView(serviceTop)
-        val actions = ui.row()
-        actions.addView(
-            ui.button("立即刷新", primary = true) { refreshOnce() },
+        val serviceActions = ui.row()
+        serviceActions.addView(
+            ui.button(
+                if (actions.isRefreshing()) "刷新中…" else "立即刷新",
+                primary = true,
+            ) {
+                refreshOnce()
+            },
             ui.margin(width = 0, weight = 1f, right = 5),
         )
-        actions.addView(
+        serviceActions.addView(
             ui.button(if (running) "停止后台" else "开始监控") {
                 if (running) {
                     MonitorService.stop(this)
@@ -444,7 +492,7 @@ class MainActivity : Activity() {
             },
             ui.margin(width = 0, weight = 1f, left = 5),
         )
-        serviceCard.addView(actions, ui.margin(top = 16))
+        serviceCard.addView(serviceActions, ui.margin(top = 16))
         pageContent.addView(serviceCard, ui.margin(bottom = 14))
 
         if (reachable) {
@@ -667,19 +715,20 @@ class MainActivity : Activity() {
                 if (index > 0) {
                     history.addView(
                         ui.divider(),
-                        ui.margin(height = 1, top = 12, bottom = 12),
+                        ui.margin(height = 1, top = 6, bottom = 6),
                     )
                 }
                 val eventRow = ui.row()
                 val eventCopy = ui.column()
                 eventCopy.addView(ui.body(event.title, 14f))
                 eventCopy.addView(
-                    ui.muted(event.message, 12f),
+                    ui.muted(
+                        "${event.message} · ${formatTime(event.at)}",
+                        12f,
+                    ).apply {
+                        maxLines = 2
+                    },
                     ui.margin(top = 3),
-                )
-                eventCopy.addView(
-                    ui.muted(formatTime(event.at), 12f),
-                    ui.margin(top = 4),
                 )
                 eventRow.addView(
                     eventCopy,
@@ -782,10 +831,10 @@ class MainActivity : Activity() {
         )
         routesTop.addView(
             ui.button(
-                if (endpointTestRunning) "检测中…" else "重新测试",
-                primary = !endpointTestRunning,
+                if (actions.isTestingEndpoints()) "检测中…" else "重新测试",
+                primary = !actions.isTestingEndpoints(),
             ) {
-                if (!endpointTestRunning) testAllEndpoints()
+                if (!actions.isTestingEndpoints()) testAllEndpoints()
             },
             ui.margin(width = ViewGroup.LayoutParams.WRAP_CONTENT),
         )
@@ -836,7 +885,7 @@ class MainActivity : Activity() {
                 when {
                     health == null -> ui.pill(
                         when {
-                            endpointTestRunning -> "检测中"
+                            actions.isTestingEndpoints() -> "检测中"
                             isCurrent -> "CURRENT"
                             else -> "未测试"
                         },
@@ -885,7 +934,7 @@ class MainActivity : Activity() {
         manage.addView(row)
         pageContent.addView(manage, ui.margin(bottom = 12))
 
-        if (needsHealthTest && !endpointTestRunning) {
+        if (needsHealthTest && !actions.isTestingEndpoints()) {
             pageContent.post { testAllEndpoints(showToast = false) }
         }
     }
@@ -909,15 +958,30 @@ class MainActivity : Activity() {
             ui.margin(top = 12),
         )
         realtime.addView(
-            keyValue("刷新间隔", "10 秒"),
+            settingPickerRow(
+                "刷新间隔",
+                "${store.getPollIntervalSeconds()} 秒",
+            ) {
+                showPollIntervalDialog()
+            },
             ui.margin(top = 8),
         )
         realtime.addView(
-            keyValue("快照过期", "90 秒"),
+            settingPickerRow(
+                "快照过期",
+                "${store.getSnapshotStaleSeconds()} 秒",
+            ) {
+                showSnapshotStaleDialog()
+            },
             ui.margin(top = 8),
         )
         realtime.addView(
-            keyValue("离线确认", "连续 3 次请求失败"),
+            settingPickerRow(
+                "离线确认",
+                "连续 ${store.getOfflineFailureThreshold()} 次请求失败",
+            ) {
+                showOfflineFailureDialog()
+            },
             ui.margin(top = 8),
         )
         pageContent.addView(realtime, ui.margin(bottom = 14))
@@ -985,7 +1049,7 @@ class MainActivity : Activity() {
         )
         security.addView(
             ui.muted(
-                "ChatX Relay 只路由密文，不提供 Shell、文件内容或 MCP 执行控制。",
+                "ChatX Relay 只路由 E2EE Snapshot 与受限控制密文；不持有 Runtime Key，也不提供 Shell / MCP 通用执行。",
                 13f,
             ),
             ui.margin(top = 5),
@@ -1252,41 +1316,17 @@ class MainActivity : Activity() {
     }
 
     private fun refreshOnce() {
-        if (store.loadPairing() == null) return
-        Thread {
-            try {
-                val snapshot = MonitorRepository(applicationContext).fetchSnapshot()
-                val json = StatusCodec.snapshot(snapshot)
-                store.setLastSnapshotJson(json)
-                latestStatusJson = json
-                runOnUiThread { renderCurrentPage() }
-            } catch (error: Exception) {
-                val json = StatusCodec.error(
-                    error.message ?: "连接失败",
-                )
-                store.setLastSnapshotJson(json)
-                latestStatusJson = json
-                runOnUiThread { renderCurrentPage() }
-            }
-        }.start()
+        val config = store.loadPairing() ?: return
+        actions.refresh(config)
+    }
+
+    private fun reconnectTunnel() {
+        val config = store.loadPairing() ?: return
+        actions.reconnect(config)
     }
 
     private fun testAllEndpoints(showToast: Boolean = true) {
-        if (endpointTestRunning) return
-        endpointHealth = null
-        endpointTestRunning = true
-        renderCurrentPage()
-        if (showToast) toast("正在测试所有路径…")
-        Thread {
-            val results = MonitorRepository(
-                applicationContext,
-            ).testEndpoints()
-            runOnUiThread {
-                endpointHealth = results
-                endpointTestRunning = false
-                renderCurrentPage()
-            }
-        }.start()
+        actions.testEndpoints(showToast)
     }
 
     @SuppressLint("UnspecifiedRegisterReceiverFlag")
@@ -1331,6 +1371,104 @@ class MainActivity : Activity() {
             ui.margin(width = 0, weight = 0.58f),
         )
         return row
+    }
+
+    private fun settingPickerRow(
+        label: String,
+        value: String,
+        action: () -> Unit,
+    ): View {
+        val row = ui.row().apply {
+            isClickable = true
+            isFocusable = true
+            setPadding(0, ui.dp(5), 0, ui.dp(5))
+            setOnClickListener { action() }
+        }
+        row.addView(
+            ui.muted(label, 12f),
+            ui.margin(width = 0, weight = 0.42f, right = 8),
+        )
+        val right = ui.row()
+        right.addView(ui.body(value, 13f))
+        right.addView(
+            ui.muted("›", 18f),
+            ui.margin(left = 7),
+        )
+        row.addView(
+            right,
+            ui.margin(width = 0, weight = 0.58f),
+        )
+        return row
+    }
+
+    private fun showPollIntervalDialog() {
+        val values = longArrayOf(10L, 15L, 30L, 60L)
+        val labels = values.map { "$it 秒" }.toTypedArray()
+        val selected = values.indexOf(store.getPollIntervalSeconds())
+        AlertDialog.Builder(this)
+            .setTitle("刷新间隔")
+            .setSingleChoiceItems(labels, selected) { dialog, which ->
+                val value = values[which]
+                store.setPollIntervalSeconds(value)
+                val minimumStale = minimumStaleForPoll(value)
+                if (store.getSnapshotStaleSeconds() < minimumStale) {
+                    store.setSnapshotStaleSeconds(minimumStale)
+                }
+                reloadMonitorSettings()
+                dialog.dismiss()
+                renderCurrentPage()
+            }
+            .setNegativeButton("取消", null)
+            .show()
+    }
+
+    private fun showSnapshotStaleDialog() {
+        val values = longArrayOf(30L, 60L, 90L, 180L)
+        val labels = values.map { "$it 秒" }.toTypedArray()
+        val selected = values.indexOf(store.getSnapshotStaleSeconds())
+        AlertDialog.Builder(this)
+            .setTitle("快照过期")
+            .setSingleChoiceItems(labels, selected) { dialog, which ->
+                val value = values[which]
+                val minimum = store.getPollIntervalSeconds() * 3L
+                if (value < minimum) {
+                    toast("快照过期至少应为刷新间隔的 3 倍。")
+                    return@setSingleChoiceItems
+                }
+                store.setSnapshotStaleSeconds(value)
+                reloadMonitorSettings()
+                dialog.dismiss()
+                renderCurrentPage()
+            }
+            .setNegativeButton("取消", null)
+            .show()
+    }
+
+    private fun showOfflineFailureDialog() {
+        val values = intArrayOf(2, 3, 5)
+        val labels = values.map { "连续 $it 次请求失败" }.toTypedArray()
+        val selected = values.indexOf(store.getOfflineFailureThreshold())
+        AlertDialog.Builder(this)
+            .setTitle("离线确认")
+            .setSingleChoiceItems(labels, selected) { dialog, which ->
+                store.setOfflineFailureThreshold(values[which])
+                reloadMonitorSettings()
+                dialog.dismiss()
+                renderCurrentPage()
+            }
+            .setNegativeButton("取消", null)
+            .show()
+    }
+
+    private fun minimumStaleForPoll(pollSeconds: Long): Long =
+        listOf(30L, 60L, 90L, 180L)
+            .firstOrNull { it >= pollSeconds * 3L }
+            ?: 180L
+
+    private fun reloadMonitorSettings() {
+        if (store.isMonitorServiceRunning()) {
+            MonitorService.reload(this)
+        }
     }
 
     private fun permissionRow(

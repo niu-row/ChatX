@@ -36,16 +36,6 @@ class MonitorConnectionManager(
         fun onRevoked() {}
     }
 
-    private data class Candidate(
-        val kind: String,
-        val family: String,
-        val interfaceName: String,
-        val url: String,
-        val revokeUrl: String,
-        val token: String,
-        val relay: Boolean,
-    )
-
     private sealed interface FetchResult {
         data class Snapshot(val value: MonitorSnapshot) : FetchResult
         data class Offline(val message: String) : FetchResult
@@ -66,7 +56,7 @@ class MonitorConnectionManager(
         .build()
     private val stopped = AtomicBoolean(true)
     private val pollInFlight = AtomicBoolean(false)
-    private val activeCandidate = AtomicReference<Candidate?>(null)
+    private val activeCandidate = AtomicReference<MonitorRouteCandidate?>(null)
     private var pollFuture: ScheduledFuture<*>? = null
     @Volatile private var consecutiveFailures = 0
 
@@ -76,7 +66,7 @@ class MonitorConnectionManager(
         pollFuture = scheduler.scheduleWithFixedDelay(
             { pollCycle() },
             0,
-            POLL_INTERVAL_SECONDS,
+            store.getPollIntervalSeconds(),
             TimeUnit.SECONDS,
         )
     }
@@ -166,12 +156,12 @@ class MonitorConnectionManager(
                 is FetchResult.Snapshot -> {
                     consecutiveFailures = 0
                     activeCandidate.set(candidate)
-                    store.setLastEndpoint(candidate.url)
+                    store.setLastEndpoint(candidate.snapshotUrl)
                     listener.onTransportState(
                         MonitorTransportState(
                             phase = "connected",
                             transportKind = candidate.kind,
-                            url = candidate.url,
+                            url = candidate.snapshotUrl,
                             desktopOnline = true,
                         ),
                     )
@@ -194,7 +184,10 @@ class MonitorConnectionManager(
         consecutiveFailures += 1
         listener.onTransportState(
             MonitorTransportState(
-                phase = if (definitelyOffline || consecutiveFailures >= 3) {
+                phase = if (
+                    definitelyOffline ||
+                    consecutiveFailures >= store.getOfflineFailureThreshold()
+                ) {
                     "desktop_offline"
                 } else {
                     "degraded"
@@ -206,9 +199,9 @@ class MonitorConnectionManager(
         )
     }
 
-    private fun fetchCandidate(candidate: Candidate): FetchResult {
+    private fun fetchCandidate(candidate: MonitorRouteCandidate): FetchResult {
         val request = Request.Builder()
-            .url(candidate.url)
+            .url(candidate.snapshotUrl)
             .header("Authorization", "Bearer ${candidate.token}")
             .header("Cache-Control", "no-store")
             .get()
@@ -245,120 +238,46 @@ class MonitorConnectionManager(
         }
     }
 
-    private fun decodeSnapshot(candidate: Candidate, root: JSONObject): FetchResult {
+    private fun decodeSnapshot(candidate: MonitorRouteCandidate, root: JSONObject): FetchResult {
         val frame = EncryptedSnapshotFrame.parse(root.getJSONObject("snapshot"))
         val now = System.currentTimeMillis()
         if (frame.generatedAt > now + 60_000L) {
             return FetchResult.Failure("Monitor Snapshot 时间戳超前。")
         }
         val age = now - frame.generatedAt
-        if (age > SNAPSHOT_STALE_MS) {
+        val staleMs = store.getSnapshotStaleSeconds() * 1000L
+        if (age > staleMs) {
             return FetchResult.Offline("Desktop Snapshot 已过期 ${age / 1000} 秒。")
         }
         val clear = MonitorCrypto.decryptSnapshot(config, frame)
         val snapshot = MonitorSnapshotParser.parse(
             root = clear,
-            endpointUrl = candidate.url,
+            endpointUrl = candidate.snapshotUrl,
             transportKind = candidate.kind,
         )
         return FetchResult.Snapshot(snapshot)
     }
 
-    private fun candidates(): List<Candidate> {
-        val latest = if (dynamicRoutes) store.loadPairing() ?: config else config
-        val result = mutableListOf<Candidate>()
-        latest.directEndpoints.forEach { endpoint ->
-            val snapshotUrl = directHttpsUrl(endpoint.url, "/v1/monitor/snapshot")
-            val revokeUrl = directHttpsUrl(endpoint.url, "/v1/monitor/revoke")
-            result += Candidate(
-                kind = endpoint.kind,
-                family = endpoint.family,
-                interfaceName = endpoint.interfaceName,
-                url = appendIdentityQuery(snapshotUrl),
-                revokeUrl = appendIdentityQuery(revokeUrl),
-                token = config.directToken,
-                relay = false,
-            )
+    private fun candidates(): List<MonitorRouteCandidate> {
+        val latest = if (dynamicRoutes) {
+            store.loadPairing() ?: config
+        } else {
+            config
         }
-        latest.relay?.let { relay ->
-            val base = relay.baseUrl.trimEnd('/')
-            val root = "$base/v1/desktops/${config.desktopId}/devices/${config.deviceId}"
-            result += Candidate(
-                kind = "relay",
-                family = "https",
-                interfaceName = "chatx-relay",
-                url = "$root/snapshot",
-                revokeUrl = "$root/revoke-self",
-                token = relay.deviceToken,
-                relay = true,
-            )
-        }
-        return result
+        return MonitorRoutePlanner.candidates(config, latest)
     }
 
-    private fun orderedCandidates(values: List<Candidate> = candidates()): List<Candidate> {
-        val policy = store.getRoutePolicy()
-        val last = store.getLastEndpoint()
-        return values.sortedWith(
-            compareBy<Candidate> { candidate ->
-                when {
-                    policy == RoutePolicy.AUTO && candidate.url == last -> -1
-                    else -> routeRank(candidate, policy)
-                }
-            }.thenBy { it.url },
+    private fun orderedCandidates(
+        values: List<MonitorRouteCandidate> = candidates(),
+    ): List<MonitorRouteCandidate> =
+        MonitorRoutePlanner.ordered(
+            values = values,
+            policy = store.getRoutePolicy(),
+            lastEndpoint = store.getLastEndpoint(),
+            selector = store.getManualRouteSelector(),
         )
-    }
-
-    private fun routeRank(candidate: Candidate, policy: RoutePolicy): Int {
-        val directRank = when (candidate.kind) {
-            "lan" -> 0
-            "tailscale" -> 1
-            "ipv6" -> 2
-            else -> 3
-        }
-        return when (policy) {
-            RoutePolicy.AUTO -> directRank + if (candidate.relay) 10 else 0
-            RoutePolicy.LAN_FIRST -> if (candidate.relay) 10 else directRank
-            RoutePolicy.RELAY_FIRST -> if (candidate.relay) 0 else directRank + 10
-            RoutePolicy.MANUAL -> {
-                val selector = store.getManualRouteSelector()
-                when {
-                    selector != null && selectorMatches(selector, candidate) -> 0
-                    candidate.relay -> 10
-                    else -> directRank + 20
-                }
-            }
-        }
-    }
-
-    private fun selectorMatches(selector: ManualRouteSelector, candidate: Candidate): Boolean =
-        candidate.kind == selector.kind &&
-            (selector.family.isBlank() ||
-                candidate.family == selector.family ||
-                (selector.family == "wss" && candidate.family == "https")) &&
-            (selector.interfaceName.isBlank() || candidate.interfaceName == selector.interfaceName)
-
-    private fun appendIdentityQuery(url: String): String {
-        val separator = if ('?' in url) '&' else '?'
-        return "$url${separator}desktopId=${config.desktopId}&deviceId=${config.deviceId}"
-    }
 
     companion object {
-        private const val POLL_INTERVAL_SECONDS = 10L
-        private const val SNAPSHOT_STALE_MS = 90_000L
-
-        private fun directHttpsUrl(source: String, path: String): String {
-            val base = when {
-                source.startsWith("wss://") -> "https://" + source.removePrefix("wss://")
-                source.startsWith("ws://") -> "http://" + source.removePrefix("ws://")
-                else -> source
-            }
-            return base
-                .substringBefore('?')
-                .replace("/v1/ws/monitor", path)
-                .replace("/v1/ws/pair", path)
-        }
-
         fun probeOnce(
             context: Context,
             config: PairingConfig,
@@ -393,8 +312,11 @@ class MonitorConnectionManager(
                 },
             )
             manager.requestSelfRevoke()
-            val completed = latch.await(timeoutSeconds, TimeUnit.SECONDS)
-            manager.stop()
+            val completed = try {
+                latch.await(timeoutSeconds, TimeUnit.SECONDS)
+            } finally {
+                manager.stop()
+            }
             if (!completed) {
                 throw TimeoutException(error.get() ?: "HTTPS 设备撤销超时。")
             }
@@ -427,8 +349,11 @@ class MonitorConnectionManager(
                 dynamicRoutes = false,
             )
             manager.start()
-            val completed = latch.await(timeoutSeconds, TimeUnit.SECONDS)
-            manager.stop()
+            val completed = try {
+                latch.await(timeoutSeconds, TimeUnit.SECONDS)
+            } finally {
+                manager.stop()
+            }
             if (!completed) {
                 throw TimeoutException(error.get() ?: "HTTPS Snapshot 等待超时。")
             }
