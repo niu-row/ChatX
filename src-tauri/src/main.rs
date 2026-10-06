@@ -20,7 +20,7 @@ use std::{
     process::{Command, Output, Stdio},
     sync::{atomic::{AtomicBool, AtomicU32, Ordering}, Arc, Mutex},
     thread,
-    time::{Duration, SystemTime, UNIX_EPOCH},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 use tauri::{
     menu::{Menu, MenuItem},
@@ -564,6 +564,87 @@ fn command_output(command: &mut Command) -> Result<Output, String> {
     command.output().map_err(|e| format!("启动进程失败：{e}"))
 }
 
+fn command_output_with_timeout(
+    command: &mut Command,
+    timeout: Duration,
+    label: &str,
+) -> Result<Output, String> {
+    let nonce = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    let capture_base = format!("chatx-command-{}-{nonce}", std::process::id());
+    let stdout_path = std::env::temp_dir().join(format!("{capture_base}.stdout"));
+    let stderr_path = std::env::temp_dir().join(format!("{capture_base}.stderr"));
+    let stdout_file = fs::File::create(&stdout_path)
+        .map_err(|error| format!("创建 {label} stdout 捕获文件失败：{error}"))?;
+    let stderr_file = match fs::File::create(&stderr_path) {
+        Ok(file) => file,
+        Err(error) => {
+            let _ = fs::remove_file(&stdout_path);
+            return Err(format!("创建 {label} stderr 捕获文件失败：{error}"));
+        }
+    };
+
+    command
+        .stdin(Stdio::null())
+        .stdout(Stdio::from(stdout_file))
+        .stderr(Stdio::from(stderr_file));
+    #[cfg(windows)]
+    command.creation_flags(CREATE_NO_WINDOW);
+
+    let mut child = match command.spawn() {
+        Ok(child) => child,
+        Err(error) => {
+            let _ = fs::remove_file(&stdout_path);
+            let _ = fs::remove_file(&stderr_path);
+            return Err(format!("启动 {label} 失败：{error}"));
+        }
+    };
+    let started = Instant::now();
+
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => {
+                let stdout = fs::read(&stdout_path).unwrap_or_default();
+                let stderr = fs::read(&stderr_path).unwrap_or_default();
+                let _ = fs::remove_file(&stdout_path);
+                let _ = fs::remove_file(&stderr_path);
+                return Ok(Output { status, stdout, stderr });
+            }
+            Ok(None) if started.elapsed() < timeout => {
+                thread::sleep(Duration::from_millis(100));
+            }
+            Ok(None) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                let _ = fs::remove_file(&stdout_path);
+                let _ = fs::remove_file(&stderr_path);
+                return Err(format!(
+                    "{label} 超时（{} 秒），已终止该命令。",
+                    timeout.as_secs()
+                ));
+            }
+            Err(error) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                let _ = fs::remove_file(&stdout_path);
+                let _ = fs::remove_file(&stderr_path);
+                return Err(format!("等待 {label} 失败：{error}"));
+            }
+        }
+    }
+}
+
+fn tunnel_command_timeout(args: &[String]) -> Duration {
+    match args.get(1).map(String::as_str) {
+        Some("status") => Duration::from_secs(10),
+        Some("stop") => Duration::from_secs(10),
+        Some("connect") => Duration::from_secs(30),
+        _ => Duration::from_secs(20),
+    }
+}
+
 fn run_tunnel(
     app: &tauri::AppHandle,
     paths: &RuntimePaths,
@@ -575,7 +656,16 @@ fn run_tunnel(
     if let Some(key) = runtime_key { command.env("CHATX_TUNNEL_RUNTIME_KEY", key); }
     let settings = load_settings(app);
     let _ = apply_proxy_env(&mut command, &settings)?;
-    command_output(&mut command)
+    let label = if args.is_empty() {
+        "tunnel-client".to_string()
+    } else {
+        format!("tunnel-client {}", args.iter().take(2).cloned().collect::<Vec<_>>().join(" "))
+    };
+    command_output_with_timeout(
+        &mut command,
+        tunnel_command_timeout(args),
+        &label,
+    )
 }
 
 fn output_text(output: &Output) -> String {
@@ -907,6 +997,21 @@ mod tests {
         settings.connection_intent = true;
         assert!(ensure_runtime_start_intent(&state, &settings, true).is_ok());
         assert!(ensure_runtime_start_intent(&state, &Settings::default(), false).is_ok());
+    }
+
+    #[test]
+    fn tunnel_recovery_policy_keeps_bounded_backoff_and_command_timeouts() {
+        assert_eq!(reconnect_delay_secs(1), 2);
+        assert_eq!(reconnect_delay_secs(2), 5);
+        assert_eq!(reconnect_delay_secs(3), 10);
+        assert_eq!(reconnect_delay_secs(4), 20);
+        assert_eq!(reconnect_delay_secs(5), 30);
+        assert_eq!(reconnect_delay_secs(20), 30);
+
+        let args = |operation: &str| vec!["runtimes".to_string(), operation.to_string()];
+        assert_eq!(tunnel_command_timeout(&args("status")), Duration::from_secs(10));
+        assert_eq!(tunnel_command_timeout(&args("stop")), Duration::from_secs(10));
+        assert_eq!(tunnel_command_timeout(&args("connect")), Duration::from_secs(30));
     }
 
     #[test]
@@ -1504,9 +1609,43 @@ fn restore_connection_intent_if_active(app: &tauri::AppHandle, state: &AppState)
     );
 }
 
+fn wait_for_runtime_recovery(
+    app: &tauri::AppHandle,
+    state: &AppState,
+    paths: &RuntimePaths,
+    require_auto_reconnect: bool,
+) -> bool {
+    let deadline = Instant::now() + Duration::from_secs(15);
+    loop {
+        let settings = load_settings(app);
+        let desired_connected = state.desired_connected.load(Ordering::SeqCst);
+        if !desired_connected
+            || (require_auto_reconnect && !settings.auto_reconnect)
+        {
+            return false;
+        }
+
+        let observation = runtime_status(app, paths);
+        update_runtime_snapshot(
+            state,
+            &observation,
+            desired_connected,
+            &settings,
+        );
+        if observation.active {
+            return true;
+        }
+        if Instant::now() >= deadline {
+            return false;
+        }
+        thread::sleep(Duration::from_secs(2));
+    }
+}
+
 fn start_reconnect_monitor(app: tauri::AppHandle) {
     thread::spawn(move || {
         let mut inactive_checks = 0u32;
+        let mut next_reconnect_at: Option<Instant> = None;
         loop {
             thread::sleep(Duration::from_secs(4));
             let state = app.state::<AppState>();
@@ -1534,28 +1673,48 @@ fn start_reconnect_monitor(app: tauri::AppHandle) {
                 }
                 state.reconnect_attempt.store(0, Ordering::SeqCst);
                 inactive_checks = 0;
+                next_reconnect_at = None;
                 continue;
             }
 
             if !desired_connected || !settings.auto_reconnect {
                 inactive_checks = 0;
+                next_reconnect_at = None;
                 state.reconnecting.store(false, Ordering::SeqCst);
                 state.reconnect_attempt.store(0, Ordering::SeqCst);
                 continue;
             }
 
             inactive_checks = inactive_checks.saturating_add(1);
-            let failure_threshold = if observation.control_plane.state == "down" { 1 } else if observation.runtime_alive { 8 } else { 2 };
-            if inactive_checks < failure_threshold || state.reconnecting.swap(true, Ordering::SeqCst) {
+            let failure_threshold = if observation.control_plane.state == "down" {
+                1
+            } else if observation.runtime_alive {
+                8
+            } else {
+                2
+            };
+            if inactive_checks < failure_threshold {
+                continue;
+            }
+            if next_reconnect_at.is_some_and(|next| Instant::now() < next) {
+                continue;
+            }
+            if state.reconnecting.swap(true, Ordering::SeqCst) {
                 continue;
             }
 
             let attempt = state.reconnect_attempt.fetch_add(1, Ordering::SeqCst) + 1;
+            let delay = reconnect_delay_secs(attempt);
             let key = state.session_runtime_key.lock().ok().and_then(|value| value.clone());
             let Some(key) = key else {
-                push_log(&state, "Tunnel 已断开，但本次会话没有可用于自动重连的 Runtime Key");
+                next_reconnect_at = Some(Instant::now() + Duration::from_secs(delay));
+                push_log(
+                    &state,
+                    format!(
+                        "Tunnel 已断开，但本次会话没有可用于自动重连的 Runtime Key；{delay} 秒后继续检查"
+                    ),
+                );
                 state.reconnecting.store(false, Ordering::SeqCst);
-                thread::sleep(Duration::from_secs(reconnect_delay_secs(attempt)));
                 continue;
             };
 
@@ -1574,15 +1733,38 @@ fn start_reconnect_monitor(app: tauri::AppHandle) {
 
             match start_runtime_connection(&app, state.inner(), &settings.tunnel_id, &key, true, true) {
                 Ok(()) if state.desired_connected.load(Ordering::SeqCst) => {
-                    push_log(&state, format!("第 {attempt} 次自动重连命令已完成"));
-                    state.reconnect_attempt.store(0, Ordering::SeqCst);
-                    inactive_checks = 0;
+                    push_log(
+                        &state,
+                        format!("第 {attempt} 次自动重连命令已完成，正在验证 Tunnel Ready"),
+                    );
+                    if wait_for_runtime_recovery(&app, state.inner(), &paths, true) {
+                        push_log(&state, format!("第 {attempt} 次自动重连已确认 Tunnel 恢复"));
+                        state.reconnect_attempt.store(0, Ordering::SeqCst);
+                        inactive_checks = 0;
+                        next_reconnect_at = None;
+                    } else if state.desired_connected.load(Ordering::SeqCst)
+                        && load_settings(&app).auto_reconnect
+                    {
+                        next_reconnect_at = Some(Instant::now() + Duration::from_secs(delay));
+                        push_log(
+                            &state,
+                            format!(
+                                "第 {attempt} 次自动重连命令已完成，但 15 秒内未恢复 Ready；{delay} 秒后重试"
+                            ),
+                        );
+                    } else {
+                        next_reconnect_at = None;
+                    }
                 }
-                Ok(()) => {}
+                Ok(()) => {
+                    next_reconnect_at = None;
+                }
                 Err(error) => {
-                    let delay = reconnect_delay_secs(attempt);
-                    push_log(&state, format!("第 {attempt} 次自动重连失败：{error}；{delay} 秒后继续检查"));
-                    thread::sleep(Duration::from_secs(delay));
+                    next_reconnect_at = Some(Instant::now() + Duration::from_secs(delay));
+                    push_log(
+                        &state,
+                        format!("第 {attempt} 次自动重连失败：{error}；{delay} 秒后重试"),
+                    );
                 }
             }
             state.reconnecting.store(false, Ordering::SeqCst);

@@ -45,42 +45,31 @@ class MonitorActionController(
             }
             val json = controlAttempt.fold(
                 onSuccess = { result ->
-                    if (result.ok) {
+                    val controlJson = if (result.ok) {
                         controlSnapshotJson(config, result)
-                            ?: StatusCodec.error(
-                                "刷新响应缺少 Snapshot。",
-                            )
                     } else {
                         notice = result.message
-                            ?: "Desktop 拒绝刷新请求。"
+                            ?: "Desktop 拒绝刷新请求，已改用 HTTPS 刷新。"
                         null
                     }
+                    controlJson ?: fallbackSnapshotJson(
+                        if (result.ok) "刷新响应缺少 Snapshot。" else notice,
+                    )
                 },
                 onFailure = { controlError ->
-                    runCatching {
-                        StatusCodec.snapshot(
-                            MonitorRepository(appContext)
-                                .fetchSnapshot(),
-                        )
-                    }.getOrElse { fallbackError ->
-                        StatusCodec.error(
-                            fallbackError.message
-                                ?: controlError.message
-                                ?: "连接失败",
-                        )
-                    }
+                    fallbackSnapshotJson(
+                        controlError.message ?: "控制通道刷新失败。",
+                    )
                 },
             )
-            if (json != null) {
-                store.setLastSnapshotJson(
-                    config.desktopId,
-                    config.deviceId,
-                    json,
-                )
-            }
+            store.setLastSnapshotJson(
+                config.desktopId,
+                config.deviceId,
+                json,
+            )
             post {
                 refreshing.set(false)
-                if (json != null) listener.onSnapshot(json)
+                listener.onSnapshot(json)
                 listener.onStateChanged()
                 notice?.let(listener::onToast)
             }
@@ -176,6 +165,19 @@ class MonitorActionController(
         )
         return StatusCodec.snapshot(snapshot)
     }
+
+    private fun fallbackSnapshotJson(primaryError: String?): String =
+        runCatching {
+            StatusCodec.snapshot(
+                MonitorRepository(appContext).fetchSnapshot(),
+            )
+        }.getOrElse { fallbackError ->
+            StatusCodec.error(
+                fallbackError.message
+                    ?: primaryError
+                    ?: "连接失败",
+            )
+        }
 
     private fun notifyStateChanged() {
         post { listener.onStateChanged() }

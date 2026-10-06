@@ -54,6 +54,18 @@ npm run test:local-full
 3. Android `lintDebug` and Gradle unit tests;
 4. `git diff --check`.
 
+### Test discipline
+
+Keep the test surface small and high-value. Do not add a new standalone test script just because a file or feature changed.
+
+- Prefer extending an existing relevant test or adding a unit test next to the code under test.
+- Add a new test file only when it covers a distinct behavior, integration boundary, regression class, or platform-specific path that existing tests cannot express cleanly.
+- Do not create source-string/grep assertions for implementation details that are already exercised by Rust, Android, UI behavior, runtime smoke, or build tests.
+- Static source assertions are acceptable only for durable repository invariants that cannot be validated reasonably through behavior, such as required packaging metadata or forbidden legacy artifacts.
+- Avoid duplicate npm test aliases and one-off wrapper scripts. Reuse the canonical `test`, `test:runtime`, and `test:local-full` entry points where possible.
+- When a new test supersedes an older test, remove or consolidate the obsolete coverage in the same change.
+- A smaller test suite with clear ownership is preferred over many overlapping scripts. Every retained test should have an identifiable failure mode that is not already covered elsewhere.
+
 Do not manually reconstruct Cargo/JAVA_HOME/ANDROID_HOME paths unless the helper itself is being debugged.
 ## Gradle behavior
 

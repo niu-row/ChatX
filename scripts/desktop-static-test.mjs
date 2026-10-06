@@ -377,6 +377,6 @@ if (!/^https:\/\/github\.com\/wonderwhy-er\/DesktopCommanderMCP\/releases\/downl
 }
 if (!/^[0-9a-f]{64}$/i.test(runtimeLock.desktopCommander?.sha256 ?? '')) throw new Error('Desktop Commander MCPB SHA-256 must be locked.');
 if (!/^\d+\.\d+\.\d+$/.test(pkg.version)) throw new Error('ChatX package version must be semver.');
-if (!pkg.scripts?.['test:bridge']) throw new Error('package scripts must include the real Desktop Commander bridge smoke test.');
+if (!pkg.scripts?.['test:runtime']?.includes('bridge-smoke-test.mjs')) throw new Error('runtime verification must include the real Desktop Commander bridge smoke test.');
 
 console.log('desktop static checks passed');

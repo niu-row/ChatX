@@ -163,24 +163,36 @@ fn trigger_tunnel_reconnect(
             false,
             true,
         );
-        if let Ok(paths) = runtime_paths(&app) {
-            let observation = runtime_status(&app, &paths);
-            let current_settings = load_settings(&app);
-            let desired_connected =
-                state.desired_connected.load(Ordering::SeqCst);
-            update_runtime_snapshot(
-                state.inner(),
-                &observation,
-                desired_connected,
-                &current_settings,
-            );
-        }
+        let recovered = match &result {
+            Ok(()) => match runtime_paths(&app) {
+                Ok(paths) => wait_for_runtime_recovery(
+                    &app,
+                    state.inner(),
+                    &paths,
+                    false,
+                ),
+                Err(error) => {
+                    push_log(
+                        state.inner(),
+                        format!("手机触发重连后的 Ready 验证失败：{error}"),
+                    );
+                    false
+                }
+            },
+            Err(_) => false,
+        };
         match result {
-            Ok(()) => {
+            Ok(()) if recovered => {
                 state.reconnect_attempt.store(0, Ordering::SeqCst);
                 push_log(
                     state.inner(),
-                    "手机触发的 Tunnel 重连命令已完成",
+                    "手机触发的 Tunnel 重连已确认恢复 Ready",
+                );
+            }
+            Ok(()) => {
+                push_log(
+                    state.inner(),
+                    "手机触发的 Tunnel 重连命令已完成，但 15 秒内未恢复 Ready",
                 );
             }
             Err(error) => {

@@ -14,6 +14,7 @@ import android.os.Build
 import android.os.Bundle
 import android.os.PowerManager
 import android.provider.Settings
+import android.text.TextUtils
 import android.view.Gravity
 import android.view.View
 import android.view.ViewGroup
@@ -752,15 +753,23 @@ class MainActivity : Activity() {
                         ui.margin(height = 1, top = 6, bottom = 6),
                     )
                 }
-                val eventRow = ui.row()
+                val eventRow = ui.row().apply {
+                    minimumHeight = ui.dp(48)
+                }
                 val eventCopy = ui.column()
-                eventCopy.addView(ui.body(event.title, 14f))
+                eventCopy.addView(
+                    ui.body(event.title, 14f).apply {
+                        setSingleLine(true)
+                        ellipsize = TextUtils.TruncateAt.END
+                    },
+                )
                 eventCopy.addView(
                     ui.muted(
                         "${event.message} · ${formatTime(event.at)}",
                         12f,
                     ).apply {
-                        maxLines = 2
+                        setSingleLine(true)
+                        ellipsize = TextUtils.TruncateAt.END
                     },
                     ui.margin(top = 3),
                 )
@@ -773,7 +782,10 @@ class MainActivity : Activity() {
                         eventTypeLabel(event.type),
                         eventTone(event.type),
                     ),
-                    ui.margin(left = 8),
+                    ui.margin(
+                        width = ViewGroup.LayoutParams.WRAP_CONTENT,
+                        left = 8,
+                    ),
                 )
                 history.addView(eventRow)
             }
