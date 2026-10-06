@@ -23,7 +23,7 @@ struct ControlCache {
 #[derive(Default)]
 pub(super) struct State {
     cache: Mutex<ControlCache>,
-    reconnect_running: AtomicBool,
+    pub(super) reconnect_running: AtomicBool,
     last_reconnect_at: AtomicU64,
 }
 
@@ -146,6 +146,7 @@ fn trigger_tunnel_reconnect(
     }
     state.monitor_control.last_reconnect_at.store(now, Ordering::SeqCst);
     state.reconnecting.store(true, Ordering::SeqCst);
+    set_recovery_status(state, "reconnecting", 0, "");
 
     let app = app.clone();
     thread::spawn(move || {
@@ -164,25 +165,29 @@ fn trigger_tunnel_reconnect(
             true,
         );
         let recovered = match &result {
-            Ok(()) => match runtime_paths(&app) {
-                Ok(paths) => wait_for_runtime_recovery(
-                    &app,
-                    state.inner(),
-                    &paths,
-                    false,
-                ),
-                Err(error) => {
-                    push_log(
+            Ok(()) => {
+                set_recovery_status(state.inner(), "verifying", 0, "");
+                match runtime_paths(&app) {
+                    Ok(paths) => wait_for_runtime_recovery(
+                        &app,
                         state.inner(),
-                        format!("手机触发重连后的 Ready 验证失败：{error}"),
-                    );
-                    false
+                        &paths,
+                        false,
+                    ),
+                    Err(error) => {
+                        push_log(
+                            state.inner(),
+                            format!("手机触发重连后的 Ready 验证失败：{error}"),
+                        );
+                        false
+                    }
                 }
-            },
+            }
             Err(_) => false,
         };
         match result {
             Ok(()) if recovered => {
+                set_recovery_status(state.inner(), "idle", 0, "");
                 state.reconnect_attempt.store(0, Ordering::SeqCst);
                 push_log(
                     state.inner(),
@@ -190,12 +195,15 @@ fn trigger_tunnel_reconnect(
                 );
             }
             Ok(()) => {
+                let error = "手机触发的重连命令已完成，但 15 秒内未恢复 Tunnel Ready。";
+                set_recovery_status(state.inner(), "failed", 0, error);
                 push_log(
                     state.inner(),
                     "手机触发的 Tunnel 重连命令已完成，但 15 秒内未恢复 Ready",
                 );
             }
             Err(error) => {
+                set_recovery_status(state.inner(), "failed", 0, error.clone());
                 push_log(
                     state.inner(),
                     format!("手机触发的 Tunnel 重连失败：{error}"),

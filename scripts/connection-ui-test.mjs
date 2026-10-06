@@ -119,4 +119,17 @@ status = {
 await vm.runInContext('refresh()', context);
 assert.match(element('sidebarStatus').textContent, /已断开/);
 assert.equal(element('tunnelFact').textContent, 'Down');
-console.log('connection UI checks passed: suspect/down health is distinct');
+
+status = {
+  ...status,
+  reconnectPhase: 'backoff',
+  reconnectAttempt: 3,
+  nextReconnectAt: Date.now() + 10_000,
+  lastReconnectError: 'temporary control-plane failure',
+};
+await vm.runInContext('refresh()', context);
+assert.match(element('sidebarStatus').textContent, /等待自动重连/);
+assert.equal(element('tunnelFact').textContent, 'Backoff');
+assert.match(element('reconnectStatus').textContent, /等待自动重连/);
+assert.match(element('heroCopy').textContent, /temporary control-plane failure/);
+console.log('connection UI checks passed: suspect/down and reconnect backoff are distinct');

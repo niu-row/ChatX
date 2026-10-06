@@ -129,6 +129,9 @@ fn payload_with_tunnel(
             .unwrap_or_default()
     });
     let settings = load_settings(app);
+    let recovery = recovery_status(state);
+    let (reconnect_available, reconnect_unavailable_reason) =
+        reconnect_capability(app, state, &settings);
     let endpoints =
         monitor_network::discover_monitor_endpoints(settings.monitor_port);
     json!({
@@ -158,8 +161,14 @@ fn payload_with_tunnel(
             "proxyMode": tunnel.proxy_mode,
             "proxySource": tunnel.proxy_source,
             "desiredConnected": state.desired_connected.load(Ordering::SeqCst),
+            "autoReconnect": settings.auto_reconnect,
             "reconnecting": state.reconnecting.load(Ordering::SeqCst),
-            "reconnectAttempt": state.reconnect_attempt.load(Ordering::SeqCst)
+            "reconnectAttempt": state.reconnect_attempt.load(Ordering::SeqCst),
+            "reconnectPhase": recovery.phase,
+            "nextReconnectAt": recovery.next_reconnect_at,
+            "lastReconnectError": recovery.last_error,
+            "reconnectAvailable": reconnect_available,
+            "reconnectUnavailableReason": reconnect_unavailable_reason
         },
         "mcp": mcp
     })

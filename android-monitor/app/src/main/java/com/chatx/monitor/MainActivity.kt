@@ -438,11 +438,10 @@ class MainActivity : Activity() {
             val alert = when {
                 tunnelDown -> Triple(
                     "Tunnel 已断开",
-                    if (tunnel.optBoolean("reconnecting")) {
-                        "ChatX 正在自动重连 Tunnel。"
-                    } else {
-                        "ChatX 在线，但 Secure MCP Tunnel 当前不可用。"
-                    },
+                    tunnelRecoveryDetail(
+                        tunnel,
+                        statusRoot.optLong("serverTime", System.currentTimeMillis()),
+                    ),
                     UiKit.Tone.DANGER,
                 )
                 mcpState == "gap" -> Triple(
@@ -468,6 +467,7 @@ class MainActivity : Activity() {
                 card.addView(row)
                 if (
                     tunnelDown &&
+                    tunnel.optBoolean("reconnectAvailable", false) &&
                     !tunnel.optBoolean("reconnecting", false)
                 ) {
                     card.addView(
@@ -1684,6 +1684,42 @@ class MainActivity : Activity() {
         "HOST_OFFLINE",
         -> UiKit.Tone.DANGER
         else -> UiKit.Tone.NEUTRAL
+    }
+
+    private fun tunnelRecoveryDetail(
+        tunnel: JSONObject,
+        serverTime: Long,
+    ): String {
+        val attempt = tunnel.optInt("reconnectAttempt", 0)
+        return when (tunnel.optString("reconnectPhase", "idle")) {
+            "detecting" -> "ChatX 已检测到 Tunnel 异常，正在确认状态。"
+            "reconnecting" -> "ChatX 正在执行第 ${attempt.coerceAtLeast(1)} 次自动重连。"
+            "verifying" -> "重连命令已完成，正在验证 Tunnel Ready。"
+            "backoff" -> {
+                val remaining = (
+                    tunnel.optLong("nextReconnectAt", 0L) - serverTime
+                ).coerceAtLeast(0L)
+                val suffix = if (remaining > 0L) {
+                    "约 ${((remaining + 999L) / 1000L)} 秒后重试。"
+                } else {
+                    "正在等待下一次重试。"
+                }
+                val error = tunnel.optString("lastReconnectError").ifBlank { null }
+                listOfNotNull(error, suffix).joinToString(" ")
+            }
+            "blocked", "failed" ->
+                tunnel.optString("lastReconnectError").ifBlank {
+                    "ChatX 无法自动恢复 Tunnel。"
+                }
+            "disabled" -> "Tunnel 自动重连已关闭。"
+            "stopped" -> "Tunnel 已被 Desktop 手动停止。"
+            else -> when (tunnel.optString("reconnectUnavailableReason")) {
+                "runtime_key_unavailable" -> "Desktop 缺少 Runtime Key，当前无法重连。"
+                "tunnel_not_configured" -> "Desktop 尚未配置 Tunnel。"
+                "manually_stopped" -> "Tunnel 已被 Desktop 手动停止。"
+                else -> "ChatX 在线，但 Secure MCP Tunnel 当前不可用。"
+            }
+        }
     }
 
     private fun formatTime(value: Long): String {

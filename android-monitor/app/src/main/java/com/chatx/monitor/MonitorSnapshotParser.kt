@@ -52,8 +52,18 @@ object MonitorSnapshotParser {
                 proxyMode = tunnel.optString("proxyMode", "direct"),
                 proxySource = tunnel.optString("proxySource").ifBlank { null },
                 desiredConnected = tunnel.optBoolean("desiredConnected", false),
+                autoReconnect = tunnel.optBoolean("autoReconnect", true),
                 reconnecting = tunnel.optBoolean("reconnecting", false),
                 reconnectAttempt = tunnel.optInt("reconnectAttempt", 0),
+                reconnectPhase = tunnel.optString("reconnectPhase", "idle"),
+                nextReconnectAt = tunnel.optLong("nextReconnectAt", 0L),
+                lastReconnectError = tunnel.optString("lastReconnectError").ifBlank { null },
+                reconnectAvailable = tunnel.optBoolean(
+                    "reconnectAvailable",
+                    tunnel.optBoolean("desiredConnected", false) &&
+                        !tunnel.optBoolean("reconnecting", false),
+                ),
+                reconnectUnavailableReason = tunnel.optString("reconnectUnavailableReason").ifBlank { null },
             ),
             mcp = McpStatus(
                 state = mcp.optString("state", "idle"),

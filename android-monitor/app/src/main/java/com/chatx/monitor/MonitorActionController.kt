@@ -3,6 +3,7 @@ package com.chatx.monitor
 import android.content.Context
 import android.os.Handler
 import android.os.Looper
+import android.os.SystemClock
 import java.io.Closeable
 import java.util.concurrent.Executors
 import java.util.concurrent.atomic.AtomicBoolean
@@ -85,34 +86,32 @@ class MonitorActionController(
                     appContext,
                     config,
                 ).execute("reconnect_tunnel", timeoutSeconds = 5L)
-                val json = controlSnapshotJson(config, result)
-                if (json != null) {
+                val initialJson = controlSnapshotJson(config, result)
+                if (initialJson != null) {
                     store.setLastSnapshotJson(
-                    config.desktopId,
-                    config.deviceId,
-                    json,
-                )
+                        config.desktopId,
+                        config.deviceId,
+                        initialJson,
+                    )
                 }
-                result to json
+                if (!result.ok) {
+                    initialJson to (
+                        result.message ?: "Desktop 拒绝 Tunnel 重连请求。"
+                    )
+                } else {
+                    followReconnect(config, initialJson)
+                }
             }
             post {
                 reconnecting.set(false)
                 val outcome = attempt.getOrNull()
-                val result = outcome?.first
-                val json = outcome?.second
+                val json = outcome?.first
                 if (json != null) listener.onSnapshot(json)
                 listener.onStateChanged()
                 listener.onToast(
-                    when {
-                        result == null ->
-                            attempt.exceptionOrNull()?.message
-                                ?: "Tunnel 重连请求失败。"
-                        result.ok ->
-                            result.message ?: "已触发 Tunnel 重连。"
-                        else ->
-                            result.message
-                                ?: "Desktop 拒绝 Tunnel 重连请求。"
-                    },
+                    outcome?.second
+                        ?: attempt.exceptionOrNull()?.message
+                        ?: "Tunnel 重连请求失败。",
                 )
             }
         }
@@ -164,6 +163,39 @@ class MonitorActionController(
             snapshot.endpoints,
         )
         return StatusCodec.snapshot(snapshot)
+    }
+
+    private fun followReconnect(
+        config: PairingConfig,
+        initialJson: String?,
+    ): Pair<String?, String> {
+        var latestJson = initialJson
+        val deadline = SystemClock.elapsedRealtime() + 24_000L
+        while (!closed.get() && SystemClock.elapsedRealtime() < deadline) {
+            Thread.sleep(1_500L)
+            val snapshot = runCatching {
+                MonitorRepository(appContext).fetchSnapshot()
+            }.getOrNull() ?: continue
+            latestJson = StatusCodec.snapshot(snapshot)
+            store.setLastSnapshotJson(
+                config.desktopId,
+                config.deviceId,
+                latestJson,
+            )
+            if (snapshot.tunnel.active && snapshot.tunnel.health == "healthy") {
+                return latestJson to "Tunnel 已恢复 Ready。"
+            }
+            if (!snapshot.tunnel.desiredConnected) {
+                return latestJson to "Desktop 已停止 Tunnel。"
+            }
+            if (snapshot.tunnel.reconnectPhase in setOf("blocked", "failed")) {
+                return latestJson to (
+                    snapshot.tunnel.lastReconnectError
+                        ?: "Tunnel 重连未能恢复 Ready。"
+                )
+            }
+        }
+        return latestJson to "Tunnel 尚未恢复 Ready；ChatX 会继续按自动恢复策略处理。"
     }
 
     private fun fallbackSnapshotJson(primaryError: String?): String =

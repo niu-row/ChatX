@@ -80,18 +80,41 @@ function render(s) {
   const running = runtimeRunning(s);
   const unavailable = s.runtimeState === 'unavailable';
   const reconnecting = Boolean(s.reconnecting);
+  const reconnectPhase = String(s.reconnectPhase || 'idle').toLowerCase();
+  const recoveryBusy = reconnecting || ['detecting', 'reconnecting', 'verifying'].includes(reconnectPhase);
+  const recoveryWaiting = reconnectPhase === 'backoff';
+  const recoveryBlocked = ['blocked', 'failed'].includes(reconnectPhase);
+  const nextReconnectSeconds = Math.max(0, Math.ceil((Number(s.nextReconnectAt || 0) - Date.now()) / 1000));
   const wantsConnection = Boolean(s.desiredConnected);
   const runtimeHealth = String(s.runtimeHealth || '').toLowerCase();
   const degraded = wantsConnection && ['suspect', 'starting'].includes(runtimeHealth);
   const down = wantsConnection && runtimeHealth === 'down';
-  const canStop = running || reconnecting || wantsConnection;
+  const canStop = running || recoveryBusy || recoveryWaiting || wantsConnection;
   const reconnectAttempt = Number(s.reconnectAttempt || 0);
+  const recoveryLabel = reconnectPhase === 'detecting'
+    ? '正在确认 Tunnel 异常'
+    : reconnectPhase === 'verifying'
+      ? '正在验证 Tunnel Ready'
+      : reconnectPhase === 'backoff'
+        ? `等待自动重连${nextReconnectSeconds ? ` · ${nextReconnectSeconds}s` : ''}`
+        : reconnectPhase === 'blocked'
+          ? '自动重连受阻'
+          : reconnectPhase === 'failed'
+            ? '自动重连失败'
+            : `正在自动重连${reconnectAttempt ? ` · 第 ${reconnectAttempt} 次` : ''}`;
+  const recoveryCopy = recoveryWaiting
+    ? `${s.lastReconnectError || '上一轮自动重连未恢复 Ready。'}${nextReconnectSeconds ? ` ${nextReconnectSeconds} 秒后再次尝试。` : ' 正在等待下一次尝试。'}`
+    : recoveryBlocked
+      ? (s.lastReconnectError || 'ChatX 当前无法自动恢复 Tunnel。')
+      : reconnectPhase === 'verifying'
+        ? '重连命令已经完成，ChatX 正在确认 runtime、Ready 与 Control Plane 健康状态。'
+        : 'ChatX 已检测到 Tunnel 掉线，正在后台恢复连接；无需重新输入配置。';
 
   $('sidebarDot').className = `dot ${running ? 'ok' : unavailable || down ? 'bad' : 'warn'}`;
   $('sidebarStatus').textContent = running
     ? '已连接 ChatGPT'
-    : reconnecting
-      ? `正在自动重连${reconnectAttempt ? ` · 第 ${reconnectAttempt} 次` : ''}`
+    : recoveryBusy || recoveryWaiting || recoveryBlocked
+      ? recoveryLabel
       : degraded
         ? 'Tunnel 连接异常 · 检查中'
         : down
@@ -100,31 +123,35 @@ function render(s) {
 
   $('heroTitle').textContent = running
     ? 'ChatGPT 已连接本机'
-    : reconnecting ? 'Tunnel 正在自动重连'
+    : recoveryBusy || recoveryWaiting || recoveryBlocked ? recoveryLabel
       : degraded ? 'Tunnel 连接正在检查'
         : down ? 'Tunnel 连接已中断'
           : s.configured ? '连接已配置' : '配置一次即可连接';
   $('heroCopy').textContent = running
     ? 'Secure MCP Tunnel 正在把 ChatGPT 的 MCP 调用转发给 Desktop Commander。'
-    : reconnecting
-      ? 'ChatX 已检测到 Tunnel 掉线，正在后台恢复连接；无需重新输入配置。'
+    : recoveryBusy || recoveryWaiting || recoveryBlocked
+      ? recoveryCopy
       : degraded
         ? '本地 runtime 仍在运行，但 Control Plane 最近出现连续 poll 异常；ChatX 正在持续检测。'
         : down
           ? 'ChatX 已确认 Control Plane 或本地 runtime 不可用；可等待自动重连或手动处理。'
           : '输入 Tunnel ID 和 Runtime API Key 后，ChatX 会直接启动 Desktop Commander 的 stdio MCP。';
-  $('heroConnect').textContent = running ? '查看连接' : reconnecting ? '自动重连中' : degraded || down ? '查看连接状态' : '配置连接';
+  $('heroConnect').textContent = running ? '查看连接' : recoveryBusy ? '自动重连中' : degraded || down || recoveryWaiting || recoveryBlocked ? '查看连接状态' : '配置连接';
   $('heroStop').disabled = busy || !canStop;
 
   $('tunnelFact').textContent = running
     ? 'Ready'
-    : reconnecting
-      ? 'Reconnecting'
-      : degraded
-        ? 'Suspect'
-        : down
-          ? 'Down'
-          : String(s.runtimeState || 'Stopped');
+    : recoveryBusy
+      ? reconnectPhase === 'verifying' ? 'Verifying' : 'Reconnecting'
+      : recoveryWaiting
+        ? 'Backoff'
+        : recoveryBlocked
+          ? 'Recovery blocked'
+          : degraded
+            ? 'Suspect'
+            : down
+              ? 'Down'
+              : String(s.runtimeState || 'Stopped');
   $('tunnelVersion').textContent = s.tunnelVersion || 'tunnel-client unavailable';
   $('dcFact').textContent = unavailable ? 'Unavailable' : 'Bundled';
   $('dcVersion').textContent = `v${s.desktopCommander?.version || 'unknown'}`;
@@ -138,9 +165,9 @@ function render(s) {
   if (!rememberKeyDirty) $('rememberKey').checked = sessionOnly ? false : Boolean(s.rememberKey || s.runtimeKeySaved || !s.configured);
   $('runtimeKey').placeholder = s.runtimeKeySaved ? '已安全保存，可留空' : '输入 Runtime API Key';
   $('clearKey').disabled = busy || !s.runtimeKeySaved;
-  $('connect').disabled = busy || unavailable || running || reconnecting;
+  $('connect').disabled = busy || unavailable || running || recoveryBusy;
   $('stop').disabled = busy || !canStop;
-  $('connect').textContent = running ? '已连接' : reconnecting ? '自动重连中' : '连接并启动';
+  $('connect').textContent = running ? '已连接' : recoveryBusy ? '自动重连中' : '连接并启动';
   $('mcpCommand').textContent = s.mcpCommand || '运行组件准备完成后显示 MCP command。';
 
   const autoReconnect = $('autoReconnect');
@@ -148,16 +175,16 @@ function render(s) {
   autoReconnect.checked = autoReconnectEnabled;
   autoReconnect.disabled = busy || autoReconnectBusy;
   const reconnectStatus = $('reconnectStatus');
-  reconnectStatus.textContent = reconnecting
-    ? `重连中${reconnectAttempt ? ` · 第 ${reconnectAttempt} 次` : ''}`
+  reconnectStatus.textContent = recoveryBusy || recoveryWaiting || recoveryBlocked
+    ? recoveryLabel
     : autoReconnectEnabled ? '已开启' : '已关闭';
-  reconnectStatus.className = `setting-status ${reconnecting ? 'warn' : autoReconnectEnabled ? 'ok' : 'off'}`;
+  reconnectStatus.className = `setting-status ${recoveryBusy || recoveryWaiting || recoveryBlocked ? 'warn' : autoReconnectEnabled ? 'ok' : 'off'}`;
 
   const logs = Array.isArray(s.logs) ? s.logs : [];
   $('logs').textContent = logs.length ? logs.join('\n') : '尚无日志。';
   $('logs').scrollTop = $('logs').scrollHeight;
 
-  const hasRuntimeError = !reconnecting && ['error', 'unavailable'].includes(String(s.runtimeState || '').toLowerCase());
+  const hasRuntimeError = !recoveryBusy && ['error', 'unavailable'].includes(String(s.runtimeState || '').toLowerCase());
   displayError(actionError || (s.lastError && hasRuntimeError ? s.lastError : ''));
 }
 

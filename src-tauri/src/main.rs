@@ -153,6 +153,23 @@ impl Default for Settings {
     }
 }
 
+#[derive(Debug, Clone)]
+struct TunnelRecoveryStatus {
+    phase: String,
+    next_reconnect_at: u64,
+    last_error: String,
+}
+
+impl Default for TunnelRecoveryStatus {
+    fn default() -> Self {
+        Self {
+            phase: "idle".into(),
+            next_reconnect_at: 0,
+            last_error: String::new(),
+        }
+    }
+}
+
 #[derive(Default)]
 struct AppState {
     logs: Mutex<Vec<String>>,
@@ -160,6 +177,7 @@ struct AppState {
     desired_connected: AtomicBool,
     reconnecting: AtomicBool,
     reconnect_attempt: AtomicU32,
+    recovery_status: Mutex<TunnelRecoveryStatus>,
     runtime_snapshot: Mutex<monitor::TunnelSnapshot>,
     relay_status: Arc<Mutex<relay::RelayStatus>>,
     relay_client: Mutex<Option<relay::RelayClientHandle>>,
@@ -1502,6 +1520,56 @@ fn reconnect_delay_secs(attempt: u32) -> u64 {
     }
 }
 
+fn set_recovery_status(
+    state: &AppState,
+    phase: &str,
+    next_reconnect_at: u64,
+    last_error: impl Into<String>,
+) {
+    if let Ok(mut recovery) = state.recovery_status.lock() {
+        recovery.phase = phase.to_string();
+        recovery.next_reconnect_at = next_reconnect_at;
+        recovery.last_error = last_error.into();
+    }
+}
+
+fn recovery_status(state: &AppState) -> TunnelRecoveryStatus {
+    state
+        .recovery_status
+        .lock()
+        .map(|value| value.clone())
+        .unwrap_or_default()
+}
+
+fn reconnect_capability(
+    app: &tauri::AppHandle,
+    state: &AppState,
+    settings: &Settings,
+) -> (bool, String) {
+    if !settings.connection_intent
+        || !state.desired_connected.load(Ordering::SeqCst)
+    {
+        return (false, "manually_stopped".into());
+    }
+    if settings.tunnel_id.trim().is_empty() {
+        return (false, "tunnel_not_configured".into());
+    }
+    if state.reconnecting.load(Ordering::SeqCst)
+        || state.monitor_control.reconnect_running.load(Ordering::SeqCst)
+    {
+        return (false, "operation_busy".into());
+    }
+    let session_key_available = state
+        .session_runtime_key
+        .lock()
+        .map(|value| value.as_ref().is_some_and(|key| !key.trim().is_empty()))
+        .unwrap_or(false);
+    if session_key_available || runtime_key_saved(app) {
+        return (true, String::new());
+    }
+    (false, "runtime_key_unavailable".into())
+}
+
 fn ensure_runtime_start_intent(
     state: &AppState,
     settings: &Settings,
@@ -1656,6 +1724,7 @@ fn start_reconnect_monitor(app: tauri::AppHandle) {
             let paths = match runtime_paths(&app) {
                 Ok(paths) => paths,
                 Err(error) => {
+                    set_recovery_status(state.inner(), "failed", 0, error.clone());
                     push_log(&state, format!("Tunnel 健康检查失败：{error}"));
                     continue;
                 }
@@ -1671,20 +1740,33 @@ fn start_reconnect_monitor(app: tauri::AppHandle) {
                 if state.reconnecting.swap(false, Ordering::SeqCst) {
                     push_log(&state, "Secure MCP Tunnel 已恢复连接");
                 }
+                set_recovery_status(state.inner(), "idle", 0, "");
                 state.reconnect_attempt.store(0, Ordering::SeqCst);
                 inactive_checks = 0;
                 next_reconnect_at = None;
                 continue;
             }
 
-            if !desired_connected || !settings.auto_reconnect {
+            if !desired_connected {
                 inactive_checks = 0;
                 next_reconnect_at = None;
+                set_recovery_status(state.inner(), "stopped", 0, "");
+                state.reconnecting.store(false, Ordering::SeqCst);
+                state.reconnect_attempt.store(0, Ordering::SeqCst);
+                continue;
+            }
+            if !settings.auto_reconnect {
+                inactive_checks = 0;
+                next_reconnect_at = None;
+                set_recovery_status(state.inner(), "disabled", 0, "");
                 state.reconnecting.store(false, Ordering::SeqCst);
                 state.reconnect_attempt.store(0, Ordering::SeqCst);
                 continue;
             }
 
+            if state.reconnecting.load(Ordering::SeqCst) {
+                continue;
+            }
             inactive_checks = inactive_checks.saturating_add(1);
             let failure_threshold = if observation.control_plane.state == "down" {
                 1
@@ -1694,6 +1776,7 @@ fn start_reconnect_monitor(app: tauri::AppHandle) {
                 2
             };
             if inactive_checks < failure_threshold {
+                set_recovery_status(state.inner(), "detecting", 0, "");
                 continue;
             }
             if next_reconnect_at.is_some_and(|next| Instant::now() < next) {
@@ -1708,6 +1791,13 @@ fn start_reconnect_monitor(app: tauri::AppHandle) {
             let key = state.session_runtime_key.lock().ok().and_then(|value| value.clone());
             let Some(key) = key else {
                 next_reconnect_at = Some(Instant::now() + Duration::from_secs(delay));
+                let next_at = timestamp_ms().saturating_add(delay.saturating_mul(1000));
+                set_recovery_status(
+                    state.inner(),
+                    "blocked",
+                    next_at,
+                    "Desktop 当前没有可用于自动重连的 Runtime Key。",
+                );
                 push_log(
                     &state,
                     format!(
@@ -1725,6 +1815,7 @@ fn start_reconnect_monitor(app: tauri::AppHandle) {
             } else {
                 observation.state.clone()
             };
+            set_recovery_status(state.inner(), "reconnecting", 0, "");
             push_log(&state, format!("检测到 Tunnel 掉线（{detail}），开始第 {attempt} 次自动重连"));
             if !state.desired_connected.load(Ordering::SeqCst) || !load_settings(&app).auto_reconnect {
                 state.reconnecting.store(false, Ordering::SeqCst);
@@ -1733,11 +1824,13 @@ fn start_reconnect_monitor(app: tauri::AppHandle) {
 
             match start_runtime_connection(&app, state.inner(), &settings.tunnel_id, &key, true, true) {
                 Ok(()) if state.desired_connected.load(Ordering::SeqCst) => {
+                    set_recovery_status(state.inner(), "verifying", 0, "");
                     push_log(
                         &state,
                         format!("第 {attempt} 次自动重连命令已完成，正在验证 Tunnel Ready"),
                     );
                     if wait_for_runtime_recovery(&app, state.inner(), &paths, true) {
+                        set_recovery_status(state.inner(), "idle", 0, "");
                         push_log(&state, format!("第 {attempt} 次自动重连已确认 Tunnel 恢复"));
                         state.reconnect_attempt.store(0, Ordering::SeqCst);
                         inactive_checks = 0;
@@ -1746,6 +1839,9 @@ fn start_reconnect_monitor(app: tauri::AppHandle) {
                         && load_settings(&app).auto_reconnect
                     {
                         next_reconnect_at = Some(Instant::now() + Duration::from_secs(delay));
+                        let next_at = timestamp_ms().saturating_add(delay.saturating_mul(1000));
+                        let error = "重连命令已完成，但 15 秒内未恢复 Tunnel Ready。";
+                        set_recovery_status(state.inner(), "backoff", next_at, error);
                         push_log(
                             &state,
                             format!(
@@ -1761,6 +1857,8 @@ fn start_reconnect_monitor(app: tauri::AppHandle) {
                 }
                 Err(error) => {
                     next_reconnect_at = Some(Instant::now() + Duration::from_secs(delay));
+                    let next_at = timestamp_ms().saturating_add(delay.saturating_mul(1000));
+                    set_recovery_status(state.inner(), "backoff", next_at, error.clone());
                     push_log(
                         &state,
                         format!("第 {attempt} 次自动重连失败：{error}；{delay} 秒后重试"),
@@ -1960,6 +2058,9 @@ fn get_status(app: tauri::AppHandle, state: State<'_, AppState>) -> Result<Value
     let activity = monitor_activity_path(&app).ok()
         .and_then(|path| monitor::read_activity_snapshot(&path));
     let mcp_monitor = monitor::evaluate_activity(activity.as_ref(), now_ms);
+    let recovery = recovery_status(state.inner());
+    let (reconnect_available, reconnect_unavailable_reason) =
+        reconnect_capability(&app, state.inner(), &settings);
     match runtime_paths(&app) {
         Ok(paths) => {
             let dc_home = desktop_commander_home(&app)?;
@@ -1990,6 +2091,11 @@ fn get_status(app: tauri::AppHandle, state: State<'_, AppState>) -> Result<Value
                 "desiredConnected":state.desired_connected.load(Ordering::SeqCst),
                 "reconnecting":state.reconnecting.load(Ordering::SeqCst),
                 "reconnectAttempt":state.reconnect_attempt.load(Ordering::SeqCst),
+                "reconnectPhase":recovery.phase.clone(),
+                "nextReconnectAt":recovery.next_reconnect_at,
+                "lastReconnectError":recovery.last_error.clone(),
+                "reconnectAvailable":reconnect_available,
+                "reconnectUnavailableReason":reconnect_unavailable_reason.clone(),
                 "runtimeKeySaved":secret_saved,
                 "keyStorage":key_storage(),
                 "platform":format!("{}-{}", std::env::consts::OS, std::env::consts::ARCH),
@@ -2014,6 +2120,11 @@ fn get_status(app: tauri::AppHandle, state: State<'_, AppState>) -> Result<Value
             "desiredConnected":state.desired_connected.load(Ordering::SeqCst),
             "reconnecting":state.reconnecting.load(Ordering::SeqCst),
             "reconnectAttempt":state.reconnect_attempt.load(Ordering::SeqCst),
+            "reconnectPhase":recovery.phase.clone(),
+            "nextReconnectAt":recovery.next_reconnect_at,
+            "lastReconnectError":recovery.last_error.clone(),
+            "reconnectAvailable":reconnect_available,
+            "reconnectUnavailableReason":reconnect_unavailable_reason.clone(),
             "runtimeKeySaved":secret_saved,
             "keyStorage":key_storage(),
             "platform":format!("{}-{}", std::env::consts::OS, std::env::consts::ARCH),
@@ -2538,6 +2649,14 @@ fn set_auto_reconnect(app: tauri::AppHandle, state: State<'_, AppState>, enabled
     if !enabled {
         state.reconnecting.store(false, Ordering::SeqCst);
         state.reconnect_attempt.store(0, Ordering::SeqCst);
+        set_recovery_status(
+            state.inner(),
+            if state.desired_connected.load(Ordering::SeqCst) { "disabled" } else { "stopped" },
+            0,
+            "",
+        );
+    } else if state.desired_connected.load(Ordering::SeqCst) {
+        set_recovery_status(state.inner(), "detecting", 0, "");
     }
     push_log(&state, if enabled { "已开启 Tunnel 断线自动重连" } else { "已关闭 Tunnel 断线自动重连" });
     get_status(app, state)
@@ -2573,6 +2692,7 @@ fn cancel_connection_intent(state: &AppState) {
     state.desired_connected.store(false, Ordering::SeqCst);
     state.reconnecting.store(false, Ordering::SeqCst);
     state.reconnect_attempt.store(0, Ordering::SeqCst);
+    set_recovery_status(state, "stopped", 0, "");
     if let Ok(mut key) = state.session_runtime_key.lock() { *key = None; }
 }
 
@@ -2614,6 +2734,7 @@ fn connect_tunnel(
     state.desired_connected.store(false, Ordering::SeqCst);
     state.reconnecting.store(false, Ordering::SeqCst);
     state.reconnect_attempt.store(0, Ordering::SeqCst);
+    set_recovery_status(state.inner(), "reconnecting", 0, "");
     if let Ok(mut session_key) = state.session_runtime_key.lock() {
         *session_key = Some(key.clone());
     }
@@ -2673,6 +2794,12 @@ fn connect_tunnel(
             &observation,
             true,
             &next_settings,
+        );
+        set_recovery_status(
+            state.inner(),
+            if observation.active { "idle" } else { "verifying" },
+            0,
+            if observation.active { "" } else { "等待 Tunnel Ready。" },
         );
     }
     get_status(app, state)

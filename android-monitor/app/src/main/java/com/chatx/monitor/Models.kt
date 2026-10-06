@@ -305,8 +305,14 @@ data class TunnelStatus(
     val proxyMode: String,
     val proxySource: String?,
     val desiredConnected: Boolean,
+    val autoReconnect: Boolean = true,
     val reconnecting: Boolean,
     val reconnectAttempt: Int,
+    val reconnectPhase: String = "idle",
+    val nextReconnectAt: Long = 0L,
+    val lastReconnectError: String? = null,
+    val reconnectAvailable: Boolean = false,
+    val reconnectUnavailableReason: String? = null,
 )
 
 data class RecentMcpCall(
