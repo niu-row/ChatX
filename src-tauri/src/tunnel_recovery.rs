@@ -52,6 +52,15 @@ pub(super) fn recovery_status(state: &AppState) -> TunnelRecoveryStatus {
         .unwrap_or_default()
 }
 
+pub(super) fn restore_desired_connection_intent(
+    state: &AppState,
+    settings: &Settings,
+) {
+    state
+        .desired_connected
+        .store(settings.connection_intent, Ordering::SeqCst);
+}
+
 pub(super) fn ensure_runtime_start_intent(
     state: &AppState,
     settings: &Settings,
@@ -99,4 +108,25 @@ pub(super) fn reconnect_capability(
         return (true, String::new());
     }
     (false, "runtime_key_unavailable".into())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn persisted_connection_intent_is_the_only_startup_desire_source() {
+        let state = AppState::default();
+        let mut settings = Settings {
+            connection_intent: true,
+            ..Settings::default()
+        };
+
+        restore_desired_connection_intent(&state, &settings);
+        assert!(state.desired_connected.load(Ordering::SeqCst));
+
+        settings.connection_intent = false;
+        restore_desired_connection_intent(&state, &settings);
+        assert!(!state.desired_connected.load(Ordering::SeqCst));
+    }
 }

@@ -1,4 +1,6 @@
-use super::{AppState, PairingRoute, PAIRING_TIMEOUT};
+use super::{
+    AppState, PairingRoute, RouteKey, MAX_PAIRING_ROUTES, PAIRING_TIMEOUT,
+};
 use crate::registry::hash_matches;
 use crate::web_utils::{bearer, json_error, now_ms, random_hex, send_json};
 use axum::{
@@ -15,8 +17,21 @@ use chatx_relay_protocol::{
     PairingWsMessage,
 };
 use serde::Deserialize;
-use std::time::Duration;
+use std::{collections::HashMap, time::Duration};
 use tokio::sync::oneshot;
+
+fn prepare_pairing_route_insert(
+    routes: &mut HashMap<RouteKey, PairingRoute>,
+    desktop_id: &str,
+    now: u64,
+) -> Result<(), String> {
+    routes.retain(|_, route| route.expires_at > now);
+    routes.retain(|(candidate_desktop, _), _| candidate_desktop != desktop_id);
+    if routes.len() >= MAX_PAIRING_ROUTES {
+        return Err("pairing route capacity reached".into());
+    }
+    Ok(())
+}
 
 pub(super) async fn open_pairing_route(
     State(state): State<AppState>,
@@ -40,7 +55,11 @@ pub(super) async fn open_pairing_route(
     if payload.expires_at <= now || payload.expires_at > now.saturating_add(10 * 60_000) {
         return json_error(StatusCode::BAD_REQUEST, "invalid pairing expiry");
     }
-    state.pairing_routes.write().await.insert(
+    let mut routes = state.pairing_routes.write().await;
+    if let Err(error) = prepare_pairing_route_insert(&mut routes, &desktop_id, now) {
+        return json_error(StatusCode::TOO_MANY_REQUESTS, error);
+    }
+    routes.insert(
         (desktop_id, pairing_id),
         PairingRoute {
             token_hash: payload.token_hash.to_ascii_lowercase(),
@@ -127,6 +146,18 @@ async fn pairing_socket(
         return;
     }
 
+    let route_key = (desktop_id.clone(), pairing_id.clone());
+    let route_active = state.pairing_routes.read().await
+        .get(&route_key)
+        .is_some_and(|route| route.expires_at > now_ms());
+    if !route_active {
+        state.pairing_routes.write().await.remove(&route_key);
+        let _ = send_json(&mut socket, &PairingServerMessage::Error {
+            message: "pairing route is no longer active".into(),
+        }).await;
+        return;
+    }
+
     let desktop_sender = state.desktop_channels.read().await
         .get(&desktop_id)
         .map(|route| route.sender.clone());
@@ -174,5 +205,47 @@ async fn pairing_socket(
                 message: "desktop pairing response timed out".into(),
             }).await;
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn route(expires_at: u64) -> PairingRoute {
+        PairingRoute {
+            token_hash: "ab".repeat(32),
+            expires_at,
+        }
+    }
+
+    #[test]
+    fn pairing_route_insert_prunes_expired_and_superseded_routes() {
+        let now = 1_000;
+        let mut routes = HashMap::new();
+        routes.insert(("d_a".into(), "p_old".into()), route(now + 100));
+        routes.insert(("d_b".into(), "p_expired".into()), route(now));
+        routes.insert(("d_c".into(), "p_keep".into()), route(now + 100));
+
+        prepare_pairing_route_insert(&mut routes, "d_a", now).unwrap();
+
+        assert!(!routes.contains_key(&("d_a".into(), "p_old".into())));
+        assert!(!routes.contains_key(&("d_b".into(), "p_expired".into())));
+        assert!(routes.contains_key(&("d_c".into(), "p_keep".into())));
+    }
+
+    #[test]
+    fn pairing_route_insert_enforces_global_capacity() {
+        let now = 1_000;
+        let mut routes = HashMap::new();
+        for index in 0..MAX_PAIRING_ROUTES {
+            routes.insert(
+                (format!("d_{index:04x}"), format!("p_{index:04x}")),
+                route(now + 100),
+            );
+        }
+
+        assert!(prepare_pairing_route_insert(&mut routes, "d_new", now).is_err());
+        assert_eq!(routes.len(), MAX_PAIRING_ROUTES);
     }
 }

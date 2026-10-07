@@ -1,12 +1,12 @@
 use super::{
     desktop_commander_home, load_runtime_key, load_settings, mcp_command, output_text,
     parse_json_output, push_log, run_tunnel, runtime_key_saved, runtime_not_running,
-    runtime_paths, save_settings, state_dir, timestamp_ms, AppState, RuntimePaths,
-    RUNTIME_ALIAS,
+    runtime_paths, state_dir, timestamp_ms, AppState, RuntimePaths, RUNTIME_ALIAS,
 };
+use crate::settings::{load_settings_checked, Settings};
 use crate::tunnel_recovery::{
-    ensure_runtime_start_intent, reconnect_delay_secs, set_recovery_status,
-    update_runtime_snapshot,
+    ensure_runtime_start_intent, reconnect_delay_secs, restore_desired_connection_intent,
+    set_recovery_status, update_runtime_snapshot,
 };
 use crate::tunnel_status::runtime_status;
 use serde_json::{json, Value};
@@ -118,27 +118,74 @@ pub(super) fn start_runtime_connection(
     }
     Ok(())
 }
-pub(super) fn restore_connection_intent_if_active(
+pub(super) fn restore_persisted_connection_state(
     app: &tauri::AppHandle,
     state: &AppState,
 ) {
-    let mut settings = load_settings(app);
-    if settings.tunnel_id.trim().is_empty() {
-        return;
-    }
+    let settings = match load_settings_checked(app) {
+        Ok(settings) => settings,
+        Err(error) => {
+            let fallback = Settings::default();
+            restore_desired_connection_intent(state, &fallback);
+            set_recovery_status(state, "stopped", 0, error.clone());
+            push_log(
+                state,
+                format!(
+                    "读取持久设置失败，按停止连接意图处理并清理残留 runtime：{error}"
+                ),
+            );
+            let Ok(paths) = runtime_paths(app) else {
+                return;
+            };
+            let mut observation = runtime_status(app, &paths);
+            if observation.runtime_alive || observation.active {
+                if let Err(stop_error) = stop_runtime(app, None) {
+                    push_log(
+                        state,
+                        format!(
+                            "设置不可用且清理残留 Tunnel runtime 失败：{stop_error}"
+                        ),
+                    );
+                } else {
+                    observation = runtime_status(app, &paths);
+                }
+            }
+            update_runtime_snapshot(
+                state,
+                &observation,
+                false,
+                &fallback,
+            );
+            return;
+        }
+    };
+
+    restore_desired_connection_intent(state, &settings);
     let Ok(paths) = runtime_paths(app) else {
         return;
     };
-    let observation = runtime_status(app, &paths);
+    let mut observation = runtime_status(app, &paths);
 
-    if observation.active && !settings.connection_intent {
-        settings.connection_intent = true;
-        let _ = save_settings(app, &settings);
+    if !settings.connection_intent
+        && (observation.runtime_alive || observation.active)
+    {
+        push_log(
+            state,
+            "检测到未提交或残留的 Tunnel runtime；持久连接意图为停止，正在清理 runtime",
+        );
+        match stop_runtime(app, None) {
+            Ok(_) => {
+                observation = runtime_status(app, &paths);
+            }
+            Err(error) => {
+                push_log(
+                    state,
+                    format!("清理残留 Tunnel runtime 失败，连接意图仍保持停止：{error}"),
+                );
+            }
+        }
     }
 
-    state
-        .desired_connected
-        .store(settings.connection_intent, Ordering::SeqCst);
     update_runtime_snapshot(
         state,
         &observation,
@@ -146,6 +193,16 @@ pub(super) fn restore_connection_intent_if_active(
         &settings,
     );
     if !settings.connection_intent {
+        return;
+    }
+    if settings.tunnel_id.trim().is_empty() {
+        state.desired_connected.store(false, Ordering::SeqCst);
+        set_recovery_status(
+            state,
+            "failed",
+            0,
+            "持久连接意图存在，但 Tunnel ID 为空。",
+        );
         return;
     }
     if runtime_key_saved(app) {
@@ -235,6 +292,14 @@ pub(super) fn start_reconnect_monitor(app: tauri::AppHandle) {
                 desired_connected,
                 &settings,
             );
+            if !desired_connected {
+                inactive_checks = 0;
+                next_reconnect_at = None;
+                set_recovery_status(state.inner(), "stopped", 0, "");
+                state.reconnecting.store(false, Ordering::SeqCst);
+                state.reconnect_attempt.store(0, Ordering::SeqCst);
+                continue;
+            }
             if observation.active {
                 if state.reconnecting.swap(false, Ordering::SeqCst) {
                     push_log(&state, "Secure MCP Tunnel 已恢复连接");
@@ -243,14 +308,6 @@ pub(super) fn start_reconnect_monitor(app: tauri::AppHandle) {
                 state.reconnect_attempt.store(0, Ordering::SeqCst);
                 inactive_checks = 0;
                 next_reconnect_at = None;
-                continue;
-            }
-            if !desired_connected {
-                inactive_checks = 0;
-                next_reconnect_at = None;
-                set_recovery_status(state.inner(), "stopped", 0, "");
-                state.reconnecting.store(false, Ordering::SeqCst);
-                state.reconnect_attempt.store(0, Ordering::SeqCst);
                 continue;
             }
             if !settings.auto_reconnect {

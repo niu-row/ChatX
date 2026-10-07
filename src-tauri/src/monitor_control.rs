@@ -231,7 +231,7 @@ pub(super) fn handle(
     device_id: &str,
     request: EncryptedControlPayload,
 ) -> Result<EncryptedControlPayload, String> {
-    if !monitor_manager::has_monitor_device(app, state, device_id) {
+    if !monitor_manager::has_monitor_device(app, state, device_id)? {
         return Err("Monitor 设备已被撤销。".into());
     }
     validate_request(&request)?;

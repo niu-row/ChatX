@@ -14,10 +14,17 @@ let status = { runtimeState: 'stopped', runtimeActive: false, keyStorage: 'sessi
 let connectionError = '启动 Tunnel 失败：authentication failed';
 let attempts = 0;
 let lastConnection;
+let deferStatus = false;
+const statusRequests = [];
 const context = vm.createContext({
   document: { getElementById: element, querySelectorAll: () => [], activeElement: null },
   window: { __TAURI__: { core: { invoke: async (command, args) => {
-    if (command === 'get_status') return status;
+    if (command === 'get_status') {
+      if (deferStatus) {
+        return new Promise((resolve) => statusRequests.push(resolve));
+      }
+      return status;
+    }
     if (command === 'connect_tunnel') {
       attempts++;
       lastConnection = args;
@@ -29,6 +36,13 @@ const context = vm.createContext({
   } } } },
   setInterval() {},
 });
+vm.runInContext(fs.readFileSync('desktop/api.js', 'utf8'), context);
+vm.runInContext(fs.readFileSync('desktop/state.js', 'utf8'), context);
+vm.runInContext(fs.readFileSync('desktop/pages/calls.js', 'utf8'), context);
+vm.runInContext(fs.readFileSync('desktop/pages/network.js', 'utf8'), context);
+vm.runInContext(fs.readFileSync('desktop/pages/permissions.js', 'utf8'), context);
+vm.runInContext(fs.readFileSync('desktop/pages/power.js', 'utf8'), context);
+vm.runInContext(fs.readFileSync('desktop/pages/monitor.js', 'utf8'), context);
 vm.runInContext(fs.readFileSync('desktop/app.js', 'utf8'), context);
 await vm.runInContext('refresh()', context);
 element('tunnelId').value = 'tunnel_test';
@@ -133,3 +147,29 @@ assert.equal(element('tunnelFact').textContent, 'Backoff');
 assert.match(element('reconnectStatus').textContent, /等待自动重连/);
 assert.match(element('heroCopy').textContent, /temporary control-plane failure/);
 console.log('connection UI checks passed: suspect/down and reconnect backoff are distinct');
+
+deferStatus = true;
+const staleRefresh = vm.runInContext('refresh()', context);
+const newestRefresh = vm.runInContext('refresh()', context);
+statusRequests[1]({
+  runtimeState: 'ready',
+  runtimeActive: true,
+  runtimeHealth: 'healthy',
+  keyStorage: 'session only',
+  logs: [],
+});
+await newestRefresh;
+statusRequests[0]({
+  runtimeState: 'stopped',
+  runtimeActive: false,
+  runtimeHealth: 'down',
+  keyStorage: 'session only',
+  logs: [],
+});
+await staleRefresh;
+assert.equal(
+  element('sidebarStatus').textContent,
+  '已连接 ChatGPT',
+  'A stale status response must not overwrite a newer refresh',
+);
+console.log('connection UI checks passed: stale polling responses are ignored');

@@ -45,6 +45,8 @@ let networkInfo = {
 let savedPayload;
 let testedPayload;
 let registrationCalls = 0;
+let deferNetworkRefresh = false;
+const networkRefreshRequests = [];
 const context = vm.createContext({
   document: {
     getElementById: element,
@@ -57,7 +59,14 @@ const context = vm.createContext({
     confirm: () => true,
     __TAURI__: { core: { invoke: async (command, args) => {
       if (command === 'get_status') return status;
-      if (command === 'get_network_settings') return networkInfo;
+      if (command === 'get_network_settings') {
+        if (deferNetworkRefresh) {
+          return new Promise((resolve) => {
+            networkRefreshRequests.push(resolve);
+          });
+        }
+        return networkInfo;
+      }
       if (command === 'get_power_settings') {
         return { supported: true, clamshellAwake: false, managedByChatX: false };
       }
@@ -121,6 +130,13 @@ const context = vm.createContext({
   setInterval() {},
 });
 
+vm.runInContext(fs.readFileSync('desktop/api.js', 'utf8'), context);
+vm.runInContext(fs.readFileSync('desktop/state.js', 'utf8'), context);
+vm.runInContext(fs.readFileSync('desktop/pages/calls.js', 'utf8'), context);
+vm.runInContext(fs.readFileSync('desktop/pages/network.js', 'utf8'), context);
+vm.runInContext(fs.readFileSync('desktop/pages/permissions.js', 'utf8'), context);
+vm.runInContext(fs.readFileSync('desktop/pages/power.js', 'utf8'), context);
+vm.runInContext(fs.readFileSync('desktop/pages/monitor.js', 'utf8'), context);
 vm.runInContext(fs.readFileSync('desktop/app.js', 'utf8'), context);
 await vm.runInContext('refreshNetworkSettings()', context);
 assert.equal(element('proxyMode').value, 'direct');
@@ -132,7 +148,7 @@ element('proxyMode').value = 'manual';
 element('proxyUrl').value = 'http://127.0.0.1:7890';
 element('relayEnabled').checked = true;
 element('relayBaseUrl').value = 'https://relay.example.com';
-vm.runInContext('networkDirty = true', context);
+vm.runInContext('networkPage.markDirty()', context);
 
 await vm.runInContext('saveRelaySettings()', context);
 assert.equal(savedPayload.proxy.mode, 'manual');
@@ -157,4 +173,33 @@ assert.match(element('networkTestResult').textContent, /Tunnel OK/);
 
 await vm.runInContext('testRelaySettings()', context);
 assert.match(element('relayTestResult').textContent, /Relay OK/);
-console.log('network UI checks passed: proxy, relay registration and WSS settings');
+
+deferNetworkRefresh = true;
+const testedRefresh = vm.runInContext('testNetworkSettings()', context);
+for (let i = 0; i < 5 && networkRefreshRequests.length < 1; i += 1) {
+  await Promise.resolve();
+}
+assert.equal(networkRefreshRequests.length, 1);
+
+const newestRefresh = vm.runInContext('refreshNetworkSettings()', context);
+for (let i = 0; i < 5 && networkRefreshRequests.length < 2; i += 1) {
+  await Promise.resolve();
+}
+assert.equal(networkRefreshRequests.length, 2);
+
+const newestNetwork = structuredClone(networkInfo);
+newestNetwork.tunnel.controlPlaneState = 'healthy';
+newestNetwork.tunnel.controlPlaneReason = 'newest';
+networkRefreshRequests[1](newestNetwork);
+await newestRefresh;
+
+const staleNetwork = structuredClone(networkInfo);
+staleNetwork.tunnel.controlPlaneState = 'down';
+staleNetwork.tunnel.controlPlaneReason = 'stale';
+networkRefreshRequests[0](staleNetwork);
+await testedRefresh;
+
+assert.match(element('networkStatus').textContent, /HEALTHY/);
+assert.equal(element('controlPlaneReason').textContent, 'newest');
+
+console.log('network UI checks passed: proxy, relay registration, WSS settings and stale refresh protection');

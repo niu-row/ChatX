@@ -101,6 +101,13 @@ const context = vm.createContext({
   setInterval() {},
 });
 
+vm.runInContext(fs.readFileSync('desktop/api.js', 'utf8'), context);
+vm.runInContext(fs.readFileSync('desktop/state.js', 'utf8'), context);
+vm.runInContext(fs.readFileSync('desktop/pages/calls.js', 'utf8'), context);
+vm.runInContext(fs.readFileSync('desktop/pages/network.js', 'utf8'), context);
+vm.runInContext(fs.readFileSync('desktop/pages/permissions.js', 'utf8'), context);
+vm.runInContext(fs.readFileSync('desktop/pages/power.js', 'utf8'), context);
+vm.runInContext(fs.readFileSync('desktop/pages/monitor.js', 'utf8'), context);
 vm.runInContext(fs.readFileSync('desktop/app.js', 'utf8'), context);
 await vm.runInContext('refresh()', context);
 await vm.runInContext('refreshMonitorPage()', context);

@@ -5,6 +5,9 @@ const read = (path) => fs.readFileSync(path, 'utf8');
 const json = (path) => JSON.parse(read(path));
 
 const main = read('src-tauri/src/main.rs');
+const connectionCommands = read('src-tauri/src/connection_commands.rs');
+const networkCommands = read('src-tauri/src/network_commands.rs');
+const settingsSource = read('src-tauri/src/settings.rs');
 const tunnelRuntime = read('src-tauri/src/tunnel_runtime.rs');
 const launcher = read('scripts/desktop-commander-launcher.mjs');
 const installer = read('scripts/build-installer.mjs');
@@ -59,12 +62,20 @@ assert.doesNotMatch(tunnelRuntime, /--runtime-api-key\s+\{?runtime/i);
 assert.match(launcher, /delete process\.env\.CHATX_TUNNEL_RUNTIME_KEY/);
 assert.match(launcher, /DESKTOP_COMMANDER_DISABLE_TELEMETRY/);
 
-const getStatusStart = main.indexOf('fn get_status');
-const getStatusEnd = main.indexOf('fn get_network_settings');
-assert.ok(getStatusStart >= 0 && getStatusEnd > getStatusStart);
-const getStatus = main.slice(getStatusStart, getStatusEnd);
+const getStatus = connectionCommands.match(/fn get_status\b[\s\S]*?\n}/)?.[0] ?? '';
+assert.ok(getStatus, 'get_status must remain defined');
 assert.match(getStatus, /runtime_snapshot\.lock\(\)/);
 assert.doesNotMatch(getStatus, /runtime_status\(&paths\)/);
+
+assert.match(settingsSource, /fn load_settings_checked/);
+assert.match(tunnelRuntime, /load_settings_checked\(app\)/);
+assert.match(tunnelRuntime, /observation\.runtime_alive/);
+assert.match(networkCommands, /fn rollback_network_settings/);
+assert.match(
+  networkCommands,
+  /proxy_changed && wants_connection,[\s\S]*?true,[\s\S]*?rollback_suffix/,
+);
+assert.doesNotMatch(connectionCommands, /let _ = stop_runtime/);
 
 assert.match(installer, /Publishing a ChatX release requires CHATX_WINDOWS_CERT_THUMBPRINT/);
 assert.doesNotMatch(installer, /published unsigned installer/);

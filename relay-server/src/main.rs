@@ -54,6 +54,7 @@ const REVOKE_TIMEOUT: Duration = Duration::from_secs(8);
 const MAX_DESKTOP_WS: usize = 64;
 const MAX_DEVICE_WS: usize = 512;
 const MAX_PAIRING_WS: usize = 64;
+const MAX_PAIRING_ROUTES: usize = 256;
 const MAX_PENDING_CONTROLS: usize = 128;
 const MAX_PENDING_REVOKES: usize = 128;
 const CONTROL_MIN_INTERVAL_MS: u64 = 500;

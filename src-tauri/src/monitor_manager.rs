@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::{
     fs,
-    path::PathBuf,
+    path::{Path, PathBuf},
     sync::{Arc, Mutex},
 };
 use tauri::Manager;
@@ -40,10 +40,79 @@ pub(super) struct State {
     devices: Mutex<Option<Vec<MonitorDeviceRecord>>>,
 }
 
-fn load_monitor_devices_from_disk(app: &tauri::AppHandle) -> Vec<MonitorDeviceRecord> {
-    let Ok(path) = monitor_devices_path(app) else { return Vec::new(); };
-    let Ok(text) = fs::read_to_string(path) else { return Vec::new(); };
-    serde_json::from_str::<Vec<MonitorDeviceRecord>>(&text).unwrap_or_default()
+fn claim_pairing_grant(
+    pairing: &Mutex<Option<MonitorPairingGrant>>,
+    code: &str,
+    now: u64,
+) -> Result<MonitorPairingGrant, String> {
+    let mut slot = pairing
+        .lock()
+        .map_err(|_| "Monitor 配对状态锁已损坏。".to_string())?;
+    let Some(grant) = slot.as_ref() else {
+        return Err("当前没有有效的配对请求。".into());
+    };
+    if now > grant.expires_at {
+        *slot = None;
+        return Err("配对二维码已过期，请在 ChatX 中重新生成。".into());
+    }
+    if !monitor_server::verify_token_hash_hex(code, &grant.code_hash) {
+        return Err("配对码无效。".into());
+    }
+    slot.take()
+        .ok_or_else(|| "当前没有有效的配对请求。".to_string())
+}
+
+fn restore_pairing_grant(
+    pairing: &Mutex<Option<MonitorPairingGrant>>,
+    grant: MonitorPairingGrant,
+    now: u64,
+) {
+    if now > grant.expires_at {
+        return;
+    }
+    if let Ok(mut slot) = pairing.lock() {
+        if slot.is_none() {
+            *slot = Some(grant);
+        }
+    }
+}
+
+fn load_monitor_devices_from_path(path: &Path) -> Result<Vec<MonitorDeviceRecord>, String> {
+    let text = match fs::read_to_string(path) {
+        Ok(text) => text,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(Vec::new());
+        }
+        Err(error) => {
+            return Err(format!(
+                "读取 Monitor 设备注册表失败（{}）：{error}",
+                path.display()
+            ));
+        }
+    };
+    serde_json::from_str::<Vec<MonitorDeviceRecord>>(&text).map_err(|error| {
+        format!(
+            "Monitor 设备注册表已损坏（{}）：{error}",
+            path.display()
+        )
+    })
+}
+
+fn load_monitor_devices_from_disk(
+    app: &tauri::AppHandle,
+) -> Result<Vec<MonitorDeviceRecord>, String> {
+    let path = monitor_devices_path(app)?;
+    load_monitor_devices_from_path(&path)
+}
+
+fn ensure_monitor_devices_loaded(
+    app: &tauri::AppHandle,
+    registry: &mut Option<Vec<MonitorDeviceRecord>>,
+) -> Result<(), String> {
+    if registry.is_none() {
+        *registry = Some(load_monitor_devices_from_disk(app)?);
+    }
+    Ok(())
 }
 
 fn save_monitor_devices(
@@ -66,32 +135,31 @@ fn save_monitor_devices(
 fn monitor_devices_snapshot(
     app: &tauri::AppHandle,
     state: &AppState,
-) -> Vec<MonitorDeviceRecord> {
-    let Ok(mut registry) = state.monitor.devices.lock() else { return Vec::new(); };
-    if registry.is_none() {
-        *registry = Some(load_monitor_devices_from_disk(app));
-    }
-    registry.as_ref().cloned().unwrap_or_default()
+) -> Result<Vec<MonitorDeviceRecord>, String> {
+    let mut registry = state.monitor.devices.lock()
+        .map_err(|_| "Monitor 设备状态锁已损坏。".to_string())?;
+    ensure_monitor_devices_loaded(app, &mut registry)?;
+    Ok(registry.as_ref().cloned().unwrap_or_default())
 }
 
 pub(super) fn monitor_device_ids(
     app: &tauri::AppHandle,
     state: &AppState,
-) -> Vec<String> {
-    monitor_devices_snapshot(app, state)
+) -> Result<Vec<String>, String> {
+    Ok(monitor_devices_snapshot(app, state)?
         .into_iter()
         .map(|device| device.id)
-        .collect()
+        .collect())
 }
 
 pub(super) fn has_monitor_device(
     app: &tauri::AppHandle,
     state: &AppState,
     device_id: &str,
-) -> bool {
-    monitor_devices_snapshot(app, state)
+) -> Result<bool, String> {
+    Ok(monitor_devices_snapshot(app, state)?
         .iter()
-        .any(|device| device.id == device_id)
+        .any(|device| device.id == device_id))
 }
 
 pub(super) fn revoke_monitor_device_local(
@@ -101,9 +169,7 @@ pub(super) fn revoke_monitor_device_local(
 ) -> Result<bool, String> {
     let mut registry = state.monitor.devices.lock()
         .map_err(|_| "Monitor 设备状态锁已损坏。".to_string())?;
-    if registry.is_none() {
-        *registry = Some(load_monitor_devices_from_disk(app));
-    }
+    ensure_monitor_devices_loaded(app, &mut registry)?;
     let devices = registry.as_mut()
         .ok_or_else(|| "Monitor 设备状态不可用。".to_string())?;
     let previous = devices.clone();
@@ -179,8 +245,8 @@ fn monitor_device_token_authorized(
     token: &str,
 ) -> bool {
     let Ok(mut registry) = state.monitor.devices.lock() else { return false; };
-    if registry.is_none() {
-        *registry = Some(load_monitor_devices_from_disk(app));
+    if ensure_monitor_devices_loaded(app, &mut registry).is_err() {
+        return false;
     }
     let Some(devices) = registry.as_mut() else { return false; };
     let now = timestamp_ms();
@@ -203,6 +269,98 @@ fn monitor_device_token_authorized(
     true
 }
 
+fn complete_claimed_monitor_pairing(
+    app: &tauri::AppHandle,
+    state: &AppState,
+    pairing_id: &str,
+    name: &str,
+) -> Result<Value, String> {
+    let mut registry = state.monitor.devices.lock()
+        .map_err(|_| "Monitor 设备状态锁已损坏。".to_string())?;
+    ensure_monitor_devices_loaded(app, &mut registry)?;
+    let devices = registry.as_mut()
+        .ok_or_else(|| "Monitor 设备状态不可用。".to_string())?;
+    if devices.len() >= 32 {
+        return Err("已配对设备数量已达到上限 32。".into());
+    }
+
+    let master_key = ensure_monitor_master_key(app)?;
+    let random_id = monitor_server::generate_monitor_token()?;
+    let device_id = format!("dev_{}", &random_id[..24]);
+    let direct_token = monitor_crypto::derive_direct_token(&master_key, &device_id)?;
+    let relay_token = monitor_crypto::derive_relay_token(&master_key, &device_id)?;
+    let device_key = monitor_crypto::device_key_b64(&master_key, &device_id)?;
+    let token_hash = monitor_server::token_hash_hex(&direct_token);
+    let settings = load_settings(app);
+    let relay_credentials = if settings.relay.enabled {
+        relay_credentials_for_settings(app, &settings)
+    } else {
+        None
+    };
+    let relay_enrollment =
+        if let Some(credentials) = relay_credentials.as_ref() {
+            relay::authorize_device(
+                &settings.relay,
+                credentials,
+                &device_id,
+                &relay_token,
+            )?;
+            Some(json!({
+                "baseUrl": settings.relay.base_url,
+                "desktopId": credentials.desktop_id,
+                "deviceToken": relay_token
+            }))
+        } else {
+            None
+        };
+
+    let now = timestamp_ms();
+    let previous = devices.clone();
+    devices.push(MonitorDeviceRecord {
+        id: device_id.clone(),
+        name: name.to_string(),
+        token_hash,
+        created_at: now,
+        last_seen_at: Some(now),
+    });
+    if let Err(error) = save_monitor_devices(app, devices) {
+        let relay_rollback = relay_credentials
+            .as_ref()
+            .map(|credentials| {
+                relay::revoke_device(
+                    &settings.relay,
+                    credentials,
+                    &device_id,
+                )
+            })
+            .transpose();
+        *devices = previous;
+        return match relay_rollback {
+            Ok(_) => Err(error),
+            Err(rollback_error) => Err(format!(
+                "{error}；同时回滚 Relay 设备授权失败：{rollback_error}"
+            )),
+        };
+    }
+
+    if let Some(credentials) = relay_credentials.as_ref() {
+        let _ = relay::delete_pairing_route(
+            &settings.relay,
+            credentials,
+            pairing_id,
+        );
+    }
+    push_log(state, format!("手机 Monitor 已配对设备：{name} ({device_id})"));
+    Ok(json!({
+        "schemaVersion": 3,
+        "deviceId": device_id,
+        "deviceName": name,
+        "directToken": direct_token,
+        "deviceKey": device_key,
+        "relay": relay_enrollment
+    }))
+}
+
 fn complete_monitor_pairing(
     app: &tauri::AppHandle,
     state: &AppState,
@@ -220,91 +378,25 @@ fn complete_monitor_pairing(
         .unwrap_or("Android Device");
     let name = raw_name.chars().take(80).collect::<String>();
 
-    let mut pairing = state.monitor.pairing.lock()
-        .map_err(|_| "Monitor 配对状态锁已损坏。".to_string())?;
-    let Some(grant) = pairing.as_ref() else {
-        return Err("当前没有有效的配对请求。".into());
-    };
-    if timestamp_ms() > grant.expires_at {
-        *pairing = None;
-        return Err("配对二维码已过期，请在 ChatX 中重新生成。".into());
+    let grant = claim_pairing_grant(
+        &state.monitor.pairing,
+        code,
+        timestamp_ms(),
+    )?;
+    let result = complete_claimed_monitor_pairing(
+        app,
+        state,
+        &grant.pairing_id,
+        &name,
+    );
+    if result.is_err() {
+        restore_pairing_grant(
+            &state.monitor.pairing,
+            grant,
+            timestamp_ms(),
+        );
     }
-    if !monitor_server::verify_token_hash_hex(code, &grant.code_hash) {
-        return Err("配对码无效。".into());
-    }
-    let pairing_id = grant.pairing_id.clone();
-    *pairing = None;
-    drop(pairing);
-
-    let mut registry = state.monitor.devices.lock()
-        .map_err(|_| "Monitor 设备状态锁已损坏。".to_string())?;
-    if registry.is_none() {
-        *registry = Some(load_monitor_devices_from_disk(app));
-    }
-    let devices = registry.as_mut()
-        .ok_or_else(|| "Monitor 设备状态不可用。".to_string())?;
-    if devices.len() >= 32 {
-        return Err("已配对设备数量已达到上限 32。".into());
-    }
-    let master_key = ensure_monitor_master_key(app)?;
-    let random_id = monitor_server::generate_monitor_token()?;
-    let device_id = format!("dev_{}", &random_id[..24]);
-    let direct_token = monitor_crypto::derive_direct_token(&master_key, &device_id)?;
-    let relay_token = monitor_crypto::derive_relay_token(&master_key, &device_id)?;
-    let device_key = monitor_crypto::device_key_b64(&master_key, &device_id)?;
-    let token_hash = monitor_server::token_hash_hex(&direct_token);
-    let settings = load_settings(app);
-    let relay_enrollment = if settings.relay.enabled {
-        if let Some(credentials) = relay_credentials_for_settings(app, &settings) {
-            relay::authorize_device(&settings.relay, &credentials, &device_id, &relay_token)?;
-            Some(json!({
-                "baseUrl": settings.relay.base_url,
-                "desktopId": credentials.desktop_id,
-                "deviceToken": relay_token
-            }))
-        } else {
-            None
-        }
-    } else {
-        None
-    };
-
-    let now = timestamp_ms();
-    let previous = devices.clone();
-    devices.push(MonitorDeviceRecord {
-        id: device_id.clone(),
-        name: name.clone(),
-        token_hash,
-        created_at: now,
-        last_seen_at: Some(now),
-    });
-    if let Err(error) = save_monitor_devices(app, devices) {
-        if settings.relay.enabled {
-            if let Ok(credentials) = read_relay_credentials(app) {
-                let _ = relay::revoke_device(&settings.relay, &credentials, &device_id);
-            }
-        }
-        *devices = previous;
-        return Err(error);
-    }
-    if settings.relay.enabled {
-        if let Ok(credentials) = read_relay_credentials(app) {
-            let _ = relay::delete_pairing_route(
-                &settings.relay,
-                &credentials,
-                &pairing_id,
-            );
-        }
-    }
-    push_log(state, format!("手机 Monitor 已配对设备：{name} ({device_id})"));
-    Ok(json!({
-        "schemaVersion": 3,
-        "deviceId": device_id,
-        "deviceName": name,
-        "directToken": direct_token,
-        "deviceKey": device_key,
-        "relay": relay_enrollment
-    }))
+    result
 }
 
 pub(super) fn handle_encrypted_monitor_pairing(
@@ -353,7 +445,10 @@ fn monitor_tls_dir(app: &tauri::AppHandle) -> Result<PathBuf, String> {
     Ok(state_dir(app)?.join("monitor-tls"))
 }
 
-pub(super) fn monitor_info_payload(app: &tauri::AppHandle, state: &AppState) -> Value {
+pub(super) fn monitor_info_payload(
+    app: &tauri::AppHandle,
+    state: &AppState,
+) -> Result<Value, String> {
     let settings = load_settings(app);
     let servers = state.monitor.servers.lock().ok();
     let running = servers.as_ref().is_some_and(|servers| !servers.is_empty());
@@ -384,13 +479,13 @@ pub(super) fn monitor_info_payload(app: &tauri::AppHandle, state: &AppState) -> 
     } else {
         Vec::new()
     };
-    let devices = monitor_devices_snapshot(app, state).into_iter().map(|device| json!({
+    let devices = monitor_devices_snapshot(app, state)?.into_iter().map(|device| json!({
         "id": device.id,
         "name": device.name,
         "createdAt": device.created_at,
         "lastSeenAt": device.last_seen_at
     })).collect::<Vec<_>>();
-    json!({
+    Ok(json!({
         "enabled": settings.monitor_enabled,
         "port": settings.monitor_port,
         "running": running,
@@ -402,7 +497,7 @@ pub(super) fn monitor_info_payload(app: &tauri::AppHandle, state: &AppState) -> 
         "fingerprintSha256": fingerprint,
         "devices": devices,
         "endpoints": endpoints
-    })
+    }))
 }
 
 pub(super) fn start_monitor_service(app: &tauri::AppHandle, state: &AppState) -> Result<(), String> {
@@ -413,6 +508,7 @@ pub(super) fn start_monitor_service(app: &tauri::AppHandle, state: &AppState) ->
     if settings.monitor_port < 1024 {
         return Err("Monitor 端口必须为 1024-65535。".into());
     }
+    let _ = monitor_devices_snapshot(app, state)?;
     let mut slot = state.monitor.servers.lock()
         .map_err(|_| "Monitor Server 状态锁已损坏。".to_string())?;
     if !slot.is_empty() {
@@ -470,7 +566,7 @@ pub(super) fn start_monitor_service(app: &tauri::AppHandle, state: &AppState) ->
     let snapshot_provider: monitor_server::SnapshotProvider = Arc::new(
         move |device_id, session_id, sequence| {
             let state = app_for_snapshot.state::<AppState>();
-            if !has_monitor_device(&app_for_snapshot, state.inner(), device_id) {
+            if !has_monitor_device(&app_for_snapshot, state.inner(), device_id)? {
                 return Err("Monitor 设备已被撤销。".into());
             }
             let plaintext = serde_json::to_vec(&monitor_status::payload(
@@ -679,4 +775,108 @@ pub(super) fn stop_monitor_service(state: &AppState) -> Result<(), String> {
     drop(servers);
     push_log(state, "手机 Monitor Server 已停止");
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn temp_registry(name: &str) -> PathBuf {
+        std::env::temp_dir().join(format!(
+            "chatx-monitor-{name}-{}-{}.json",
+            std::process::id(),
+            timestamp_ms(),
+        ))
+    }
+
+    #[test]
+    fn missing_monitor_registry_is_an_empty_registry() {
+        let path = temp_registry("missing");
+        let _ = fs::remove_file(&path);
+        assert!(load_monitor_devices_from_path(&path).unwrap().is_empty());
+    }
+
+    #[test]
+    fn corrupt_monitor_registry_is_rejected_instead_of_reset() {
+        let path = temp_registry("corrupt");
+        fs::write(&path, "{ definitely-not-json").unwrap();
+        let result = load_monitor_devices_from_path(&path);
+        let _ = fs::remove_file(&path);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn valid_monitor_registry_is_loaded() {
+        let path = temp_registry("valid");
+        let devices = vec![MonitorDeviceRecord {
+            id: "dev_test".into(),
+            name: "Test Phone".into(),
+            token_hash: "ab".repeat(32),
+            created_at: 1,
+            last_seen_at: Some(2),
+        }];
+        fs::write(&path, serde_json::to_string(&devices).unwrap()).unwrap();
+        let loaded = load_monitor_devices_from_path(&path).unwrap();
+        let _ = fs::remove_file(&path);
+        assert_eq!(loaded.len(), 1);
+        assert_eq!(loaded[0].id, "dev_test");
+    }
+
+    fn pairing_grant(id: &str, code: &str, expires_at: u64) -> MonitorPairingGrant {
+        MonitorPairingGrant {
+            pairing_id: id.into(),
+            pairing_code: code.into(),
+            code_hash: monitor_server::token_hash_hex(code),
+            expires_at,
+        }
+    }
+
+    #[test]
+    fn pairing_claim_is_single_consumer_and_invalid_code_does_not_consume() {
+        let slot = Mutex::new(Some(pairing_grant("p_one", "secret", 2_000)));
+
+        assert!(claim_pairing_grant(&slot, "wrong", 1_000).is_err());
+        assert!(slot.lock().unwrap().is_some());
+
+        let claimed = claim_pairing_grant(&slot, "secret", 1_000).unwrap();
+        assert_eq!(claimed.pairing_id, "p_one");
+        assert!(slot.lock().unwrap().is_none());
+        assert!(claim_pairing_grant(&slot, "secret", 1_000).is_err());
+    }
+
+    #[test]
+    fn failed_pairing_can_restore_unexpired_grant_without_overwriting_newer_one() {
+        let slot = Mutex::new(None);
+        restore_pairing_grant(
+            &slot,
+            pairing_grant("p_old", "old", 2_000),
+            1_000,
+        );
+        assert_eq!(
+            slot.lock().unwrap().as_ref().unwrap().pairing_id,
+            "p_old"
+        );
+
+        *slot.lock().unwrap() = Some(pairing_grant("p_new", "new", 3_000));
+        restore_pairing_grant(
+            &slot,
+            pairing_grant("p_old", "old", 2_000),
+            1_000,
+        );
+        assert_eq!(
+            slot.lock().unwrap().as_ref().unwrap().pairing_id,
+            "p_new"
+        );
+    }
+
+    #[test]
+    fn expired_pairing_grant_is_not_restored() {
+        let slot = Mutex::new(None);
+        restore_pairing_grant(
+            &slot,
+            pairing_grant("p_expired", "expired", 999),
+            1_000,
+        );
+        assert!(slot.lock().unwrap().is_none());
+    }
 }
