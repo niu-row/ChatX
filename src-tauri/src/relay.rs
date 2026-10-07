@@ -33,7 +33,15 @@ const CLIENT_HEARTBEAT_INTERVAL: Duration = Duration::from_secs(5);
 const CLIENT_IDLE_TIMEOUT: Duration = Duration::from_secs(12);
 const RECOVERY_PROBE_INTERVAL: Duration = Duration::from_secs(2);
 const RECOVERY_PROBE_TIMEOUT: Duration = Duration::from_secs(3);
+const RELAY_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
+const STOP_POLL_INTERVAL: Duration = Duration::from_millis(50);
 const RECONNECT_DELAYS: [u64; 5] = [1, 2, 5, 10, 30];
+
+async fn wait_for_stop(stop: Arc<AtomicBool>) {
+    while !stop.load(Ordering::SeqCst) {
+        tokio::time::sleep(STOP_POLL_INTERVAL).await;
+    }
+}
 
 fn now_ms() -> u64 {
     SystemTime::now()
@@ -464,25 +472,29 @@ async fn wait_for_network_recovery(
         .build()
         .ok();
     let deadline = tokio::time::Instant::now() + delay;
+    let stop_signal = wait_for_stop(stop);
+    tokio::pin!(stop_signal);
     let mut saw_unreachable = false;
 
     loop {
-        if stop.load(Ordering::SeqCst) || tokio::time::Instant::now() >= deadline {
+        if tokio::time::Instant::now() >= deadline {
             return false;
         }
 
         if let (Some(client), Some(health_url)) = (&client, &health_url) {
             let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
             let probe_timeout = RECOVERY_PROBE_TIMEOUT.min(remaining);
-            let reachable = tokio::time::timeout(
-                probe_timeout,
-                client.get(health_url).send(),
-            )
-            .await
-            .ok()
-            .and_then(Result::ok)
-            .map(|response| response.status().is_success())
-            .unwrap_or(false);
+            let reachable = tokio::select! {
+                _ = &mut stop_signal => return false,
+                result = tokio::time::timeout(
+                    probe_timeout,
+                    client.get(health_url).send(),
+                ) => result
+                    .ok()
+                    .and_then(Result::ok)
+                    .map(|response| response.status().is_success())
+                    .unwrap_or(false),
+            };
             if reachable && saw_unreachable {
                 return true;
             }
@@ -498,7 +510,10 @@ async fn wait_for_network_recovery(
         } else {
             Duration::from_millis(200).min(remaining)
         };
-        tokio::time::sleep(sleep_for).await;
+        tokio::select! {
+            _ = &mut stop_signal => return false,
+            _ = tokio::time::sleep(sleep_for) => {}
+        }
     }
 }
 
@@ -611,9 +626,16 @@ async fn relay_session(
             .map_err(|_| "Relay Desktop Token 无效。".to_string())?,
     );
 
-    let (mut socket, _) = connect_async(request)
-        .await
-        .map_err(|error| format!("连接 Relay WSS 失败：{error}"))?;
+    let stop_signal = wait_for_stop(stop.clone());
+    tokio::pin!(stop_signal);
+    let (mut socket, _) = tokio::select! {
+        _ = &mut stop_signal => return Ok(()),
+        result = tokio::time::timeout(RELAY_CONNECT_TIMEOUT, connect_async(request)) => {
+            result
+                .map_err(|_| "连接 Relay WSS 超时。".to_string())?
+                .map_err(|error| format!("连接 Relay WSS 失败：{error}"))?
+        }
+    };
 
     let hello = DesktopWsMessage::Hello {
         protocol_version: PROTOCOL_VERSION,
@@ -632,11 +654,14 @@ async fn relay_session(
     let mut last_server_activity = tokio::time::Instant::now();
 
     loop {
-        if stop.load(Ordering::SeqCst) {
-            let _ = socket.close(None).await;
-            return Ok(());
-        }
         tokio::select! {
+            _ = &mut stop_signal => {
+                let _ = tokio::time::timeout(
+                    Duration::from_millis(200),
+                    socket.close(None),
+                ).await;
+                return Ok(());
+            }
             _ = heartbeat_tick.tick() => {
                 if last_server_activity.elapsed() > CLIENT_IDLE_TIMEOUT {
                     return Err("Relay WSS heartbeat timeout。".into());
@@ -835,5 +860,26 @@ mod tests {
     #[test]
     fn https_snapshot_session_uses_monitor_session_namespace() {
         assert!(snapshot_session_id().starts_with("s_"));
+    }
+
+    #[test]
+    fn stop_signal_wakes_without_waiting_for_heartbeat() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_time()
+            .build()
+            .unwrap();
+        runtime.block_on(async {
+            let stop = Arc::new(AtomicBool::new(false));
+            let trigger = stop.clone();
+            tokio::spawn(async move {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+                trigger.store(true, Ordering::SeqCst);
+            });
+            assert!(
+                tokio::time::timeout(Duration::from_secs(1), wait_for_stop(stop))
+                    .await
+                    .is_ok()
+            );
+        });
     }
 }

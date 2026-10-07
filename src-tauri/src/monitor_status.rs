@@ -1,9 +1,37 @@
-use super::*;
-use std::{
-    io::{Read, Seek, SeekFrom},
-    path::Path,
-    sync::TryLockError,
+use super::{
+    call_history_path, host_snapshot, load_settings, monitor, monitor_activity_path,
+    monitor_network, reconnect_capability, recovery_status, runtime_paths, runtime_status,
+    timestamp_ms, AppState, RuntimeObservation, Settings, APP_VERSION,
 };
+use serde_json::{json, Value};
+use std::{
+    fs,
+    io::{Read, Seek, SeekFrom},
+    path::{Path, PathBuf},
+    sync::{atomic::Ordering, Mutex, OnceLock, TryLockError},
+    time::{Duration, Instant, SystemTime},
+};
+
+const RECENT_HISTORY_LIMIT: usize = 20;
+const RECENT_HISTORY_TAIL_BYTES: u64 = 256 * 1024;
+const ENDPOINT_CACHE_TTL: Duration = Duration::from_secs(15);
+
+#[derive(Clone)]
+struct RecentHistoryCache {
+    path: PathBuf,
+    len: u64,
+    modified: Option<SystemTime>,
+    calls: Vec<Value>,
+}
+
+struct EndpointCache {
+    port: u16,
+    refreshed_at: Instant,
+    endpoints: Vec<monitor_network::MonitorEndpoint>,
+}
+
+static RECENT_HISTORY_CACHE: OnceLock<Mutex<Option<RecentHistoryCache>>> = OnceLock::new();
+static ENDPOINT_CACHE: OnceLock<Mutex<Option<EndpointCache>>> = OnceLock::new();
 
 pub(super) fn parse_recent_history(text: &str, limit: usize) -> Vec<Value> {
     text.lines()
@@ -58,8 +86,66 @@ pub(super) fn read_history_tail(path: &Path, max_bytes: u64) -> String {
     text
 }
 
-pub(super) fn recent_calls(
-    app: &tauri::AppHandle,
+fn recent_history_calls(app: &tauri::AppHandle) -> Vec<Value> {
+    let Ok(path) = call_history_path(app) else {
+        return Vec::new();
+    };
+    let Ok(metadata) = fs::metadata(&path) else {
+        if let Ok(mut cache) = RECENT_HISTORY_CACHE
+            .get_or_init(|| Mutex::new(None))
+            .lock()
+        {
+            *cache = None;
+        }
+        return Vec::new();
+    };
+    let len = metadata.len();
+    let modified = metadata.modified().ok();
+    let cache = RECENT_HISTORY_CACHE.get_or_init(|| Mutex::new(None));
+
+    if let Ok(cached) = cache.lock() {
+        if let Some(cached) = cached.as_ref() {
+            if cached.path == path && cached.len == len && cached.modified == modified {
+                return cached.calls.clone();
+            }
+        }
+    }
+
+    let tail = read_history_tail(&path, RECENT_HISTORY_TAIL_BYTES);
+    let calls = parse_recent_history(&tail, RECENT_HISTORY_LIMIT);
+    if let Ok(mut cached) = cache.lock() {
+        *cached = Some(RecentHistoryCache {
+            path,
+            len,
+            modified,
+            calls: calls.clone(),
+        });
+    }
+    calls
+}
+
+fn monitor_endpoints(port: u16) -> Vec<monitor_network::MonitorEndpoint> {
+    let cache = ENDPOINT_CACHE.get_or_init(|| Mutex::new(None));
+    if let Ok(cached) = cache.lock() {
+        if let Some(cached) = cached.as_ref() {
+            if cached.port == port && cached.refreshed_at.elapsed() < ENDPOINT_CACHE_TTL {
+                return cached.endpoints.clone();
+            }
+        }
+    }
+
+    let endpoints = monitor_network::discover_monitor_endpoints(port);
+    if let Ok(mut cached) = cache.lock() {
+        *cached = Some(EndpointCache {
+            port,
+            refreshed_at: Instant::now(),
+            endpoints: endpoints.clone(),
+        });
+    }
+    endpoints
+}
+
+pub(super) fn in_flight_calls(
     activity: Option<&monitor::ActivitySnapshot>,
     now_ms: u64,
 ) -> Vec<Value> {
@@ -93,11 +179,21 @@ pub(super) fn recent_calls(
             }
         }
     }
-    if calls.len() < LIMIT {
-        if let Ok(path) = call_history_path(app) {
-            let tail = read_history_tail(&path, 256 * 1024);
-            calls.extend(parse_recent_history(&tail, LIMIT - calls.len()));
-        }
+    calls
+}
+
+pub(super) fn recent_calls(
+    app: &tauri::AppHandle,
+    activity: Option<&monitor::ActivitySnapshot>,
+    now_ms: u64,
+) -> Vec<Value> {
+    let mut calls = in_flight_calls(activity, now_ms);
+    if calls.len() < RECENT_HISTORY_LIMIT {
+        calls.extend(
+            recent_history_calls(app)
+                .into_iter()
+                .take(RECENT_HISTORY_LIMIT - calls.len()),
+        );
     }
     calls
 }
@@ -132,8 +228,7 @@ fn payload_with_tunnel(
     let recovery = recovery_status(state);
     let (reconnect_available, reconnect_unavailable_reason) =
         reconnect_capability(app, state, &settings);
-    let endpoints =
-        monitor_network::discover_monitor_endpoints(settings.monitor_port);
+    let endpoints = monitor_endpoints(settings.monitor_port);
     json!({
         "schemaVersion": 1,
         "serverTime": now_ms,

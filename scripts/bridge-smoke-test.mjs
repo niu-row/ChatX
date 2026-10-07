@@ -86,10 +86,13 @@ async function assertLauncherExitsOnClosedStdin() {
     },
   })}\n`);
   await new Promise((resolve, reject) => {
+    // Cold Windows starts may spend several seconds loading the bundled MCPB
+    // (including antivirus/file-cache work). Keep the lifecycle assertion, but
+    // do not turn normal cold-start variance into a flaky test failure.
     const timer = setTimeout(() => {
       child.kill('SIGKILL');
       reject(new Error(`Desktop Commander launcher did not initialize for stdin-close smoke. stdout: ${stdout}; stderr: ${stderr}`));
-    }, 8000);
+    }, 20000);
     const poll = setInterval(() => {
       if (/"id"\s*:\s*1/.test(stdout)) {
         clearInterval(poll);

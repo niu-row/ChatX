@@ -13,6 +13,15 @@ Primary areas:
 - `android-monitor/`: Android monitor client.
 - `scripts/`: build, verification, Desktop Commander launcher and toolchain helpers.
 
+## No CI
+
+This repository intentionally does not use CI.
+
+- Do not add or restore GitHub Actions workflows, CI services, hosted build pipelines, or other automatic CI configuration.
+- Do not make push, pull request, tag, or release workflows run repository validation automatically.
+- Validation is local-only. Use the repository's existing local commands such as `npm run test:local-full` and `git diff --check`.
+- If a future task appears to require CI, keep the verification local unless the repository owner explicitly reverses this rule.
+
 ## Critical environment rule: inherited HOME may be fake
 
 When commands are executed through ChatX / bundled Desktop Commander, the process may inherit an isolated HOME:

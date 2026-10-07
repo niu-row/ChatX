@@ -1,10 +1,19 @@
-use super::*;
+use super::{
+    ensure_monitor_desktop_id, ensure_monitor_master_key, load_runtime_key, load_settings,
+    monitor_crypto, monitor_manager, monitor_status, push_log, runtime_paths, set_recovery_status,
+    start_runtime_connection, timestamp_ms, wait_for_runtime_recovery, AppState,
+};
 use chatx_relay_protocol::EncryptedControlPayload;
+use serde_json::{json, Value};
 use std::{
     collections::HashMap,
-    sync::atomic::{AtomicBool, AtomicU64, Ordering},
+    sync::{
+        atomic::{AtomicBool, AtomicU64, Ordering},
+        Mutex,
+    },
     thread,
 };
+use tauri::Manager;
 
 #[derive(Debug, Clone)]
 struct CacheEntry {

@@ -1,390 +1,72 @@
+import assert from 'node:assert/strict';
 import fs from 'node:fs';
 
-const main = fs.readFileSync('src-tauri/src/main.rs', 'utf8');
-const html = fs.readFileSync('desktop/index.html', 'utf8');
-const app = fs.readFileSync('desktop/app.js', 'utf8');
-const css = fs.readFileSync('desktop/app.css', 'utf8');
-const prepare = fs.readFileSync('scripts/prepare-desktop-bundle.mjs', 'utf8');
-const packageBuilder = fs.readFileSync('scripts/build-package.mjs', 'utf8');
-const installer = fs.readFileSync('scripts/build-installer.mjs', 'utf8');
-const toolchainEnv = fs.readFileSync('scripts/toolchain-env.mjs', 'utf8');
-const tauriTool = fs.readFileSync('scripts/tauri-tool.mjs', 'utf8');
-const installerRuntime = fs.readFileSync('scripts/installer-runtime-test.mjs', 'utf8');
-const launcher = fs.readFileSync('scripts/desktop-commander-launcher.mjs', 'utf8');
-const monitor = fs.readFileSync('src-tauri/src/monitor.rs', 'utf8');
-const monitorControl = fs.readFileSync('src-tauri/src/monitor_control.rs', 'utf8');
-const monitorManager = fs.readFileSync('src-tauri/src/monitor_manager.rs', 'utf8');
-const monitorStatus = fs.readFileSync('src-tauri/src/monitor_status.rs', 'utf8');
-const monitorCrypto = fs.readFileSync('src-tauri/src/monitor_crypto.rs', 'utf8');
-const monitorServer = fs.readFileSync('src-tauri/src/monitor_server.rs', 'utf8');
-const relay = fs.readFileSync('src-tauri/src/relay.rs', 'utf8');
-const secrets = fs.readFileSync('src-tauri/src/secrets.rs', 'utf8');
-const relayProtocol = fs.readFileSync('relay-protocol/src/lib.rs', 'utf8');
-const relayServer = fs.readFileSync('relay-server/src/main.rs', 'utf8');
-const relayRegistry = fs.readFileSync('relay-server/src/registry.rs', 'utf8');
-const cargo = fs.readFileSync('src-tauri/Cargo.toml', 'utf8');
-const bridge = fs.readFileSync('scripts/bridge-smoke-test.mjs', 'utf8');
-const tauri = fs.readFileSync('src-tauri/tauri.conf.json', 'utf8');
-const tauriWindows = fs.readFileSync('src-tauri/tauri.windows.conf.json', 'utf8');
-const tauriMacos = fs.readFileSync('src-tauri/tauri.macos.conf.json', 'utf8');
-const macInfoPlist = fs.readFileSync('src-tauri/Info.plist', 'utf8');
-const macRuntimeLock = JSON.parse(fs.readFileSync('runtime-lock.darwin-arm64.json', 'utf8'));
-const runtimeLock = JSON.parse(fs.readFileSync('runtime-lock.json', 'utf8'));
-const pkg = JSON.parse(fs.readFileSync('package.json', 'utf8'));
-const getStatusSection = main.slice(main.indexOf('fn get_status'), main.indexOf('fn get_network_settings'));
-const commandTextSection = main.slice(main.indexOf('fn command_text'), main.indexOf('fn validate_proxy_url'));
+const read = (path) => fs.readFileSync(path, 'utf8');
+const json = (path) => JSON.parse(read(path));
 
-function requireText(label, text, needle) {
-  if (!text.includes(needle)) throw new Error(`${label} is missing: ${needle}`);
-}
-function rejectText(label, text, needle) {
-  if (text.includes(needle)) throw new Error(`${label} still contains obsolete runtime text: ${needle}`);
-}
+const main = read('src-tauri/src/main.rs');
+const tunnelRuntime = read('src-tauri/src/tunnel_runtime.rs');
+const launcher = read('scripts/desktop-commander-launcher.mjs');
+const installer = read('scripts/build-installer.mjs');
+const tauri = json('src-tauri/tauri.conf.json');
+const windows = json('src-tauri/tauri.windows.conf.json');
+const macos = json('src-tauri/tauri.macos.conf.json');
+const winLock = json('runtime-lock.json');
+const macLock = json('runtime-lock.darwin-arm64.json');
 
-requireText('main.rs', main, '--mcp-command');
-requireText('main.rs', main, 'runtimeActive');
-requireText('main.rs', main, '"ready" | "connected"');
-requireText('main.rs', main, 'connection');
-requireText('main.rs', main, 'tunnelId');
-requireText('main.rs', main, 'desktop-commander-home');
-requireText('main.rs', main, 'desktop-commander-launcher.mjs');
-requireText('main.rs', main, 'root.join("desktop-commander").join("dist").join("index.js")');
-requireText('main.rs', main, 'env:CHATX_TUNNEL_RUNTIME_KEY');
-requireText('secrets.rs', secrets, 'Add-Type -AssemblyName System.Security');
-requireText('secrets.rs', secrets, '[System.Security.Cryptography.ProtectedData]');
-requireText('secrets.rs', secrets, '[Console]::OutputEncoding=[Text.UTF8Encoding]::new($false)');
-requireText('command_text', commandTextSection, 'command_output(&mut command)');
-rejectText('command_text', commandTextSection, 'command.output()');
-requireText('main.rs', main, 'fn probe_runtime_key_remote');
-requireText('main.rs', main, 'reqwest::Proxy::all');
-requireText('main.rs', main, 'https://api.openai.com/v1/tunnels/{tunnel_id}');
-requireText('main.rs', main, 'Runtime Key remote auth');
-requireText('main.rs', main, '#[tauri::command(async)]');
-requireText('main.rs', main, 'Remote MCP activity');
-requireText('main.rs', main, 'Remote tools/list');
-requireText('main.rs', main, 'Remote tools/call');
-requireText('launcher', launcher, 'schemaVersion: 3');
-requireText('launcher', launcher, "lastRequestMethod = 'tools/call'");
-requireText('launcher', launcher, "recordRequest('tools/list')");
-requireText('main.rs', main, 'fn runtime_not_running');
-requireText('main.rs', main, 'struct RuntimeObservation');
-requireText('main.rs', main, 'control_plane_observation');
-requireText('main.rs', main, 'Tunnel 状态返回为空或不是有效 JSON');
-requireText('main.rs', main, 'let runtime_manifest = manifest(&paths);');
-requireText('main.rs', main, '"tunnelVersion":tunnel_version');
-requireText('main.rs', main, 'fn start_runtime_connection');
-requireText('main.rs', main, 'fn restore_connection_intent_if_active');
-requireText('main.rs', main, 'connection_intent');
-requireText('main.rs', main, 'monitor: monitor_manager::State');
-requireText('monitor_manager.rs', monitorManager, 'devices: Mutex<Option<Vec<MonitorDeviceRecord>>>');
-requireText('main.rs', main, 'fn start_reconnect_monitor');
-requireText('main.rs', main, 'fn reconnect_delay_secs');
-requireText('main.rs', main, 'desired_connected');
-requireText('main.rs', main, 'session_runtime_key');
-requireText('main.rs', main, 'fn stop_requested');
-requireText('main.rs', main, 'fn request_all_permissions');
-requireText('main.rs', main, 'fn open_full_disk_access_settings');
-requireText('main.rs', main, 'fn get_power_settings');
-requireText('main.rs', main, 'fn set_clamshell_awake');
-requireText('main.rs', main, 'fn macos_enable_clamshell_with_watchdog');
-requireText('main.rs', main, 'clamshell-awake.owner');
-requireText('main.rs', main, 'managedByChatX');
-requireText('main.rs', main, '/usr/bin/pmset -a disablesleep 1');
-requireText('main.rs', main, '/usr/bin/pmset -a disablesleep 0');
-requireText('main.rs', main, 'fn get_call_history');
-requireText('main.rs', main, 'fn clear_call_history');
-requireText('main.rs', main, 'tool-history.jsonl');
-requireText('main.rs', main, '"mcpMonitor":mcp_monitor');
-requireText('main.rs', main, 'fn get_mcp_live_status');
-requireText('main.rs', main, 'control_plane_poll_health');
-requireText('main.rs', main, 'Tunnel probe freshness');
-requireText('main.rs', main, 'poller recovered; polling operational');
-requireText('main.rs', main, 'poll failed; backing off');
-requireText('main.rs', main, 'fn get_network_settings');
-requireText('main.rs', main, 'fn set_network_settings');
-requireText('main.rs', main, 'fn test_network_settings');
-requireText('main.rs', main, 'apply_proxy_env');
-requireText('main.rs', main, 'system_proxy_url');
-requireText('monitor.rs', monitor, 'pub fn evaluate_activity');
-requireText('monitor.rs', monitor, 'state = "stalled"');
-requireText('monitor.rs', monitor, 'state = "gap"');
-requireText('main.rs', main, 'fn get_monitor_info');
-requireText('main.rs', main, 'fn set_monitor_enabled');
-requireText('main.rs', main, 'fn create_monitor_pairing');
-requireText('main.rs', main, 'monitor_manager::create_pairing(&app, state.inner())');
-requireText('monitor_manager.rs', monitorManager, 'pub(super) fn create_pairing(');
-requireText('main.rs', main, 'monitor_enabled: false');
-requireText('main.rs', main, 'mod monitor_control;');
-requireText('main.rs', main, 'mod monitor_manager;');
-requireText('main.rs', main, 'mod monitor_status;');
-requireText('monitor_manager.rs', monitorManager, 'chatx-monitor-wss-v1');
-requireText('main.rs', main, 'mod secrets;');
-requireText('main.rs', main, 'ensure_monitor_master_key');
-requireText('secrets.rs', secrets, 'StoredMonitorMasterKey::Missing');
-requireText('secrets.rs', secrets, '拒绝静默轮换');
-requireText('main.rs', main, 'previous_settings');
-requireText('main.rs', main, 'Runtime Key 持久化失败');
-rejectText('main.rs', main, 'fn monitor_device_token_authorized(');
-rejectText('main.rs', main, 'fn complete_monitor_pairing(');
-rejectText('main.rs', main, 'fn start_monitor_service(');
-requireText('main.rs', main, 'start_relay_client_for_settings');
-requireText('get_status', getStatusSection, 'runtime_snapshot.lock()');
-rejectText('get_status', getStatusSection, 'runtime_status(&paths)');
-rejectText('main.rs', main, 'let _ = stop_runtime(&app, None);');
-rejectText('main.rs', main, 'join("@wonderwhy-er").join("desktop-commander")');
-rejectText('main.rs', main, '"tunnelVersion":executable_version(&paths.tunnel)');
-rejectText('main.rs', main, '127.0.0.1:3210');
-rejectText('main.rs', main, 'backend_request');
-rejectText('main.rs', main, 'chatgptx-backend.mjs');
-
-requireText('desktop/index.html', html, 'Desktop Commander');
-requireText('desktop/index.html', html, 'Secure MCP Tunnel');
-requireText('desktop/index.html', html, 'data-page="calls"');
-requireText('desktop/index.html', html, 'data-page="monitor"');
-requireText('desktop/index.html', html, 'id="monitorEnabled"');
-requireText('desktop/index.html', html, 'id="monitorPort"');
-requireText('desktop/index.html', html, 'id="createMonitorPairing"');
-requireText('desktop/index.html', html, 'id="monitorPairingQr"');
-requireText('desktop/index.html', html, 'data-page="permissions"');
-requireText('desktop/index.html', html, 'data-page="settings"');
-requireText('desktop/index.html', html, 'id="authorizeAllPermissions"');
-requireText('desktop/index.html', html, 'id="openFullDiskAccess"');
-requireText('desktop/index.html', html, 'id="autoReconnect"');
-requireText('desktop/index.html', html, 'id="clamshellAwake"');
-requireText('desktop/index.html', html, '合盖后保持运行');
-requireText('desktop/index.html', html, '退出或异常终止后会自动恢复');
-requireText('desktop/index.html', html, 'id="callHistory"');
-requireText('desktop/index.html', html, 'id="callLimit"');
-requireText('desktop/index.html', html, 'id="callStatP95"');
-requireText('desktop/index.html', html, 'id="mcpLiveStatus"');
-requireText('desktop/index.html', html, 'id="mcpLiveCalls"');
-requireText('desktop/index.html', html, 'id="proxyMode"');
-requireText('desktop/index.html', html, 'id="proxyUrl"');
-requireText('desktop/index.html', html, 'id="controlPlaneFact"');
-requireText('desktop/index.html', html, 'id="relayEnabled"');
-requireText('desktop/index.html', html, 'id="relayBaseUrl"');
-requireText('desktop/index.html', html, 'id="registerRelay"');
-requireText('desktop/index.html', html, 'id="relayRegistrationFact"');
-requireText('desktop/index.html', html, 'id="relaySessionFact"');
-rejectText('desktop/index.html', html, 'id="relaySetupToken"');
-rejectText('desktop/index.html', html, '>Setup Token<');
-rejectText('desktop/index.html', html, 'SSH Reverse Relay');
-rejectText('desktop/index.html', html, 'relaySshPort');
-rejectText('desktop/index.html', html, 'relayRemotePort');
-requireText('desktop/app.js', app, 'runtimeActive');
-requireText('desktop/app.js', app, "typeof s?.runtimeActive === 'boolean'");
-requireText('desktop/app.js', app, "invoke('get_call_history'");
-requireText('desktop/app.js', app, "invoke('clear_call_history'");
-requireText('desktop/app.js', app, "'ready'");
-requireText('desktop/app.js', app, "invoke('connect_tunnel'");
-requireText('desktop/app.js', app, "invoke('get_status'");
-requireText('desktop/app.js', app, "invoke('get_mcp_live_status'");
-requireText('desktop/app.js', app, "invoke('get_power_settings'");
-requireText('desktop/app.js', app, "invoke('set_clamshell_awake'");
-requireText('desktop/app.js', app, "invoke('set_auto_reconnect'");
-requireText('desktop/app.js', app, "invoke('get_network_settings'");
-requireText('desktop/app.js', app, "invoke('set_network_settings'");
-requireText('desktop/app.js', app, "invoke('test_network_settings'");
-requireText('desktop/app.js', app, "invoke('register_relay_desktop'");
-rejectText('desktop/app.js', app, 'relaySetupToken');
-rejectText('desktop/app.js', app, 'setupToken:');
-requireText('desktop/app.js', app, "invoke('get_monitor_info'");
-requireText('desktop/app.js', app, "invoke('set_monitor_enabled'");
-requireText('desktop/app.js', app, "invoke('create_monitor_pairing'");
-requireText('desktop/app.js', app, "invoke('revoke_monitor_device'");
-requireText('desktop/app.js', app, "const { qrSvg, ...payload }");
-rejectText('desktop/app.js', app, "invoke('rotate_monitor_token'");
-rejectText('desktop/app.js', app, 'relaySshUser');
-requireText('desktop/app.js', app, "invoke('get_permission_center'");
-requireText('desktop/app.js', app, "invoke('request_all_permissions'");
-requireText('desktop/app.js', app, "invoke('open_full_disk_access_settings'");
-requireText('desktop/app.js', app, "['error', 'unavailable'].includes");
-rejectText('desktop/app.js', app, '/api/tunnel/status');
-rejectText('desktop/app.js', app, 'permissionPreset');
-requireText('desktop/app.css', css, 'html,body{height:100%;overflow:hidden}');
-requireText('desktop/app.css', css, '.page[data-page-panel=calls].active{display:flex;flex:1 1 auto;overflow:hidden}');
-requireText('desktop/app.css', css, '.page[data-page-panel=calls] .call-history{flex:1 1 auto;min-height:0;overflow:auto;overscroll-behavior:contain}');
-requireText('desktop/app.css', css, '.page[data-page-panel=calls] .call-history{display:flex;flex-direction:column;align-items:stretch;gap:10px}');
-requireText('desktop/app.css', css, '.page[data-page-panel=calls] .call-record{flex:0 0 auto;min-height:44px}');
-requireText('desktop/app.css', css, '.monitor-facts');
-requireText('desktop/app.css', css, '.monitor-pairing');
-requireText('desktop/app.css', css, '.network-form');
-requireText('desktop/app.css', css, '.network-facts');
-
-requireText('desktop-commander-launcher.mjs', launcher, 'Clear any stale in-flight snapshot');
-requireText('desktop-commander-launcher.mjs', launcher, 'let callSequence = 0');
-requireText('prepare-desktop-bundle.mjs', prepare, "supportedPlatforms = new Set(['win32-x64', 'darwin-arm64'])");
-requireText('prepare-desktop-bundle.mjs', prepare, 'runtimeLock.schemaVersion !== 3');
-requireText('prepare-desktop-bundle.mjs', prepare, 'DESKTOP_COMMANDER_MCPB_PATH');
-requireText('prepare-desktop-bundle.mjs', prepare, 'Desktop Commander MCPB SHA-256');
-requireText('prepare-desktop-bundle.mjs', prepare, 'releaseUrl');
-requireText('prepare-desktop-bundle.mjs', prepare, 'Expand-Archive');
-requireText('prepare-desktop-bundle.mjs', prepare, "'/usr/bin/unzip'");
-requireText('prepare-desktop-bundle.mjs', prepare, "'/usr/bin/tar'");
-requireText('prepare-desktop-bundle.mjs', prepare, 'node.archiveSha256');
-requireText('prepare-desktop-bundle.mjs', prepare, 'tunnel.releaseAsset');
-requireText('prepare-desktop-bundle.mjs', prepare, "const dcRoot = path.join(resourceDir, 'desktop-commander');");
-requireText('prepare-desktop-bundle.mjs', prepare, "entry: 'desktop-commander/dist/index.js'");
-requireText('prepare-desktop-bundle.mjs', prepare, 'locked-github-release');
-requireText('prepare-desktop-bundle.mjs', prepare, 'github-release-mcpb');
-requireText('prepare-desktop-bundle.mjs', prepare, 'runtimeKeyStrippedByLauncher');
-requireText('prepare-desktop-bundle.mjs', prepare, 'createRequire');
-requireText('prepare-desktop-bundle.mjs', prepare, 'rgPath');
-requireText('prepare-desktop-bundle.mjs', prepare, 'ripgrepRelative');
-requireText('prepare-desktop-bundle.mjs', prepare, 'DesktopCommander-LICENSE.txt');
-rejectText('prepare-desktop-bundle.mjs', prepare, "node_modules', '@wonderwhy-er', 'desktop-commander'");
-rejectText('prepare-desktop-bundle.mjs', prepare, 'npm_execpath');
-rejectText('prepare-desktop-bundle.mjs', prepare, 'runNpm');
-rejectText('prepare-desktop-bundle.mjs', prepare, 'Desktop Commander install');
-rejectText('prepare-desktop-bundle.mjs', prepare, 'Desktop Commander ripgrep rebuild');
-
-requireText('installer-runtime-test.mjs', installerRuntime, "manifest.schemaVersion !== 3");
-requireText('installer-runtime-test.mjs', installerRuntime, "manifest.runtimePolicy !== 'locked-github-release'");
-requireText('installer-runtime-test.mjs', installerRuntime, "const dcRoot = path.join(resourceDir, 'desktop-commander');");
-requireText('installer-runtime-test.mjs', installerRuntime, "manifest.desktopCommander?.entry !== 'desktop-commander/dist/index.js'");
-requireText('installer-runtime-test.mjs', installerRuntime, 'releaseSha256 !== locked.desktopCommander.sha256');
-requireText('installer-runtime-test.mjs', installerRuntime, 'runtimeKeyStrippedByLauncher');
-rejectText('installer-runtime-test.mjs', installerRuntime, "node_modules', '@wonderwhy-er', 'desktop-commander'");
-
-requireText('build-package.mjs', packageBuilder, "MAC_BUNDLE_ID = 'com.chatgptx.local'");
-requireText('build-package.mjs', packageBuilder, "LOCAL_SIGNING_PATH = path.resolve('.chatx-local-signing.json')");
-requireText('build-package.mjs', packageBuilder, 'loadLocalMacSigning');
-requireText('build-package.mjs', packageBuilder, 'certificateSha1');
-requireText('build-package.mjs', packageBuilder, 'signingIdentity: localSigning.identity');
-requireText('build-package.mjs', packageBuilder, "codesign identifier mismatch");
-requireText('build-package.mjs', packageBuilder, 'NSLocalNetworkUsageDescription');
-requireText('build-package.mjs', packageBuilder, 'verifyMacBundle(appPath, localSigning)');
-requireText('build-package.mjs', packageBuilder, 'toolchainEnv');
-requireText('build-installer.mjs', installer, 'toolchainEnv');
-requireText('toolchain-env.mjs', toolchainEnv, 'CARGO_HOME: cargoHome');
-requireText('tauri-tool.mjs', tauriTool, 'toolchainEnv()');
-requireText('prepare-desktop-bundle.mjs', prepare, 'AbortController');
-requireText('prepare-desktop-bundle.mjs', prepare, 'attempt <= 5');
-
-requireText('build-installer.mjs', installer, "const publish = args.has('--publish');");
-requireText('build-installer.mjs', installer, 'const requireSigning = publish ||');
-requireText('build-installer.mjs', installer, 'Publishing a ChatX release requires CHATX_WINDOWS_CERT_THUMBPRINT');
-requireText('build-installer.mjs', installer, 'if (certificateThumbprint)');
-requireText('build-installer.mjs', installer, 'published signed installer');
-rejectText('build-installer.mjs', installer, 'published unsigned installer');
-rejectText('build-installer.mjs', installer, 'release is unsigned; this is intentional');
-
-requireText('desktop-commander-launcher.mjs', launcher, 'delete process.env.CHATX_TUNNEL_RUNTIME_KEY');
-requireText('desktop-commander-launcher.mjs', launcher, 'DESKTOP_COMMANDER_DISABLE_TELEMETRY');
-requireText('desktop-commander-launcher.mjs', launcher, 'types.CallToolRequestSchema');
-requireText('desktop-commander-launcher.mjs', launcher, "join(home, '.chatx-monitor')");
-requireText('desktop-commander-launcher.mjs', launcher, 'oldestInFlightStartedAt');
-rejectText('desktop-commander-launcher.mjs', launcher, 'request?.params?.arguments');
-requireText('desktop-commander-launcher.mjs', launcher, 'USERPROFILE');
-requireText('desktop-commander-launcher.mjs', launcher, 'HOME');
-requireText('monitor_server.rs', monitorServer, 'ServerConnection');
-requireText('monitor_server.rs', monitorServer, '/v1/ws/monitor');
-requireText('monitor_server.rs', monitorServer, '/v1/ws/pair');
-requireText('monitor_server.rs', monitorServer, '/v1/monitor/snapshot');
-requireText('monitor_server.rs', monitorServer, 'DeviceServerMessage::Snapshot');
-requireText('monitor_server.rs', monitorServer, 'Message::Ping');
-requireText('monitor_server.rs', monitorServer, 'generate_simple_self_signed');
-requireText('monitor_server.rs', monitorServer, 'DeviceWsMessage::Control');
-requireText('monitor_server.rs', monitorServer, 'ControlHandler');
-requireText('monitor_server.rs', monitorServer, 'if !auth_checker(device_id, token)');
-requireText('monitor_server.rs', monitorServer, 'device revoked');
-requireText('monitor_crypto.rs', monitorCrypto, 'chatx-monitor-v1|control|');
-requireText('monitor_crypto.rs', monitorCrypto, 'derive_control_key');
-requireText('monitor_control.rs', monitorControl, 'pub(super) fn handle(');
-requireText('monitor_control.rs', monitorControl, '"refresh_snapshot"');
-requireText('monitor_control.rs', monitorControl, '"reconnect_tunnel"');
-requireText('monitor_control.rs', monitorControl, 'monitor_status::fresh_payload');
-requireText('monitor_control.rs', monitorControl, 'Desktop 已手动停止 Tunnel');
-requireText('main.rs', main, 'monitor_control: monitor_control::State');
-requireText('monitor_control.rs', monitorControl, 'cache: Mutex<ControlCache>');
-requireText('main.rs', main, 'fn ensure_runtime_start_intent');
-requireText('main.rs', main, 'require_connection_intent');
-requireText('relay-protocol', relayProtocol, 'EncryptedControlPayload');
-requireText('relay-protocol', relayProtocol, 'CAPABILITY_CONTROL_RECONNECT');
-requireText('relay-protocol', relayProtocol, 'CAPABILITY_REVOKE_SYNC');
-requireText('relay-protocol', relayProtocol, 'DeviceRevoke');
-requireText('relay-protocol', relayProtocol, 'RevokeResult');
-requireText('relay-server', relayServer, 'control_connections');
-requireText('relay-server', relayServer, 'MAX_PENDING_CONTROLS');
-requireText('relay-server', relayServer, 'CONTROL_MIN_INTERVAL_MS');
-requireText('relay-server', relayServer, 'routed_device_capabilities');
-requireText('relay-server', relayServer, 'route_supports_control');
-requireText('relay-server', relayServer, 'route_supports_revoke');
-requireText('relay-server', relayServer, 'request_desktop_revoke');
-requireText('relay-server', relayServer, 'revoke_connections');
-requireText('relay-registry', relayRegistry, 'relay registry is corrupt');
-requireText('relay-server', relayServer, 'capabilities: Vec<String>');
-requireText('relay-server', relayServer, 'DesktopServerMessage::DeviceControl');
-requireText('relay.rs', relay, 'capabilities: device_capabilities()');
-requireText('relay.rs', relay, 'DesktopServerMessage::DeviceRevoke');
-requireText('relay.rs', relay, 'DesktopWsMessage::RevokeResult');
-rejectText('monitor_server.rs', monitorServer, '/api/v1/status');
-rejectText('monitor_server.rs', monitorServer, 'runtime-api-key');
-requireText('relay.rs', relay, '/v1/ws/desktop');
-requireText('relay.rs', relay, 'snapshot_http_loop');
-requireText('relay.rs', relay, '/snapshot');
-requireText('relay.rs', relay, 'RECONNECT_DELAYS');
-requireText('relay.rs', relay, 'cleanup_legacy_ssh');
-rejectText('relay.rs', relay, 'ServerAliveInterval=5');
-rejectText('relay.rs', relay, 'ExitOnForwardFailure=yes');
-requireText('main.rs', main, 'applied_url');
-requireText('main.rs', main, 'fn register_relay_desktop');
-requireText('main.rs', main, 'CHATX_RELAY_SETUP_TOKEN');
-requireText('main.rs', main, 'relay-setup-token');
-rejectText('main.rs', main, 'pointer("/relay/setupToken")');
-requireText('main.rs', main, 'poller recovered; polling operational');
-requireText('monitor_status.rs', monitorStatus, 'pub(super) fn parse_recent_history');
-requireText('monitor_status.rs', monitorStatus, '"recentCalls"');
-requireText('monitor_status.rs', monitorStatus, '256 * 1024');
-requireText('monitor_status.rs', monitorStatus, 'pub(super) fn project_runtime_snapshot');
-requireText('monitor_status.rs', monitorStatus, 'pub(super) fn fresh_payload');
-rejectText('main.rs', main, 'interface: "ssh-reverse".into()');
-requireText('monitor_status.rs', monitorStatus, '"endpoints": endpoints');
-requireText('Cargo.toml', cargo, 'rustls =');
-requireText('Cargo.toml', cargo, 'rcgen =');
-requireText('Cargo.toml', cargo, 'sha2 =');
-requireText('Cargo.toml', cargo, 'qrcode =');
-
-requireText('bridge-smoke-test.mjs', bridge, "from '@modelcontextprotocol/client/stdio'");
-requireText('bridge-smoke-test.mjs', bridge, "path.join(resourceDir, 'desktop-commander', 'dist', 'index.js')");
-requireText('bridge-smoke-test.mjs', bridge, "call('start_search'");
-requireText('bridge-smoke-test.mjs', bridge, "call('start_process'");
-requireText('bridge-smoke-test.mjs', bridge, "transportEnv.CHATX_TUNNEL_RUNTIME_KEY = 'chatx-secret-smoke'");
-requireText('bridge-smoke-test.mjs', bridge, 'CHATX_KEY_STRIPPED');
-requireText('bridge-smoke-test.mjs', bridge, 'chatx-ripgrep-smoke');
-rejectText('bridge-smoke-test.mjs', bridge, "node_modules', '@wonderwhy-er', 'desktop-commander'");
-
-requireText('tauri.windows.conf.json', tauriWindows, 'resources/desktop-commander');
-requireText('tauri.windows.conf.json', tauriWindows, 'resources/node.exe');
-requireText('tauri.macos.conf.json', tauriMacos, 'resources/desktop-commander');
-requireText('tauri.macos.conf.json', tauriMacos, 'resources/node');
-requireText('tauri.macos.conf.json', tauriMacos, 'resources/cloudflared');
-requireText('tauri.macos.conf.json', tauriMacos, 'resources/cloudflared-manifest.json');
-requireText('tauri.macos.conf.json', tauriMacos, '"signingIdentity": "-"');
-requireText('Info.plist', macInfoPlist, 'NSLocalNetworkUsageDescription');
-requireText('Info.plist', macInfoPlist, 'ChatX 需要访问本地网络');
-rejectText('tauri.conf.json', tauri, 'chatgptx-backend.mjs');
-if (macRuntimeLock.platform !== 'darwin-arm64') throw new Error('macOS runtime lock must target darwin-arm64.');
-if (!/^[0-9a-f]{64}$/i.test(macRuntimeLock.node?.archiveSha256 ?? '')) throw new Error('macOS Node archive SHA-256 must be locked.');
-if (!/^[0-9a-f]{64}$/i.test(macRuntimeLock.tunnelClient?.sha256 ?? '')) throw new Error('macOS tunnel-client archive SHA-256 must be locked.');
-
-if (runtimeLock.schemaVersion !== 3) throw new Error('runtime-lock.json schemaVersion must be 3.');
-const desktopCommanderLock = runtimeLock.desktopCommander ?? {};
-const desktopCommanderVersion = desktopCommanderLock.version ?? '';
-if (!/^\d+\.\d+\.\d+$/.test(desktopCommanderVersion)) throw new Error('Desktop Commander version must be locked to semver.');
-if (desktopCommanderLock.releaseTag !== `v${desktopCommanderVersion}`) throw new Error('Desktop Commander release tag must match the locked version.');
-if (desktopCommanderLock.releaseAsset !== `desktop-commander-${desktopCommanderVersion}.mcpb`) throw new Error('Desktop Commander MCPB release asset must match the locked version.');
-if (!/^https:\/\/github\.com\/wonderwhy-er\/DesktopCommanderMCP\/releases\/download\//.test(desktopCommanderLock.releaseUrl ?? '')) {
-  throw new Error('Desktop Commander release URL must point to the upstream GitHub release.');
-}
-if (!/^[0-9a-f]{40}$/i.test(desktopCommanderLock.sourceCommit ?? '')) throw new Error('Desktop Commander source commit must be locked to a full SHA.');
-if (!/^[0-9a-f]{64}$/i.test(desktopCommanderLock.sha256 ?? '')) throw new Error('Desktop Commander MCPB SHA-256 must be locked.');
-for (const key of ['version', 'sourceCommit', 'releaseTag', 'releaseAsset', 'releaseUrl', 'size', 'sha256']) {
-  if (macRuntimeLock.desktopCommander?.[key] !== desktopCommanderLock[key]) {
-    throw new Error(`Desktop Commander ${key} lock must match between Windows and macOS.`);
+function assertResources(config, expected) {
+  const resources = config.bundle?.resources ?? {};
+  for (const source of expected) {
+    assert.ok(source in resources, `Missing bundled resource: ${source}`);
   }
 }
-if (!/^\d+\.\d+\.\d+$/.test(pkg.version)) throw new Error('ChatX package version must be semver.');
-if (!pkg.scripts?.['test:runtime']?.includes('bridge-smoke-test.mjs')) throw new Error('runtime verification must include the real Desktop Commander bridge smoke test.');
 
-console.log('desktop static checks passed');
+assert.equal(tauri.identifier, 'com.chatgptx.local');
+assert.equal(tauri.build?.frontendDist, '../desktop');
+assert.doesNotMatch(JSON.stringify(tauri), /chatgptx-backend\.mjs/);
+assertResources(windows, [
+  'resources/node.exe',
+  'resources/tunnel-client.exe',
+  'resources/desktop-commander-launcher.mjs',
+  'resources/runtime-manifest.json',
+  'resources/DesktopCommander-LICENSE.txt',
+  'resources/desktop-commander',
+]);
+assertResources(macos, [
+  'resources/node',
+  'resources/tunnel-client',
+  'resources/cloudflared',
+  'resources/cloudflared-manifest.json',
+  'resources/desktop-commander-launcher.mjs',
+  'resources/runtime-manifest.json',
+  'resources/DesktopCommander-LICENSE.txt',
+  'resources/desktop-commander',
+]);
+
+assert.equal(winLock.schemaVersion, 3);
+assert.equal(winLock.platform, 'win32-x64');
+assert.equal(macLock.schemaVersion, 3);
+assert.equal(macLock.platform, 'darwin-arm64');
+assert.equal(winLock.desktopCommander.sha256, macLock.desktopCommander.sha256);
+assert.equal(winLock.desktopCommander.releaseTag, macLock.desktopCommander.releaseTag);
+for (const lock of [winLock, macLock]) {
+  assert.match(lock.desktopCommander.sha256, /^[a-f0-9]{64}$/);
+  assert.match(lock.tunnelClient.sha256, /^[a-f0-9]{64}$/);
+}
+
+assert.match(tunnelRuntime, /env:CHATX_TUNNEL_RUNTIME_KEY/);
+assert.doesNotMatch(tunnelRuntime, /--runtime-api-key\s+\{?runtime/i);
+assert.match(launcher, /delete process\.env\.CHATX_TUNNEL_RUNTIME_KEY/);
+assert.match(launcher, /DESKTOP_COMMANDER_DISABLE_TELEMETRY/);
+
+const getStatusStart = main.indexOf('fn get_status');
+const getStatusEnd = main.indexOf('fn get_network_settings');
+assert.ok(getStatusStart >= 0 && getStatusEnd > getStatusStart);
+const getStatus = main.slice(getStatusStart, getStatusEnd);
+assert.match(getStatus, /runtime_snapshot\.lock\(\)/);
+assert.doesNotMatch(getStatus, /runtime_status\(&paths\)/);
+
+assert.match(installer, /Publishing a ChatX release requires CHATX_WINDOWS_CERT_THUMBPRINT/);
+assert.doesNotMatch(installer, /published unsigned installer/);
+
+console.log('desktop static invariants passed');

@@ -123,11 +123,6 @@ object MonitorSnapshotParser {
     }
 }
 
-private fun JSONObject.optLongOrNull(name: String): Long? {
-    if (!has(name) || isNull(name)) return null
-    return optLong(name)
-}
-
 private fun JSONObject.optIntOrNull(name: String): Int? {
     if (!has(name) || isNull(name)) return null
     return optInt(name)

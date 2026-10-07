@@ -32,10 +32,6 @@ import com.google.mlkit.vision.barcode.common.Barcode
 import com.google.mlkit.vision.codescanner.GmsBarcodeScannerOptions
 import com.google.mlkit.vision.codescanner.GmsBarcodeScanning
 import org.json.JSONObject
-import java.text.SimpleDateFormat
-import java.time.Instant
-import java.util.Date
-import java.util.Locale
 
 class MainActivity : Activity() {
     private lateinit var store: SecureStore
@@ -44,6 +40,7 @@ class MainActivity : Activity() {
     private lateinit var bottomNav: LinearLayout
     private lateinit var actions: MonitorActionController
     private lateinit var pairingActions: PairingActionController
+    private lateinit var settingsDialogs: MonitorSettingsDialogController
     private var pairingInput: EditText? = null
     private var currentPage = Page.OVERVIEW
     private var latestStatusJson: String? = null
@@ -65,6 +62,13 @@ class MainActivity : Activity() {
         ui = UiKit(this)
         actions = buildActionController()
         pairingActions = buildPairingActionController()
+        settingsDialogs = MonitorSettingsDialogController(
+            this,
+            store,
+            ::currentEndpointUrl,
+            ::renderCurrentPage,
+            ::toast,
+        )
         latestStatusJson = store.getLastSnapshotJson()
         NotificationCenter.createChannels(this)
         setContentView(buildShell())
@@ -626,42 +630,6 @@ class MainActivity : Activity() {
         return card
     }
 
-    private fun mcpTone(state: String): UiKit.Tone = when (state) {
-        "active" -> UiKit.Tone.SUCCESS
-        "gap" -> UiKit.Tone.DANGER
-        "stalled" -> UiKit.Tone.WARNING
-        else -> UiKit.Tone.NEUTRAL
-    }
-
-    private fun recentCallTime(item: JSONObject): String {
-        val startedAt = item.optLongOrNull("startedAt")
-        if (startedAt != null) return formatClockTime(startedAt)
-        val timestamp = item.optString("timestamp").takeIf { it.isNotBlank() }
-            ?: return "—"
-        return runCatching {
-            formatClockTime(Instant.parse(timestamp).toEpochMilli())
-        }.getOrDefault(timestamp.take(19))
-    }
-
-    private fun formatClockTime(value: Long): String =
-        SimpleDateFormat("HH:mm:ss", Locale.getDefault()).format(Date(value))
-
-    private fun formatCallDuration(value: Long?): String {
-        val ms = value ?: return "—"
-        return when {
-            ms < 1_000 -> "${ms} ms"
-            ms < 60_000 -> String.format(Locale.getDefault(), "%.1f s", ms / 1000.0)
-            else -> "${ms / 60_000}m ${(ms % 60_000) / 1000}s"
-        }
-    }
-
-    private fun formatDuration(value: Long): String {
-        val totalSeconds = value.coerceAtLeast(0L) / 1000L
-        val minutes = totalSeconds / 60L
-        val seconds = totalSeconds % 60L
-        return if (minutes > 0) "${minutes}分${seconds}秒" else "${seconds}秒"
-    }
-
     private fun renderAlerts() {
         pageHeading("告警", "控制中断判定，并查看最近的异常与恢复事件")
         val continuous = ui.card()
@@ -856,14 +824,14 @@ class MainActivity : Activity() {
         val policyActions = ui.row()
         policyActions.addView(
             ui.button("更改策略", primary = true) {
-                showRoutePolicyDialog()
+                settingsDialogs.showRoutePolicyDialog()
             },
             ui.margin(width = 0, weight = 1f, right = 5, top = 12),
         )
         if (policy == RoutePolicy.MANUAL) {
             policyActions.addView(
                 ui.button("选择路径") {
-                    showManualRouteDialog(routes)
+                    settingsDialogs.showManualRouteDialog(routes)
                 },
                 ui.margin(width = 0, weight = 1f, left = 5, top = 12),
             )
@@ -1010,7 +978,7 @@ class MainActivity : Activity() {
                 "刷新间隔",
                 "${store.getPollIntervalSeconds()} 秒",
             ) {
-                showPollIntervalDialog()
+                settingsDialogs.showPollIntervalDialog()
             },
             ui.margin(top = 8),
         )
@@ -1019,7 +987,7 @@ class MainActivity : Activity() {
                 "快照过期",
                 "${store.getSnapshotStaleSeconds()} 秒",
             ) {
-                showSnapshotStaleDialog()
+                settingsDialogs.showSnapshotStaleDialog()
             },
             ui.margin(top = 8),
         )
@@ -1028,7 +996,7 @@ class MainActivity : Activity() {
                 "离线确认",
                 "连续 ${store.getOfflineFailureThreshold()} 次请求失败",
             ) {
-                showOfflineFailureDialog()
+                settingsDialogs.showOfflineFailureDialog()
             },
             ui.margin(top = 8),
         )
@@ -1416,76 +1384,6 @@ class MainActivity : Activity() {
         return row
     }
 
-    private fun showPollIntervalDialog() {
-        val values = longArrayOf(10L, 15L, 30L, 60L)
-        val labels = values.map { "$it 秒" }.toTypedArray()
-        val selected = values.indexOf(store.getPollIntervalSeconds())
-        AlertDialog.Builder(this)
-            .setTitle("刷新间隔")
-            .setSingleChoiceItems(labels, selected) { dialog, which ->
-                val value = values[which]
-                store.setPollIntervalSeconds(value)
-                val minimumStale = minimumStaleForPoll(value)
-                if (store.getSnapshotStaleSeconds() < minimumStale) {
-                    store.setSnapshotStaleSeconds(minimumStale)
-                }
-                reloadMonitorSettings()
-                dialog.dismiss()
-                renderCurrentPage()
-            }
-            .setNegativeButton("取消", null)
-            .show()
-    }
-
-    private fun showSnapshotStaleDialog() {
-        val values = longArrayOf(30L, 60L, 90L, 180L)
-        val labels = values.map { "$it 秒" }.toTypedArray()
-        val selected = values.indexOf(store.getSnapshotStaleSeconds())
-        AlertDialog.Builder(this)
-            .setTitle("快照过期")
-            .setSingleChoiceItems(labels, selected) { dialog, which ->
-                val value = values[which]
-                val minimum = store.getPollIntervalSeconds() * 3L
-                if (value < minimum) {
-                    toast("快照过期至少应为刷新间隔的 3 倍。")
-                    return@setSingleChoiceItems
-                }
-                store.setSnapshotStaleSeconds(value)
-                reloadMonitorSettings()
-                dialog.dismiss()
-                renderCurrentPage()
-            }
-            .setNegativeButton("取消", null)
-            .show()
-    }
-
-    private fun showOfflineFailureDialog() {
-        val values = intArrayOf(2, 3, 5)
-        val labels = values.map { "连续 $it 次请求失败" }.toTypedArray()
-        val selected = values.indexOf(store.getOfflineFailureThreshold())
-        AlertDialog.Builder(this)
-            .setTitle("离线确认")
-            .setSingleChoiceItems(labels, selected) { dialog, which ->
-                store.setOfflineFailureThreshold(values[which])
-                reloadMonitorSettings()
-                dialog.dismiss()
-                renderCurrentPage()
-            }
-            .setNegativeButton("取消", null)
-            .show()
-    }
-
-    private fun minimumStaleForPoll(pollSeconds: Long): Long =
-        listOf(30L, 60L, 90L, 180L)
-            .firstOrNull { it >= pollSeconds * 3L }
-            ?: 180L
-
-    private fun reloadMonitorSettings() {
-        if (store.isMonitorServiceRunning()) {
-            MonitorService.reload(this)
-        }
-    }
-
     private fun permissionRow(
         label: String,
         granted: Boolean,
@@ -1503,118 +1401,6 @@ class MainActivity : Activity() {
         )
         return row
     }
-
-    private fun configuredRoutes(config: PairingConfig): List<MonitorEndpoint> =
-        buildList {
-            config.directEndpoints
-                .filter(MonitorEndpoint::isSupportedDirectRoute)
-                .forEach { endpoint ->
-                    add(
-                        endpoint.copy(
-                            url = directMonitorHttpsUrl(endpoint.url),
-                        ),
-                    )
-                }
-            config.relay?.let { relay ->
-                add(
-                    MonitorEndpoint(
-                        kind = "relay",
-                        family = "https",
-                        interfaceName = "chatx-relay",
-                        host = runCatching {
-                            java.net.URI(relay.baseUrl).host
-                        }.getOrNull().orEmpty(),
-                        url = relay.baseUrl.trimEnd('/') +
-                            "/v1/desktops/${config.desktopId}/devices/${config.deviceId}/snapshot",
-                    ),
-                )
-            }
-        }
-
-    private fun showRoutePolicyDialog() {
-        val policies = arrayOf(
-            RoutePolicy.LAN_FIRST,
-            RoutePolicy.RELAY_FIRST,
-            RoutePolicy.AUTO,
-            RoutePolicy.MANUAL,
-        )
-        val labels = policies.map(::routePolicyLabel).toTypedArray()
-        val selected = policies.indexOf(store.getRoutePolicy()).coerceAtLeast(0)
-        AlertDialog.Builder(this)
-            .setTitle("选择路径策略")
-            .setSingleChoiceItems(labels, selected) { dialog, which ->
-                val policy = policies[which]
-                store.setRoutePolicy(policy)
-                if (policy == RoutePolicy.MANUAL &&
-                    store.getManualRouteSelector() == null
-                ) {
-                    val routes = store.loadPairing()?.let(::configuredRoutes).orEmpty()
-                    val currentBase = currentEndpointUrl()?.substringBefore('?')
-                    val preferred = routes.firstOrNull { it.url == currentBase }
-                        ?: routes.firstOrNull()
-                    store.setManualRouteSelector(
-                        preferred?.let(ManualRouteSelector::from),
-                    )
-                }
-                if (store.isMonitorServiceRunning()) {
-                    MonitorService.reevaluate(this)
-                }
-                dialog.dismiss()
-                renderCurrentPage()
-            }
-            .setNegativeButton("取消", null)
-            .show()
-    }
-
-    private fun showManualRouteDialog(routes: List<MonitorEndpoint>) {
-        if (routes.isEmpty()) {
-            toast("当前没有可选择的路径。")
-            return
-        }
-        val current = store.getManualRouteSelector()
-        val labels = routes.map { endpoint ->
-            "${endpointKindLabel(endpoint.kind)} · ${endpoint.family.uppercase()} · " +
-                (endpoint.host.ifBlank { endpoint.interfaceName })
-        }.toTypedArray()
-        val selected = routes.indexOfFirst { current?.matches(it) == true }
-        AlertDialog.Builder(this)
-            .setTitle("选择手动首选路径")
-            .setSingleChoiceItems(labels, selected) { dialog, which ->
-                store.setManualRouteSelector(
-                    ManualRouteSelector.from(routes[which]),
-                )
-                store.setRoutePolicy(RoutePolicy.MANUAL)
-                if (store.isMonitorServiceRunning()) {
-                    MonitorService.reevaluate(this)
-                }
-                dialog.dismiss()
-                renderCurrentPage()
-            }
-            .setNegativeButton("取消", null)
-            .show()
-    }
-
-    private fun routePolicyLabel(policy: RoutePolicy): String = when (policy) {
-        RoutePolicy.LAN_FIRST -> "LAN 优先"
-        RoutePolicy.RELAY_FIRST -> "服务器 Relay 优先"
-        RoutePolicy.AUTO -> "自动 · 保持稳定路径"
-        RoutePolicy.MANUAL -> "手动首选"
-    }
-
-    private fun manualRouteLabel(selector: ManualRouteSelector): String =
-        buildString {
-            append(endpointKindLabel(selector.kind))
-            if (selector.family.isNotBlank()) {
-                append(" · ")
-                append(selector.family.uppercase())
-            }
-            if (selector.interfaceName.isNotBlank() &&
-                selector.interfaceName != "chatx-relay"
-            ) {
-                append(" · ")
-                append(selector.interfaceName)
-            }
-        }
 
     private fun currentEndpointUrl(): String? {
         store.getLastEndpoint()
@@ -1652,93 +1438,6 @@ class MainActivity : Activity() {
         } else {
             host
         }
-    }
-
-    private fun directMonitorHttpsUrl(source: String): String {
-        val base = when {
-            source.startsWith("wss://") -> "https://" + source.removePrefix("wss://")
-            source.startsWith("ws://") -> "http://" + source.removePrefix("ws://")
-            else -> source
-        }
-        return base.substringBefore('?')
-            .replace("/v1/ws/monitor", "/v1/monitor/snapshot")
-            .replace("/v1/ws/pair", "/v1/monitor/snapshot")
-    }
-
-    private fun endpointKindLabel(kind: String): String = when (kind) {
-        "lan" -> "LAN"
-        "ipv6" -> "IPv6 Direct"
-        "relay" -> "服务器 Relay"
-        else -> kind
-    }
-    private fun eventTypeLabel(type: String): String = when (type) {
-        "RECOVERED" -> "恢复"
-        "MCP_GAP" -> "GAP"
-        "MCP_STALLED" -> "STALLED"
-        "TUNNEL_DOWN" -> "TUNNEL"
-        "HOST_OFFLINE" -> "OFFLINE"
-        else -> type
-    }
-
-    private fun eventTone(type: String): UiKit.Tone = when (type) {
-        "RECOVERED" -> UiKit.Tone.SUCCESS
-        "MCP_GAP",
-        "MCP_STALLED",
-        "TUNNEL_DOWN",
-        "HOST_OFFLINE",
-        -> UiKit.Tone.DANGER
-        else -> UiKit.Tone.NEUTRAL
-    }
-
-    private fun tunnelRecoveryDetail(
-        tunnel: JSONObject,
-        serverTime: Long,
-    ): String {
-        val attempt = tunnel.optInt("reconnectAttempt", 0)
-        return when (tunnel.optString("reconnectPhase", "idle")) {
-            "detecting" -> "ChatX 已检测到 Tunnel 异常，正在确认状态。"
-            "reconnecting" -> "ChatX 正在执行第 ${attempt.coerceAtLeast(1)} 次自动重连。"
-            "verifying" -> "重连命令已完成，正在验证 Tunnel Ready。"
-            "backoff" -> {
-                val remaining = (
-                    tunnel.optLong("nextReconnectAt", 0L) - serverTime
-                ).coerceAtLeast(0L)
-                val suffix = if (remaining > 0L) {
-                    "约 ${((remaining + 999L) / 1000L)} 秒后重试。"
-                } else {
-                    "正在等待下一次重试。"
-                }
-                val error = tunnel.optString("lastReconnectError").ifBlank { null }
-                listOfNotNull(error, suffix).joinToString(" ")
-            }
-            "blocked", "failed" ->
-                tunnel.optString("lastReconnectError").ifBlank {
-                    "ChatX 无法自动恢复 Tunnel。"
-                }
-            "disabled" -> "Tunnel 自动重连已关闭。"
-            "stopped" -> "Tunnel 已被 Desktop 手动停止。"
-            else -> when (tunnel.optString("reconnectUnavailableReason")) {
-                "runtime_key_unavailable" -> "Desktop 缺少 Runtime Key，当前无法重连。"
-                "tunnel_not_configured" -> "Desktop 尚未配置 Tunnel。"
-                "manually_stopped" -> "Tunnel 已被 Desktop 手动停止。"
-                else -> "ChatX 在线，但 Secure MCP Tunnel 当前不可用。"
-            }
-        }
-    }
-
-    private fun formatTime(value: Long): String {
-        if (value <= 0L) return "—"
-        return SimpleDateFormat(
-            "MM-dd HH:mm:ss",
-            Locale.getDefault(),
-        ).format(Date(value))
-    }
-
-    private fun formatOptionalTime(value: Long?): String =
-        value?.takeIf { it > 0L }?.let(::formatTime) ?: "—"
-    private fun JSONObject.optLongOrNull(name: String): Long? {
-        if (!has(name) || isNull(name)) return null
-        return optLong(name)
     }
 
     private fun toast(message: String) {

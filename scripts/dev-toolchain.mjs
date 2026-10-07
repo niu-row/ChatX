@@ -5,6 +5,7 @@ import { fileURLToPath } from 'node:url';
 import {
   inheritedHome,
   isWindows,
+  locateExecutable,
   realHome,
   toolchainEnv,
 } from './toolchain-env.mjs';
@@ -34,6 +35,7 @@ function rustTool(name) {
   const direct = firstExisting([
     process.env[`CHATX_${name.toUpperCase()}_PATH`],
     path.join(realHome, '.cargo', 'bin', exe),
+    locateExecutable(exe),
   ], executable);
   if (direct) return direct;
 
@@ -46,10 +48,31 @@ function rustTool(name) {
   return null;
 }
 
+function executableHome(executablePath) {
+  if (!executablePath) return null;
+  let resolved = executablePath;
+  try { resolved = fs.realpathSync.native(executablePath); } catch {}
+  return path.dirname(path.dirname(resolved));
+}
+
+function javaHomeFromExecutable(java) {
+  if (!java) return null;
+  const result = spawnSync(java, ['-XshowSettings:properties', '-version'], {
+    encoding: 'utf8',
+    env: toolchainEnv(),
+    windowsHide: true,
+  });
+  const output = `${result.stdout || ''}\n${result.stderr || ''}`;
+  return output.match(/^\s*java\.home\s*=\s*(.+)$/m)?.[1]?.trim() || null;
+}
+
 function javaHome() {
+  const java = locateExecutable(isWindows ? 'java.exe' : 'java');
   const candidates = [
     process.env.CHATX_JAVA_HOME,
     process.env.JAVA_HOME,
+    javaHomeFromExecutable(java),
+    executableHome(java),
     '/Applications/Android Studio.app/Contents/jbr/Contents/Home',
     path.join(realHome, 'Applications', 'Android Studio.app', 'Contents', 'jbr', 'Contents', 'Home'),
     isWindows ? path.join(process.env.ProgramFiles || 'C:\\Program Files', 'Android', 'Android Studio', 'jbr') : '',
@@ -58,10 +81,13 @@ function javaHome() {
 }
 function androidSdk() {
   const localAppData = process.env.LOCALAPPDATA || '';
+  const adb = locateExecutable(isWindows ? 'adb.exe' : 'adb');
+  const sdkFromAdb = adb ? path.dirname(path.dirname(adb)) : null;
   return firstExisting([
     process.env.CHATX_ANDROID_HOME,
     process.env.ANDROID_HOME,
     process.env.ANDROID_SDK_ROOT,
+    sdkFromAdb,
     path.join(realHome, 'Library', 'Android', 'sdk'),
     localAppData ? path.join(localAppData, 'Android', 'Sdk') : '',
   ]);

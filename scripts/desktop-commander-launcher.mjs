@@ -75,44 +75,81 @@ let lastSuccess = null;
 let lastDurationMs = null;
 let recentCallStarts = [];
 const inFlightCalls = new Map();
+let activityWriteTimer = null;
+let activityWriteInFlight = false;
+let activityWriteDirty = false;
 
-function writeActivitySnapshot() {
+function buildActivitySnapshot() {
+  const now = Date.now();
+  recentCallStarts = recentCallStarts.filter((timestamp) => now - timestamp <= 60_000);
+  const inFlightCallList = [...inFlightCalls.entries()].map(([id, call]) => ({
+    id,
+    toolName: call.toolName,
+    startedAt: call.startedAt,
+  }));
+  const oldestInFlightStartedAt = inFlightCallList.length
+    ? Math.min(...inFlightCallList.map((call) => call.startedAt))
+    : null;
+  return {
+    schemaVersion: 3,
+    sequence: ++activitySequence,
+    updatedAt: now,
+    launcherStartedAt,
+    lastRequestAt,
+    lastRequestMethod,
+    lastListToolsAt,
+    lastCallStartedAt,
+    lastCallFinishedAt,
+    lastToolName,
+    lastSuccess,
+    lastDurationMs,
+    inFlight: inFlightCalls.size,
+    inFlightCalls: inFlightCallList,
+    oldestInFlightStartedAt,
+    recentCallStarts,
+    callsLastMinute: recentCallStarts.length,
+  };
+}
+
+function writeActivitySnapshotSync() {
   try {
-    const now = Date.now();
-    recentCallStarts = recentCallStarts.filter((timestamp) => now - timestamp <= 60_000);
-    const inFlightCallList = [...inFlightCalls.entries()].map(([id, call]) => ({
-      id,
-      toolName: call.toolName,
-      startedAt: call.startedAt,
-    }));
-    const oldestInFlightStartedAt = inFlightCallList.length
-      ? Math.min(...inFlightCallList.map((call) => call.startedAt))
-      : null;
-    const payload = {
-      schemaVersion: 3,
-      sequence: ++activitySequence,
-      updatedAt: now,
-      launcherStartedAt,
-      lastRequestAt,
-      lastRequestMethod,
-      lastListToolsAt,
-      lastCallStartedAt,
-      lastCallFinishedAt,
-      lastToolName,
-      lastSuccess,
-      lastDurationMs,
-      inFlight: inFlightCalls.size,
-      inFlightCalls: inFlightCallList,
-      oldestInFlightStartedAt,
-      recentCallStarts,
-      callsLastMinute: recentCallStarts.length,
-    };
+    const payload = buildActivitySnapshot();
     const temp = `${activityPath}.${process.pid}.tmp`;
     fs.writeFileSync(temp, `${JSON.stringify(payload)}\n`, { mode: 0o600 });
     fs.renameSync(temp, activityPath);
   } catch {
     // Monitoring is observational only. Snapshot I/O must never break an MCP call.
   }
+}
+
+async function flushActivitySnapshot() {
+  if (activityWriteInFlight || !activityWriteDirty) return;
+  activityWriteDirty = false;
+  activityWriteInFlight = true;
+  try {
+    const payload = buildActivitySnapshot();
+    const temp = `${activityPath}.${process.pid}.tmp`;
+    await fs.promises.writeFile(temp, `${JSON.stringify(payload)}\n`, { mode: 0o600 });
+    await fs.promises.rename(temp, activityPath);
+  } catch {
+    // Monitoring is observational only. Snapshot I/O must never break an MCP call.
+  } finally {
+    activityWriteInFlight = false;
+    if (activityWriteDirty) scheduleActivitySnapshot();
+  }
+}
+
+function scheduleActivitySnapshot() {
+  activityWriteDirty = true;
+  if (activityWriteInFlight || activityWriteTimer) return;
+  activityWriteTimer = setTimeout(() => {
+    activityWriteTimer = null;
+    void flushActivitySnapshot();
+  }, 50);
+}
+
+function writeActivitySnapshot() {
+  scheduleActivitySnapshot();
 }
 
 function recordRequest(method) {
@@ -124,7 +161,7 @@ function recordRequest(method) {
 }
 
 // Clear any stale in-flight snapshot left by a previous crashed launcher.
-writeActivitySnapshot();
+writeActivitySnapshotSync();
 
 await import(pathToFileURL(path.join(dist, 'bootstrap.js')).href);
 const sdk = path.join(dist, '..', 'node_modules', '@modelcontextprotocol', 'sdk', 'dist', 'esm');

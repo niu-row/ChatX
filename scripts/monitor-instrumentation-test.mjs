@@ -55,9 +55,10 @@ const server = new Server();
 server.setRequestHandler(types.ListToolsRequestSchema, async () => ({ tools: [{ name: 'read_file' }] }));
 await globalThis.__chatxHandlers.get(types.ListToolsRequestSchema)({});
 server.setRequestHandler(types.CallToolRequestSchema, async (request) => {
+  await new Promise((resolve) => setTimeout(resolve, 80));
   const file = path.join(process.env.HOME, '.chatx-monitor', 'activity.json');
   const active = JSON.parse(fs.readFileSync(file, 'utf8'));
-  if (active.inFlight !== 1) throw new Error('expected inFlight=1 while handler runs');
+  if (active.inFlight !== 1) throw new Error('expected coalesced inFlight=1 while handler runs');
   return { isError: request.params.name === 'error' };
 });
 for (const name of ['read_file', 'write_file', 'error']) {

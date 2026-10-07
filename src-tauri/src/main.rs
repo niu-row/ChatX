@@ -7,19 +7,33 @@ mod monitor_status;
 mod monitor_crypto;
 mod monitor_network;
 mod monitor_server;
+mod process_utils;
 mod relay;
 mod secrets;
+mod tunnel_recovery;
+mod tunnel_runtime;
+mod tunnel_status;
 
+use process_utils::{command_output, command_output_with_timeout};
 use secrets::{clear_runtime_key, ensure_monitor_master_key, key_storage, load_runtime_key, protect_secret, read_relay_credentials, runtime_key_saved, save_relay_credentials};
+use tunnel_recovery::{reconnect_capability, recovery_status, set_recovery_status, update_runtime_snapshot};
+use tunnel_runtime::{
+    restore_connection_intent_if_active, start_reconnect_monitor, start_runtime_connection,
+    stop_runtime, wait_for_runtime_recovery,
+};
+use tunnel_status::{runtime_status, ControlPlaneObservation, RuntimeObservation};
+#[cfg(test)]
+use tunnel_recovery::{ensure_runtime_start_intent, reconnect_delay_secs};
+#[cfg(test)]
+use tunnel_status::{runtime_log_observation, runtime_payload_active, runtime_payload_alive};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::{
     collections::BTreeSet,
     fs,
     path::{Path, PathBuf},
-    process::{Command, Output, Stdio},
-    sync::{atomic::{AtomicBool, AtomicU32, Ordering}, Arc, Mutex},
-    thread,
+    process::{Command, Output},
+    sync::{atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering}, Arc, Mutex, OnceLock},
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 use tauri::{
@@ -28,12 +42,8 @@ use tauri::{
     Manager, State, WindowEvent,
 };
 
-#[cfg(windows)]
-use std::os::windows::process::CommandExt;
-#[cfg(windows)]
-const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-
 const RUNTIME_ALIAS: &str = "chatx-local";
+const MAIN_WINDOW_RECLAIM_DELAY: Duration = Duration::from_secs(30);
 #[cfg(all(target_os = "macos", not(test)))]
 const KEYCHAIN_SERVICE: &str = "com.chatgptx.local.runtime-key";
 #[cfg(all(target_os = "macos", not(test)))]
@@ -186,6 +196,7 @@ struct AppState {
     session_runtime_key: Mutex<Option<String>>,
     runtime_operation: Mutex<()>,
     permission_results: Mutex<Option<Value>>,
+    main_window_generation: AtomicU64,
 }
 
 #[derive(Clone)]
@@ -364,8 +375,13 @@ fn apply_proxy_env(command: &mut Command, settings: &Settings) -> Result<Option<
 }
 
 fn host_device_name() -> String {
-    let command = Command::new("hostname");
-    command_text(command).filter(|value| !value.is_empty()).unwrap_or_else(|| "Computer".into())
+    static DEVICE_NAME: OnceLock<String> = OnceLock::new();
+    DEVICE_NAME.get_or_init(|| {
+        let command = Command::new("hostname");
+        command_text(command)
+            .filter(|value| !value.is_empty())
+            .unwrap_or_else(|| "Computer".into())
+    }).clone()
 }
 
 #[cfg(target_os = "macos")]
@@ -402,12 +418,30 @@ fn battery_snapshot() -> Value {
 #[cfg(not(any(target_os = "macos", target_os = "windows")))]
 fn battery_snapshot() -> Value { Value::Null }
 
+fn cached_battery_snapshot() -> Value {
+    const BATTERY_CACHE_TTL: Duration = Duration::from_secs(45);
+    static BATTERY_CACHE: OnceLock<Mutex<Option<(Instant, Value)>>> = OnceLock::new();
+
+    let cache = BATTERY_CACHE.get_or_init(|| Mutex::new(None));
+    if let Ok(mut cached) = cache.lock() {
+        if let Some((refreshed_at, value)) = cached.as_ref() {
+            if refreshed_at.elapsed() < BATTERY_CACHE_TTL {
+                return value.clone();
+            }
+        }
+        let value = battery_snapshot();
+        *cached = Some((Instant::now(), value.clone()));
+        return value;
+    }
+    battery_snapshot()
+}
+
 fn host_snapshot() -> Value {
     json!({
         "deviceName": host_device_name(),
         "platform": std::env::consts::OS,
         "arch": std::env::consts::ARCH,
-        "battery": battery_snapshot()
+        "battery": cached_battery_snapshot()
     })
 }
 
@@ -573,85 +607,6 @@ fn runtime_paths(app: &tauri::AppHandle) -> Result<RuntimePaths, String> {
         }
     }
     Err("未找到完整运行组件。请重新安装 ChatX，或先运行 npm run desktop:prepare。".into())
-}
-
-fn command_output(command: &mut Command) -> Result<Output, String> {
-    command.stdin(Stdio::null());
-    #[cfg(windows)]
-    command.creation_flags(CREATE_NO_WINDOW);
-    command.output().map_err(|e| format!("启动进程失败：{e}"))
-}
-
-fn command_output_with_timeout(
-    command: &mut Command,
-    timeout: Duration,
-    label: &str,
-) -> Result<Output, String> {
-    let nonce = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_nanos();
-    let capture_base = format!("chatx-command-{}-{nonce}", std::process::id());
-    let stdout_path = std::env::temp_dir().join(format!("{capture_base}.stdout"));
-    let stderr_path = std::env::temp_dir().join(format!("{capture_base}.stderr"));
-    let stdout_file = fs::File::create(&stdout_path)
-        .map_err(|error| format!("创建 {label} stdout 捕获文件失败：{error}"))?;
-    let stderr_file = match fs::File::create(&stderr_path) {
-        Ok(file) => file,
-        Err(error) => {
-            let _ = fs::remove_file(&stdout_path);
-            return Err(format!("创建 {label} stderr 捕获文件失败：{error}"));
-        }
-    };
-
-    command
-        .stdin(Stdio::null())
-        .stdout(Stdio::from(stdout_file))
-        .stderr(Stdio::from(stderr_file));
-    #[cfg(windows)]
-    command.creation_flags(CREATE_NO_WINDOW);
-
-    let mut child = match command.spawn() {
-        Ok(child) => child,
-        Err(error) => {
-            let _ = fs::remove_file(&stdout_path);
-            let _ = fs::remove_file(&stderr_path);
-            return Err(format!("启动 {label} 失败：{error}"));
-        }
-    };
-    let started = Instant::now();
-
-    loop {
-        match child.try_wait() {
-            Ok(Some(status)) => {
-                let stdout = fs::read(&stdout_path).unwrap_or_default();
-                let stderr = fs::read(&stderr_path).unwrap_or_default();
-                let _ = fs::remove_file(&stdout_path);
-                let _ = fs::remove_file(&stderr_path);
-                return Ok(Output { status, stdout, stderr });
-            }
-            Ok(None) if started.elapsed() < timeout => {
-                thread::sleep(Duration::from_millis(100));
-            }
-            Ok(None) => {
-                let _ = child.kill();
-                let _ = child.wait();
-                let _ = fs::remove_file(&stdout_path);
-                let _ = fs::remove_file(&stderr_path);
-                return Err(format!(
-                    "{label} 超时（{} 秒），已终止该命令。",
-                    timeout.as_secs()
-                ));
-            }
-            Err(error) => {
-                let _ = child.kill();
-                let _ = child.wait();
-                let _ = fs::remove_file(&stdout_path);
-                let _ = fs::remove_file(&stderr_path);
-                return Err(format!("等待 {label} 失败：{error}"));
-            }
-        }
-    }
 }
 
 fn tunnel_command_timeout(args: &[String]) -> Duration {
@@ -1104,6 +1059,7 @@ mod tests {
             std::process::id()
         ));
         let text = concat!(
+            r#"{"component":"controlplane","client_instance_id":"test","msg":"control-plane route resolved","proxy_source":"https_proxy"}"#, "\n",
             r#"{"component":"controlplane","client_instance_id":"test","msg":"starting control-plane poller"}"#, "\n",
             r#"{"component":"controlplane","client_instance_id":"test","msg":"poll failed; backing off","error":"network down"}"#, "\n",
             r#"{"component":"controlplane","client_instance_id":"test","msg":"poll timed out; backing off","error":"timeout"}"#, "\n",
@@ -1115,10 +1071,11 @@ mod tests {
             "healthy": true,
             "local": {"log": {"path": path.to_string_lossy()}}
         });
-        let observation = control_plane_observation(&payload);
-        assert_eq!(observation.state, "down");
-        assert_eq!(observation.consecutive_failures, 3);
-        assert!(observation.reason.contains("network down"));
+        let observation = runtime_log_observation(&payload);
+        assert_eq!(observation.proxy_source, "https_proxy");
+        assert_eq!(observation.control_plane.state, "down");
+        assert_eq!(observation.control_plane.consecutive_failures, 3);
+        assert!(observation.control_plane.reason.contains("network down"));
 
         fs::write(
             &path,
@@ -1127,7 +1084,7 @@ mod tests {
                 r#"{"component":"controlplane","client_instance_id":"test","msg":"poller recovered; polling operational"}"#
             ),
         ).unwrap();
-        let recovered = control_plane_observation(&payload);
+        let recovered = runtime_log_observation(&payload).control_plane;
         assert_eq!(recovered.state, "healthy");
         assert_eq!(recovered.consecutive_failures, 0);
         let _ = fs::remove_file(path);
@@ -1151,6 +1108,13 @@ mod tests {
         assert!(!serialized.contains("/secret/path"));
         assert!(!serialized.contains("arguments"));
         assert!(!serialized.contains("output"));
+    }
+
+    #[test]
+    fn last_window_exit_is_prevented_while_tray_mode_is_active() {
+        assert!(should_prevent_exit(false, None));
+        assert!(!should_prevent_exit(true, None));
+        assert!(!should_prevent_exit(false, Some(0)));
     }
 
     #[test]
@@ -1180,694 +1144,6 @@ mod tests {
         assert_eq!(reads["filteredTotal"], 1);
         assert_eq!(reads["items"][0]["success"], true);
     }
-}
-
-fn stop_runtime(app: &tauri::AppHandle, state: Option<&AppState>) -> Result<Value, String> {
-    let paths = runtime_paths(app)?;
-    let args = vec!["runtimes".into(), "stop".into(), RUNTIME_ALIAS.into(), "--json".into()];
-    let output = run_tunnel(app, &paths, &args, None)?;
-    if let Some(state) = state { push_log(state, format!("停止 Tunnel runtime: {}", output_text(&output))); }
-    if output.status.success() {
-        Ok(parse_json_output(&output).unwrap_or_else(|| json!({"state":"stopped"})))
-    } else {
-        let text = output_text(&output);
-        if runtime_not_running(&text) {
-            Ok(json!({"state":"stopped"}))
-        } else { Err(format!("停止 Tunnel 失败：{text}")) }
-    }
-}
-
-fn health_value_unhealthy(value: &Value) -> bool {
-    match value {
-        Value::Bool(ok) => !ok,
-        Value::String(text) => matches!(
-            text.to_ascii_lowercase().as_str(),
-            "down" | "error" | "failed" | "failure" | "stale" | "unhealthy" | "disconnected"
-        ),
-        Value::Object(object) => {
-            object.get("healthy").and_then(Value::as_bool) == Some(false)
-                || object.get("ready").and_then(Value::as_bool) == Some(false)
-                || object.get("ok").and_then(Value::as_bool) == Some(false)
-                || object.get("state").map(health_value_unhealthy).unwrap_or(false)
-                || object.get("status").map(health_value_unhealthy).unwrap_or(false)
-        }
-        _ => false,
-    }
-}
-
-fn runtime_payload_alive(payload: &Value) -> bool {
-    if payload.get("process_running").and_then(Value::as_bool) == Some(false)
-        || payload.get("healthy").and_then(Value::as_bool) == Some(false)
-    {
-        return false;
-    }
-    if payload.get("process_running").and_then(Value::as_bool) == Some(true)
-        || payload.get("healthy").and_then(Value::as_bool) == Some(true)
-    {
-        return true;
-    }
-    matches!(
-        payload.get("runtime_state").and_then(Value::as_str).unwrap_or("").to_ascii_lowercase().as_str(),
-        "ready" | "running" | "healthy" | "connected" | "live"
-    )
-}
-
-fn control_plane_health_value(payload: &Value) -> Option<&Value> {
-    payload.get("control_plane_poll_health")
-        .or_else(|| payload.pointer("/local/control_plane_poll_health"))
-}
-
-fn runtime_payload_active(payload: &Value) -> bool {
-    if payload.get("process_running").and_then(Value::as_bool) == Some(false) {
-        return false;
-    }
-    if control_plane_health_value(payload).map(health_value_unhealthy).unwrap_or(false) {
-        return false;
-    }
-    let ready = payload.get("ready").and_then(Value::as_bool);
-    let healthy = payload.get("healthy").and_then(Value::as_bool);
-    if ready == Some(false) || healthy == Some(false) {
-        return false;
-    }
-    if let Some(ready) = ready {
-        return ready;
-    }
-    if healthy == Some(true) {
-        return true;
-    }
-    matches!(
-        payload.get("runtime_state").and_then(Value::as_str).unwrap_or("").to_ascii_lowercase().as_str(),
-        "ready" | "connected" | "live"
-    )
-}
-
-#[derive(Debug, Clone)]
-struct ControlPlaneObservation {
-    state: String,
-    reason: String,
-    consecutive_failures: u32,
-}
-
-impl Default for ControlPlaneObservation {
-    fn default() -> Self {
-        Self { state: "unknown".into(), reason: String::new(), consecutive_failures: 0 }
-    }
-}
-
-#[derive(Debug, Clone)]
-struct RuntimeObservation {
-    state: String,
-    active: bool,
-    runtime_alive: bool,
-    payload: Option<Value>,
-    error: String,
-    control_plane: ControlPlaneObservation,
-    proxy_source: String,
-}
-
-fn runtime_proxy_source(payload: &Value) -> String {
-    let Some(log_path) = payload.pointer("/local/log/path").and_then(Value::as_str) else {
-        return String::new();
-    };
-    let tail = monitor_status::read_history_tail(Path::new(log_path), 512 * 1024);
-    let mut instance_id: Option<String> = None;
-    for line in tail.lines().rev() {
-        let Ok(event) = serde_json::from_str::<Value>(line) else { continue; };
-        if event.get("component").and_then(Value::as_str) != Some("controlplane") {
-            continue;
-        }
-        let current_id = event.get("client_instance_id").and_then(Value::as_str).unwrap_or("");
-        if instance_id.is_none() && !current_id.is_empty() {
-            instance_id = Some(current_id.to_string());
-        }
-        if let Some(expected) = instance_id.as_deref() {
-            if !current_id.is_empty() && current_id != expected {
-                continue;
-            }
-        }
-        if event.get("msg").and_then(Value::as_str) == Some("control-plane route resolved") {
-            return event.get("proxy_source")
-                .and_then(Value::as_str)
-                .unwrap_or("unknown")
-                .to_string();
-        }
-    }
-    String::new()
-}
-
-fn control_plane_observation(payload: &Value) -> ControlPlaneObservation {
-    let mut fallback = ControlPlaneObservation::default();
-    if let Some(value) = control_plane_health_value(payload) {
-        match value {
-            Value::String(text) => {
-                fallback.state = text.to_ascii_lowercase();
-            }
-            Value::Bool(ok) => {
-                fallback.state = if *ok { "healthy" } else { "down" }.into();
-            }
-            Value::Object(object) => {
-                fallback.state = object.get("state")
-                    .and_then(Value::as_str)
-                    .or_else(|| object.get("status").and_then(Value::as_str))
-                    .unwrap_or("unknown")
-                    .to_ascii_lowercase();
-                fallback.reason = object.get("reason")
-                    .and_then(Value::as_str)
-                    .unwrap_or("")
-                    .chars().take(300).collect();
-            }
-            _ => {}
-        }
-    }
-
-    let Some(log_path) = payload.pointer("/local/log/path").and_then(Value::as_str) else {
-        return fallback;
-    };
-    let tail = monitor_status::read_history_tail(Path::new(log_path), 512 * 1024);
-    if tail.is_empty() {
-        return fallback;
-    }
-
-    let mut instance_id: Option<String> = None;
-    let mut failures = 0u32;
-    let mut reason = String::new();
-    let mut saw_start = false;
-
-    for line in tail.lines().rev() {
-        let Ok(event) = serde_json::from_str::<Value>(line) else { continue; };
-        if event.get("component").and_then(Value::as_str) != Some("controlplane") {
-            continue;
-        }
-        let current_id = event.get("client_instance_id").and_then(Value::as_str).unwrap_or("");
-        if instance_id.is_none() && !current_id.is_empty() {
-            instance_id = Some(current_id.to_string());
-        }
-        if let Some(expected) = instance_id.as_deref() {
-            if !current_id.is_empty() && current_id != expected {
-                continue;
-            }
-        }
-        let message = event.get("msg").and_then(Value::as_str).unwrap_or("");
-        match message {
-            "poll failed; backing off" | "poll timed out; backing off" => {
-                failures = failures.saturating_add(1);
-                if reason.is_empty() {
-                    reason = event.get("error").and_then(Value::as_str)
-                        .unwrap_or(message)
-                        .chars().take(300).collect();
-                }
-            }
-            "poller recovered; polling operational" | "tunnel metadata fetched" => {
-                if failures == 0 {
-                    return ControlPlaneObservation {
-                        state: "healthy".into(),
-                        reason: String::new(),
-                        consecutive_failures: 0,
-                    };
-                }
-                break;
-            }
-            "starting control-plane poller" | "poller started" => {
-                saw_start = true;
-                if failures == 0 { break; }
-            }
-            _ => {}
-        }
-    }
-
-    if failures >= 3 {
-        return ControlPlaneObservation {
-            state: "down".into(),
-            reason,
-            consecutive_failures: failures,
-        };
-    }
-    if failures > 0 {
-        return ControlPlaneObservation {
-            state: "suspect".into(),
-            reason,
-            consecutive_failures: failures,
-        };
-    }
-    if saw_start && fallback.state == "unknown" {
-        fallback.state = "starting".into();
-    }
-    fallback
-}
-
-fn runtime_status(app: &tauri::AppHandle, paths: &RuntimePaths) -> RuntimeObservation {
-    let args = vec!["runtimes".into(), "status".into(), RUNTIME_ALIAS.into(), "--json".into()];
-    match run_tunnel(app, paths, &args, None) {
-        Ok(output) if output.status.success() => {
-            let Some(parsed) = parse_json_output(&output) else {
-                let text = output_text(&output);
-                let error = if text.is_empty() {
-                    "Tunnel 状态返回为空或不是有效 JSON。".to_string()
-                } else {
-                    format!("Tunnel 状态返回不是有效 JSON：{text}")
-                };
-                return RuntimeObservation {
-                    state: "error".into(),
-                    active: false,
-                    runtime_alive: false,
-                    payload: None,
-                    error,
-                    control_plane: ControlPlaneObservation::default(),
-                    proxy_source: String::new(),
-                };
-            };
-            let control_plane = control_plane_observation(&parsed);
-            let proxy_source = runtime_proxy_source(&parsed);
-            let base_active = runtime_payload_active(&parsed);
-            let active = base_active && !matches!(control_plane.state.as_str(), "down" | "suspect" | "starting");
-            let runtime_alive = runtime_payload_alive(&parsed);
-            let state = parsed
-                .get("runtime_state")
-                .and_then(Value::as_str)
-                .map(str::to_string)
-                .unwrap_or_else(|| if active { "ready".into() } else { "unknown".into() });
-            RuntimeObservation {
-                state,
-                active,
-                runtime_alive,
-                payload: Some(parsed),
-                error: String::new(),
-                control_plane,
-                proxy_source,
-            }
-        }
-        Ok(output) => {
-            let text = output_text(&output);
-            if runtime_not_running(&text) {
-                RuntimeObservation {
-                    state: "stopped".into(),
-                    active: false,
-                    runtime_alive: false,
-                    payload: None,
-                    error: String::new(),
-                    control_plane: ControlPlaneObservation::default(),
-                    proxy_source: String::new(),
-                }
-            } else {
-                RuntimeObservation {
-                    state: "error".into(),
-                    active: false,
-                    runtime_alive: false,
-                    payload: None,
-                    error: text,
-                    control_plane: ControlPlaneObservation::default(),
-                    proxy_source: String::new(),
-                }
-            }
-        }
-        Err(error) => RuntimeObservation {
-            state: "error".into(),
-            active: false,
-            runtime_alive: false,
-            payload: None,
-            error,
-            control_plane: ControlPlaneObservation::default(),
-            proxy_source: String::new(),
-        },
-    }
-}
-
-fn update_runtime_snapshot(
-    state: &AppState,
-    observation: &RuntimeObservation,
-    desired_connected: bool,
-    settings: &Settings,
-) {
-    if let Ok(mut snapshot) = state.runtime_snapshot.lock() {
-        let next = monitor_status::project_runtime_snapshot(
-            &snapshot,
-            observation,
-            desired_connected,
-            settings,
-            true,
-        );
-        *snapshot = next;
-    }
-}
-
-fn reconnect_delay_secs(attempt: u32) -> u64 {
-    match attempt {
-        0 | 1 => 2,
-        2 => 5,
-        3 => 10,
-        4 => 20,
-        _ => 30,
-    }
-}
-
-fn set_recovery_status(
-    state: &AppState,
-    phase: &str,
-    next_reconnect_at: u64,
-    last_error: impl Into<String>,
-) {
-    if let Ok(mut recovery) = state.recovery_status.lock() {
-        recovery.phase = phase.to_string();
-        recovery.next_reconnect_at = next_reconnect_at;
-        recovery.last_error = last_error.into();
-    }
-}
-
-fn recovery_status(state: &AppState) -> TunnelRecoveryStatus {
-    state
-        .recovery_status
-        .lock()
-        .map(|value| value.clone())
-        .unwrap_or_default()
-}
-
-fn reconnect_capability(
-    app: &tauri::AppHandle,
-    state: &AppState,
-    settings: &Settings,
-) -> (bool, String) {
-    if !settings.connection_intent
-        || !state.desired_connected.load(Ordering::SeqCst)
-    {
-        return (false, "manually_stopped".into());
-    }
-    if settings.tunnel_id.trim().is_empty() {
-        return (false, "tunnel_not_configured".into());
-    }
-    if state.reconnecting.load(Ordering::SeqCst)
-        || state.monitor_control.reconnect_running.load(Ordering::SeqCst)
-    {
-        return (false, "operation_busy".into());
-    }
-    let session_key_available = state
-        .session_runtime_key
-        .lock()
-        .map(|value| value.as_ref().is_some_and(|key| !key.trim().is_empty()))
-        .unwrap_or(false);
-    if session_key_available || runtime_key_saved(app) {
-        return (true, String::new());
-    }
-    (false, "runtime_key_unavailable".into())
-}
-
-fn ensure_runtime_start_intent(
-    state: &AppState,
-    settings: &Settings,
-    required: bool,
-) -> Result<(), String> {
-    if required
-        && (!settings.connection_intent
-            || !state.desired_connected.load(Ordering::SeqCst))
-    {
-        return Err("Tunnel 连接意图已取消，拒绝重新启动。".into());
-    }
-    Ok(())
-}
-
-fn start_runtime_connection(
-    app: &tauri::AppHandle,
-    state: &AppState,
-    tunnel_id: &str,
-    key: &str,
-    reconnect: bool,
-    require_connection_intent: bool,
-) -> Result<(), String> {
-    let _operation = state.runtime_operation.lock().map_err(|_| "Tunnel 操作锁已损坏。".to_string())?;
-    let current_settings = load_settings(app);
-    ensure_runtime_start_intent(
-        state,
-        &current_settings,
-        require_connection_intent,
-    )?;
-    if reconnect && !current_settings.auto_reconnect {
-        return Ok(());
-    }
-
-    let paths = runtime_paths(app)?;
-    let profiles = state_dir(app)?.join("tunnel-profiles");
-    let dc_home = desktop_commander_home(app)?;
-    fs::create_dir_all(&profiles).map_err(|e| format!("创建 Tunnel profile 目录失败：{e}"))?;
-    fs::create_dir_all(&dc_home).map_err(|e| format!("创建 Desktop Commander 数据目录失败：{e}"))?;
-
-    match stop_runtime(app, None) {
-        Ok(_) => {}
-        Err(error) if reconnect => push_log(state, format!("自动重连清理旧 runtime 时继续执行：{error}")),
-        Err(error) => return Err(error),
-    }
-
-    let args = vec![
-        "runtimes".into(), "connect".into(), "--alias".into(), RUNTIME_ALIAS.into(),
-        "--tunnel-id".into(), tunnel_id.to_string(),
-        "--runtime-api-key".into(), "env:CHATX_TUNNEL_RUNTIME_KEY".into(),
-        "--profile-dir".into(), profiles.to_string_lossy().into_owned(),
-        "--mcp-command".into(), mcp_command(&paths, &dc_home), "--json".into()
-    ];
-    push_log(state, if reconnect {
-        "正在自动重连 Secure MCP Tunnel → Desktop Commander"
-    } else {
-        "正在启动 Secure MCP Tunnel → Desktop Commander"
-    });
-    let output = run_tunnel(app, &paths, &args, Some(key))?;
-    let text = output_text(&output);
-    push_log(state, format!("Tunnel connect: {text}"));
-    if !output.status.success() { return Err(format!("启动 Tunnel 失败：{text}")); }
-    Ok(())
-}
-
-fn restore_connection_intent_if_active(app: &tauri::AppHandle, state: &AppState) {
-    let mut settings = load_settings(app);
-    if settings.tunnel_id.trim().is_empty() {
-        return;
-    }
-    let Ok(paths) = runtime_paths(app) else { return; };
-    let observation = runtime_status(app, &paths);
-
-    // Upgrade compatibility: older settings did not persist connection intent.
-    // If a runtime is already active, preserve the user's existing connection.
-    if observation.active && !settings.connection_intent {
-        settings.connection_intent = true;
-        let _ = save_settings(app, &settings);
-    }
-
-    state.desired_connected.store(settings.connection_intent, Ordering::SeqCst);
-    update_runtime_snapshot(
-        state,
-        &observation,
-        settings.connection_intent,
-        &settings,
-    );
-    if !settings.connection_intent {
-        return;
-    }
-
-    if runtime_key_saved(app) {
-        if let Ok(key) = load_runtime_key(app, "") {
-            if let Ok(mut session_key) = state.session_runtime_key.lock() {
-                *session_key = Some(key);
-            }
-        }
-    }
-    push_log(
-        state,
-        if observation.active {
-            "检测到现有 Tunnel runtime，已恢复连接意图"
-        } else {
-            "已恢复持久化 Tunnel 连接意图，等待健康监测/自动重连"
-        },
-    );
-}
-
-fn wait_for_runtime_recovery(
-    app: &tauri::AppHandle,
-    state: &AppState,
-    paths: &RuntimePaths,
-    require_auto_reconnect: bool,
-) -> bool {
-    let deadline = Instant::now() + Duration::from_secs(15);
-    loop {
-        let settings = load_settings(app);
-        let desired_connected = state.desired_connected.load(Ordering::SeqCst);
-        if !desired_connected
-            || (require_auto_reconnect && !settings.auto_reconnect)
-        {
-            return false;
-        }
-
-        let observation = runtime_status(app, paths);
-        update_runtime_snapshot(
-            state,
-            &observation,
-            desired_connected,
-            &settings,
-        );
-        if observation.active {
-            return true;
-        }
-        if Instant::now() >= deadline {
-            return false;
-        }
-        thread::sleep(Duration::from_secs(2));
-    }
-}
-
-fn start_reconnect_monitor(app: tauri::AppHandle) {
-    thread::spawn(move || {
-        let mut inactive_checks = 0u32;
-        let mut next_reconnect_at: Option<Instant> = None;
-        loop {
-            thread::sleep(Duration::from_secs(4));
-            let state = app.state::<AppState>();
-            if state.quitting.load(Ordering::SeqCst) { break; }
-
-            let settings = load_settings(&app);
-            let desired_connected = state.desired_connected.load(Ordering::SeqCst);
-            let paths = match runtime_paths(&app) {
-                Ok(paths) => paths,
-                Err(error) => {
-                    set_recovery_status(state.inner(), "failed", 0, error.clone());
-                    push_log(&state, format!("Tunnel 健康检查失败：{error}"));
-                    continue;
-                }
-            };
-            let observation = runtime_status(&app, &paths);
-            update_runtime_snapshot(
-                state.inner(),
-                &observation,
-                desired_connected,
-                &settings,
-            );
-            if observation.active {
-                if state.reconnecting.swap(false, Ordering::SeqCst) {
-                    push_log(&state, "Secure MCP Tunnel 已恢复连接");
-                }
-                set_recovery_status(state.inner(), "idle", 0, "");
-                state.reconnect_attempt.store(0, Ordering::SeqCst);
-                inactive_checks = 0;
-                next_reconnect_at = None;
-                continue;
-            }
-
-            if !desired_connected {
-                inactive_checks = 0;
-                next_reconnect_at = None;
-                set_recovery_status(state.inner(), "stopped", 0, "");
-                state.reconnecting.store(false, Ordering::SeqCst);
-                state.reconnect_attempt.store(0, Ordering::SeqCst);
-                continue;
-            }
-            if !settings.auto_reconnect {
-                inactive_checks = 0;
-                next_reconnect_at = None;
-                set_recovery_status(state.inner(), "disabled", 0, "");
-                state.reconnecting.store(false, Ordering::SeqCst);
-                state.reconnect_attempt.store(0, Ordering::SeqCst);
-                continue;
-            }
-
-            if state.reconnecting.load(Ordering::SeqCst) {
-                continue;
-            }
-            inactive_checks = inactive_checks.saturating_add(1);
-            let failure_threshold = if observation.control_plane.state == "down" {
-                1
-            } else if observation.runtime_alive {
-                8
-            } else {
-                2
-            };
-            if inactive_checks < failure_threshold {
-                set_recovery_status(state.inner(), "detecting", 0, "");
-                continue;
-            }
-            if next_reconnect_at.is_some_and(|next| Instant::now() < next) {
-                continue;
-            }
-            if state.reconnecting.swap(true, Ordering::SeqCst) {
-                continue;
-            }
-
-            let attempt = state.reconnect_attempt.fetch_add(1, Ordering::SeqCst) + 1;
-            let delay = reconnect_delay_secs(attempt);
-            let key = state.session_runtime_key.lock().ok().and_then(|value| value.clone());
-            let Some(key) = key else {
-                next_reconnect_at = Some(Instant::now() + Duration::from_secs(delay));
-                let next_at = timestamp_ms().saturating_add(delay.saturating_mul(1000));
-                set_recovery_status(
-                    state.inner(),
-                    "blocked",
-                    next_at,
-                    "Desktop 当前没有可用于自动重连的 Runtime Key。",
-                );
-                push_log(
-                    &state,
-                    format!(
-                        "Tunnel 已断开，但本次会话没有可用于自动重连的 Runtime Key；{delay} 秒后继续检查"
-                    ),
-                );
-                state.reconnecting.store(false, Ordering::SeqCst);
-                continue;
-            };
-
-            let detail = if !observation.error.is_empty() {
-                observation.error.clone()
-            } else if !observation.control_plane.reason.is_empty() {
-                format!("control-plane {}: {}", observation.control_plane.state, observation.control_plane.reason)
-            } else {
-                observation.state.clone()
-            };
-            set_recovery_status(state.inner(), "reconnecting", 0, "");
-            push_log(&state, format!("检测到 Tunnel 掉线（{detail}），开始第 {attempt} 次自动重连"));
-            if !state.desired_connected.load(Ordering::SeqCst) || !load_settings(&app).auto_reconnect {
-                state.reconnecting.store(false, Ordering::SeqCst);
-                continue;
-            }
-
-            match start_runtime_connection(&app, state.inner(), &settings.tunnel_id, &key, true, true) {
-                Ok(()) if state.desired_connected.load(Ordering::SeqCst) => {
-                    set_recovery_status(state.inner(), "verifying", 0, "");
-                    push_log(
-                        &state,
-                        format!("第 {attempt} 次自动重连命令已完成，正在验证 Tunnel Ready"),
-                    );
-                    if wait_for_runtime_recovery(&app, state.inner(), &paths, true) {
-                        set_recovery_status(state.inner(), "idle", 0, "");
-                        push_log(&state, format!("第 {attempt} 次自动重连已确认 Tunnel 恢复"));
-                        state.reconnect_attempt.store(0, Ordering::SeqCst);
-                        inactive_checks = 0;
-                        next_reconnect_at = None;
-                    } else if state.desired_connected.load(Ordering::SeqCst)
-                        && load_settings(&app).auto_reconnect
-                    {
-                        next_reconnect_at = Some(Instant::now() + Duration::from_secs(delay));
-                        let next_at = timestamp_ms().saturating_add(delay.saturating_mul(1000));
-                        let error = "重连命令已完成，但 15 秒内未恢复 Tunnel Ready。";
-                        set_recovery_status(state.inner(), "backoff", next_at, error);
-                        push_log(
-                            &state,
-                            format!(
-                                "第 {attempt} 次自动重连命令已完成，但 15 秒内未恢复 Ready；{delay} 秒后重试"
-                            ),
-                        );
-                    } else {
-                        next_reconnect_at = None;
-                    }
-                }
-                Ok(()) => {
-                    next_reconnect_at = None;
-                }
-                Err(error) => {
-                    next_reconnect_at = Some(Instant::now() + Duration::from_secs(delay));
-                    let next_at = timestamp_ms().saturating_add(delay.saturating_mul(1000));
-                    set_recovery_status(state.inner(), "backoff", next_at, error.clone());
-                    push_log(
-                        &state,
-                        format!("第 {attempt} 次自动重连失败：{error}；{delay} 秒后重试"),
-                    );
-                }
-            }
-            state.reconnecting.store(false, Ordering::SeqCst);
-        }
-    });
 }
 
 fn manifest(paths: &RuntimePaths) -> Value {
@@ -2042,11 +1318,11 @@ fn get_mcp_live_status(app: tauri::AppHandle) -> Result<Value, String> {
     let activity = monitor_activity_path(&app).ok()
         .and_then(|path| monitor::read_activity_snapshot(&path));
     let status = monitor::evaluate_activity(activity.as_ref(), now_ms);
-    let recent_calls = monitor_status::recent_calls(&app, activity.as_ref(), now_ms);
+    let in_flight_calls = monitor_status::in_flight_calls(activity.as_ref(), now_ms);
     Ok(json!({
         "serverTime": now_ms,
         "status": status,
-        "recentCalls": recent_calls
+        "recentCalls": in_flight_calls
     }))
 }
 
@@ -2952,10 +2228,60 @@ fn open_external(url: String) -> Result<(), String> {
     open::that(url).map_err(|e| format!("打开浏览器失败：{e}"))
 }
 
+fn should_prevent_exit(quitting: bool, code: Option<i32>) -> bool {
+    !quitting && code.is_none()
+}
+
+fn create_main_window(app: &tauri::AppHandle) -> Result<tauri::WebviewWindow, String> {
+    let config = app
+        .config()
+        .app
+        .windows
+        .iter()
+        .find(|config| config.label == "main")
+        .cloned()
+        .ok_or_else(|| "找不到 main 窗口配置。".to_string())?;
+    tauri::WebviewWindowBuilder::from_config(app, &config)
+        .and_then(|builder| builder.build())
+        .map_err(|error| format!("重建 ChatX 主窗口失败：{error}"))
+}
+
 fn show_main_window(app: &tauri::AppHandle) {
-    if let Some(window) = app.get_webview_window("main") {
-        let _ = window.show(); let _ = window.unminimize(); let _ = window.set_focus();
+    let state = app.state::<AppState>();
+    state.main_window_generation.fetch_add(1, Ordering::SeqCst);
+    let window = app
+        .get_webview_window("main")
+        .or_else(|| create_main_window(app).map_err(|error| eprintln!("{error}")).ok());
+    if let Some(window) = window {
+        let _ = window.show();
+        let _ = window.unminimize();
+        let _ = window.set_focus();
     }
+}
+
+fn schedule_main_window_reclaim(app: tauri::AppHandle) {
+    let generation = app
+        .state::<AppState>()
+        .main_window_generation
+        .fetch_add(1, Ordering::SeqCst)
+        .saturating_add(1);
+    std::thread::spawn(move || {
+        std::thread::sleep(MAIN_WINDOW_RECLAIM_DELAY);
+        let ui_app = app.clone();
+        let _ = app.run_on_main_thread(move || {
+            let state = ui_app.state::<AppState>();
+            if state.quitting.load(Ordering::SeqCst)
+                || state.main_window_generation.load(Ordering::SeqCst) != generation
+            {
+                return;
+            }
+            if let Some(window) = ui_app.get_webview_window("main") {
+                if window.is_visible().ok() == Some(false) {
+                    let _ = window.destroy();
+                }
+            }
+        });
+    });
 }
 
 fn stop_on_exit(app: &tauri::AppHandle) {
@@ -3010,8 +2336,13 @@ fn main() {
         .on_window_event(|window, event| {
             if window.label() == "main" {
                 if let WindowEvent::CloseRequested { api, .. } = event {
-                    let quitting = window.app_handle().state::<AppState>().quitting.load(Ordering::SeqCst);
-                    if !quitting { api.prevent_close(); let _ = window.hide(); }
+                    let app = window.app_handle();
+                    let quitting = app.state::<AppState>().quitting.load(Ordering::SeqCst);
+                    if !quitting {
+                        api.prevent_close();
+                        let _ = window.hide();
+                        schedule_main_window_reclaim(app.clone());
+                    }
                 }
             }
         })
@@ -3062,5 +2393,17 @@ fn main() {
         }
     }
     start_reconnect_monitor(app.handle().clone());
-    app.run(|app_handle, event| { if matches!(event, tauri::RunEvent::Exit) { stop_on_exit(app_handle); } });
+    app.run(|app_handle, event| match event {
+        tauri::RunEvent::ExitRequested { code, api, .. } => {
+            let quitting = app_handle
+                .state::<AppState>()
+                .quitting
+                .load(Ordering::SeqCst);
+            if should_prevent_exit(quitting, code) {
+                api.prevent_exit();
+            }
+        }
+        tauri::RunEvent::Exit => stop_on_exit(app_handle),
+        _ => {}
+    });
 }

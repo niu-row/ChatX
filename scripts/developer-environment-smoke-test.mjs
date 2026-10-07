@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { spawnSync } from 'node:child_process';
 import { Client } from '@modelcontextprotocol/client';
 import { StdioClientTransport } from '@modelcontextprotocol/client/stdio';
 
@@ -61,6 +62,8 @@ if (process.platform === 'win32') {
   specs.push(run('git', locate('git.exe'), ['--version']));
   specs.push(run('npm', locate('npm.cmd'), ['--version']));
   specs.push(run('cargo', locate('cargo.exe'), ['--version']));
+  specs.push(run('java', locate('java.exe'), ['-version']));
+  specs.push(run('adb', locate('adb.exe'), ['version']));
 } else {
   specs.push(run('ssh', locate('ssh'), ['-V']));
   specs.push(run('git', locate('git'), ['--version']));
@@ -73,6 +76,7 @@ console.log(JSON.stringify({
     USERPROFILE: process.env.USERPROFILE,
     ProgramData: process.env.ProgramData,
     COMPUTERNAME: process.env.COMPUTERNAME,
+    PATH: process.env.PATH,
   },
   specs,
 }));
@@ -83,6 +87,20 @@ const inheritedNames = process.platform === 'win32'
   : ['HOME', 'LOGNAME', 'PATH', 'SHELL', 'TERM', 'USER'];
 const transportEnv = Object.fromEntries(inheritedNames.map((name) => [name, process.env[name]]).filter(([, value]) => typeof value === 'string'));
 transportEnv.CHATX_REAL_HOME = realHome;
+if (process.platform === 'win32') {
+  const systemRoot = process.env.SystemRoot || process.env.WINDIR || 'C:\\Windows';
+  transportEnv.PATH = path.join(systemRoot, 'System32');
+}
+
+const expectedWindowsTools = process.platform === 'win32'
+  ? [
+      ['git.exe', 'git'],
+      ['npm.cmd', 'npm'],
+      ['cargo.exe', 'cargo'],
+      ['java.exe', 'java'],
+      ['adb.exe', 'adb'],
+    ].filter(([name]) => spawnSync('where.exe', [name], { windowsHide: true }).status === 0)
+  : [];
 
 const client = new Client({ name: 'chatx-developer-environment-smoke', version: '1.0.0' });
 const transport = new StdioClientTransport({ command: node, args: [launcher, isolatedHome, entry, '--no-onboarding'], env: transportEnv });
@@ -108,6 +126,12 @@ try {
   }
   const available = report.specs.filter((spec) => spec.available);
   assert.ok(available.length > 0, 'no developer tools were available for environment smoke testing');
+  for (const [, label] of expectedWindowsTools) {
+    assert.ok(
+      report.specs.some((spec) => spec.label === label && spec.available),
+      `${label} was available on the host but missing after ChatX host PATH reconstruction`,
+    );
+  }
   for (const spec of available) {
     assert.equal(spec.status, 0, `${spec.label} failed in ChatX developer environment: ${JSON.stringify(spec)}`);
     assert.ok(spec.output, `${spec.label} produced no version output`);
