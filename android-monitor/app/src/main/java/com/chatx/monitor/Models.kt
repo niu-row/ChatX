@@ -247,7 +247,7 @@ private fun parseEndpoints(array: JSONArray): List<MonitorEndpoint> = buildList 
 }
 
 fun MonitorEndpoint.isSupportedDirectRoute(): Boolean {
-    if (!url.startsWith("wss://")) return false
+    if (!url.startsWith("wss://") || isVirtualInterfaceName(interfaceName)) return false
     val address = runCatching {
         val host = URI(url).host ?: return@runCatching null
         InetAddress.getByName(host)
@@ -267,6 +267,18 @@ fun MonitorEndpoint.isSupportedDirectRoute(): Boolean {
         }
         else -> false
     }
+}
+
+private fun isVirtualInterfaceName(name: String): Boolean {
+    val normalized = name.lowercase()
+    return listOf(
+        "vethernet",
+        "wsl",
+        "docker",
+        "virtualbox host-only",
+        "vmware network adapter",
+        "hyper-v",
+    ).any(normalized::contains)
 }
 
 private fun MonitorEndpoint.toJson(): JSONObject = JSONObject().apply {

@@ -20,6 +20,13 @@ class MonitorRoutePlannerTest {
                 MonitorEndpoint(
                     kind = "lan",
                     family = "ipv4",
+                    interfaceName = "vEthernet (WSL)",
+                    host = "172.29.32.1",
+                    url = "wss://172.29.32.1:18432/v1/ws/monitor",
+                ),
+                MonitorEndpoint(
+                    kind = "lan",
+                    family = "ipv4",
                     interfaceName = "Wi-Fi",
                     host = "192.168.1.4",
                     url = "wss://192.168.1.4:18432/v1/ws/monitor",

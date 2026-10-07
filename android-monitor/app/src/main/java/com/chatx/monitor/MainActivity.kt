@@ -386,7 +386,8 @@ class MainActivity : Activity() {
                     ui.margin(top = 7),
                 )
             }
-            val endpoint = root.optString("endpointUrl", "")
+            val endpoint = currentEndpointUrl()
+                ?: root.optString("endpointUrl", "")
             hero.addView(
                 ui.muted("当前路径  ${endpointLabel(endpoint)}"),
                 ui.margin(top = 12),
@@ -753,41 +754,42 @@ class MainActivity : Activity() {
                         ui.margin(height = 1, top = 6, bottom = 6),
                     )
                 }
-                val eventRow = ui.row().apply {
-                    minimumHeight = ui.dp(48)
+                val eventItem = ui.column().apply {
+                    minimumHeight = ui.dp(52)
                 }
-                val eventCopy = ui.column()
-                eventCopy.addView(
+                val eventTop = ui.row()
+                eventTop.addView(
                     ui.body(event.title, 14f).apply {
                         setSingleLine(true)
                         ellipsize = TextUtils.TruncateAt.END
                     },
+                    ui.margin(width = 0, weight = 1f, right = 8),
                 )
-                eventCopy.addView(
-                    ui.muted(
-                        "${event.message} · ${formatTime(event.at)}",
-                        12f,
-                    ).apply {
-                        setSingleLine(true)
-                        ellipsize = TextUtils.TruncateAt.END
-                    },
-                    ui.margin(top = 3),
-                )
-                eventRow.addView(
-                    eventCopy,
-                    ui.margin(width = 0, weight = 1f),
-                )
-                eventRow.addView(
+                eventTop.addView(
                     ui.pill(
                         eventTypeLabel(event.type),
                         eventTone(event.type),
                     ),
-                    ui.margin(
-                        width = ViewGroup.LayoutParams.WRAP_CONTENT,
-                        left = 8,
-                    ),
+                    ui.margin(width = ViewGroup.LayoutParams.WRAP_CONTENT),
                 )
-                history.addView(eventRow)
+                eventItem.addView(eventTop)
+
+                val eventMeta = ui.row()
+                eventMeta.addView(
+                    ui.muted(event.message, 12f).apply {
+                        setSingleLine(true)
+                        ellipsize = TextUtils.TruncateAt.END
+                    },
+                    ui.margin(width = 0, weight = 1f, right = 10),
+                )
+                eventMeta.addView(
+                    ui.muted(formatTime(event.at), 12f).apply {
+                        setSingleLine(true)
+                    },
+                    ui.margin(width = ViewGroup.LayoutParams.WRAP_CONTENT),
+                )
+                eventItem.addView(eventMeta, ui.margin(top = 4))
+                history.addView(eventItem)
             }
         }
         pageContent.addView(history, ui.margin(bottom = 14))
@@ -1615,13 +1617,15 @@ class MainActivity : Activity() {
         }
 
     private fun currentEndpointUrl(): String? {
+        store.getLastEndpoint()
+            ?.takeIf { it.isNotBlank() }
+            ?.let { return it }
         val root = latestStatusJson
             ?.let { runCatching { JSONObject(it) }.getOrNull() }
         return root
             ?.takeIf { it.optBoolean("reachable", false) }
             ?.optString("endpointUrl")
             ?.takeIf { it.isNotBlank() }
-            ?: store.getLastEndpoint()
     }
 
     private fun endpointLabel(url: String): String {

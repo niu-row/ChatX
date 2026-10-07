@@ -23,7 +23,10 @@ pub fn discover_monitor_endpoints(port: u16) -> Vec<MonitorEndpoint> {
     };
 
     for interface in interfaces {
-        if interface.is_loopback() || interface.is_link_local() {
+        if interface.is_loopback()
+            || interface.is_link_local()
+            || is_virtual_interface_name(&interface.name)
+        {
             continue;
         }
         let ip = interface.ip();
@@ -69,6 +72,20 @@ fn endpoint_rank(kind: &str) -> u8 {
     }
 }
 
+fn is_virtual_interface_name(name: &str) -> bool {
+    let normalized = name.to_ascii_lowercase();
+    [
+        "vethernet",
+        "wsl",
+        "docker",
+        "virtualbox host-only",
+        "vmware network adapter",
+        "hyper-v",
+    ]
+    .iter()
+    .any(|marker| normalized.contains(marker))
+}
+
 fn classify_ip(ip: IpAddr) -> Option<&'static str> {
     match ip {
         IpAddr::V4(ip) if ip.is_private() => Some("lan"),
@@ -93,6 +110,14 @@ mod tests {
         net::Ipv4Addr,
         str::FromStr,
     };
+
+    #[test]
+    fn ignores_virtual_host_only_interfaces() {
+        assert!(is_virtual_interface_name("vEthernet (WSL)"));
+        assert!(is_virtual_interface_name("VMware Network Adapter VMnet8"));
+        assert!(!is_virtual_interface_name("以太网"));
+        assert!(!is_virtual_interface_name("Wi-Fi"));
+    }
 
     #[test]
     fn keeps_private_lan_and_ignores_non_lan_ipv4() {

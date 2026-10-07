@@ -29,6 +29,7 @@ class MonitorConnectionManager(
     private val config: PairingConfig,
     private val listener: Listener,
     private val dynamicRoutes: Boolean = true,
+    private val persistActiveRoute: Boolean = true,
 ) : Closeable {
     interface Listener {
         fun onTransportState(state: MonitorTransportState)
@@ -59,10 +60,16 @@ class MonitorConnectionManager(
     private val activeCandidate = AtomicReference<MonitorRouteCandidate?>(null)
     private var pollFuture: ScheduledFuture<*>? = null
     @Volatile private var consecutiveFailures = 0
+    private var activeRouteFailures = 0
+    private var preferredRecoverySuccesses = 0
+    private var lastPreferredProbeAt = 0L
 
     fun start() {
         if (!stopped.compareAndSet(true, false)) return
         consecutiveFailures = 0
+        activeRouteFailures = 0
+        preferredRecoverySuccesses = 0
+        lastPreferredProbeAt = 0L
         pollFuture = scheduler.scheduleWithFixedDelay(
             { pollCycle() },
             0,
@@ -152,43 +159,153 @@ class MonitorConnectionManager(
             listener.onTransportState(MonitorTransportState(phase = "connecting"))
         }
 
-        val ordered = orderedCandidates(candidates)
+        if (persistActiveRoute && store.getRoutePolicy() == RoutePolicy.AUTO) {
+            pollAutoStableRoute(candidates)
+        } else {
+            pollOrderedCandidates(orderedCandidates(candidates))
+        }
+    }
+
+    private fun pollAutoStableRoute(candidates: List<MonitorRouteCandidate>) {
+        val remembered = store.getLastEndpoint()
+        val stable = activeCandidate.get()
+            ?.takeIf { current ->
+                candidates.any { it.snapshotUrl == current.snapshotUrl }
+            }
+            ?: candidates.firstOrNull { it.snapshotUrl == remembered }
+                ?.also(activeCandidate::set)
+
+        if (stable == null) {
+            pollOrderedCandidates(orderedCandidates(candidates))
+            return
+        }
+
+        val preferred = MonitorRoutePlanner.ordered(
+            values = candidates,
+            policy = RoutePolicy.LAN_FIRST,
+            lastEndpoint = null,
+            selector = null,
+        ).firstOrNull()
+        var preferredSnapshot: FetchResult.Snapshot? = null
+        val now = System.currentTimeMillis()
+        if (
+            preferred != null &&
+            preferred.snapshotUrl != stable.snapshotUrl &&
+            now - lastPreferredProbeAt >= AUTO_RECOVERY_PROBE_INTERVAL_MS
+        ) {
+            lastPreferredProbeAt = now
+            when (val result = fetchCandidate(preferred)) {
+                is FetchResult.Snapshot -> {
+                    preferredRecoverySuccesses += 1
+                    preferredSnapshot = result
+                    if (preferredRecoverySuccesses >= AUTO_RECOVERY_SUCCESS_THRESHOLD) {
+                        publishConnected(preferred, result.value)
+                        preferredRecoverySuccesses = 0
+                        return
+                    }
+                }
+                else -> preferredRecoverySuccesses = 0
+            }
+        }
+
+        when (val result = fetchCandidate(stable)) {
+            is FetchResult.Snapshot -> {
+                activeRouteFailures = 0
+                publishConnected(stable, result.value)
+            }
+            else -> {
+                activeRouteFailures += 1
+                if (preferred != null && preferredSnapshot != null) {
+                    publishConnected(preferred, preferredSnapshot.value)
+                    preferredRecoverySuccesses = 0
+                    return
+                }
+                if (activeRouteFailures < AUTO_FAILOVER_FAILURE_THRESHOLD) {
+                    publishFailure(fetchFailureMessage(result), false)
+                    return
+                }
+
+                val alternatives = MonitorRoutePlanner.ordered(
+                    values = candidates.filterNot {
+                        it.snapshotUrl == stable.snapshotUrl
+                    },
+                    policy = RoutePolicy.LAN_FIRST,
+                    lastEndpoint = null,
+                    selector = null,
+                )
+                if (pollOrderedCandidates(alternatives)) {
+                    preferredRecoverySuccesses = 0
+                    return
+                }
+            }
+        }
+    }
+
+    private fun pollOrderedCandidates(
+        ordered: List<MonitorRouteCandidate>,
+    ): Boolean {
         var offlineMessage: String? = null
         var failureMessage: String? = null
         for (candidate in ordered) {
             when (val result = fetchCandidate(candidate)) {
                 is FetchResult.Snapshot -> {
-                    consecutiveFailures = 0
-                    activeCandidate.set(candidate)
-                    store.setLastEndpoint(
-                        config.desktopId,
-                        config.deviceId,
-                        candidate.snapshotUrl,
-                    )
-                    listener.onTransportState(
-                        MonitorTransportState(
-                            phase = "connected",
-                            transportKind = candidate.kind,
-                            url = candidate.snapshotUrl,
-                            desktopOnline = true,
-                        ),
-                    )
-                    listener.onSnapshot(result.value)
-                    return
+                    publishConnected(candidate, result.value)
+                    return true
                 }
-                is FetchResult.Offline -> offlineMessage = offlineMessage ?: result.message
-                is FetchResult.Failure -> failureMessage = failureMessage ?: result.message
+                is FetchResult.Offline ->
+                    offlineMessage = offlineMessage ?: result.message
+                is FetchResult.Failure ->
+                    failureMessage = failureMessage ?: result.message
             }
         }
 
-        activeCandidate.set(null)
         publishFailure(
             offlineMessage ?: failureMessage ?: "Monitor HTTPS 请求失败。",
             offlineMessage != null && failureMessage == null,
         )
+        return false
     }
 
-    private fun publishFailure(message: String, definitelyOffline: Boolean) {
+    private fun publishConnected(
+        candidate: MonitorRouteCandidate,
+        snapshot: MonitorSnapshot,
+    ) {
+        val previousUrl = activeCandidate.get()?.snapshotUrl
+        consecutiveFailures = 0
+        activeRouteFailures = 0
+        activeCandidate.set(candidate)
+        if (previousUrl != null && previousUrl != candidate.snapshotUrl) {
+            preferredRecoverySuccesses = 0
+        }
+        if (persistActiveRoute) {
+            store.setLastEndpoint(
+                config.desktopId,
+                config.deviceId,
+                candidate.snapshotUrl,
+            )
+        }
+        listener.onTransportState(
+            MonitorTransportState(
+                phase = "connected",
+                transportKind = candidate.kind,
+                url = candidate.snapshotUrl,
+                desktopOnline = true,
+            ),
+        )
+        listener.onSnapshot(snapshot)
+    }
+
+    private fun fetchFailureMessage(result: FetchResult): String = when (result) {
+        is FetchResult.Offline -> result.message
+        is FetchResult.Failure -> result.message
+        is FetchResult.Snapshot -> "Monitor HTTPS 请求失败。"
+    }
+
+    private fun publishFailure(
+        message: String,
+        definitelyOffline: Boolean,
+        candidate: MonitorRouteCandidate? = activeCandidate.get(),
+    ) {
         consecutiveFailures += 1
         listener.onTransportState(
             MonitorTransportState(
@@ -200,6 +317,8 @@ class MonitorConnectionManager(
                 } else {
                     "degraded"
                 },
+                transportKind = candidate?.kind,
+                url = candidate?.snapshotUrl,
                 reconnectAttempt = consecutiveFailures,
                 error = message,
                 desktopOnline = if (definitelyOffline) false else null,
@@ -286,6 +405,10 @@ class MonitorConnectionManager(
         )
 
     companion object {
+        private const val AUTO_FAILOVER_FAILURE_THRESHOLD = 2
+        private const val AUTO_RECOVERY_SUCCESS_THRESHOLD = 2
+        private const val AUTO_RECOVERY_PROBE_INTERVAL_MS = 20_000L
+
         fun probeOnce(
             context: Context,
             config: PairingConfig,
@@ -355,6 +478,7 @@ class MonitorConnectionManager(
                     }
                 },
                 dynamicRoutes = false,
+                persistActiveRoute = false,
             )
             manager.start()
             val completed = try {

@@ -7,6 +7,8 @@ import android.os.SystemClock
 import java.io.Closeable
 import java.util.concurrent.Executors
 import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicInteger
+import java.util.concurrent.atomic.AtomicReference
 
 class MonitorActionController(
     context: Context,
@@ -36,44 +38,75 @@ class MonitorActionController(
     fun refresh(config: PairingConfig) {
         if (closed.get() || !refreshing.compareAndSet(false, true)) return
         notifyStateChanged()
+
+        val delivered = AtomicBoolean(false)
+        val controlDelivered = AtomicBoolean(false)
+        val completed = AtomicInteger(0)
+        val lastError = AtomicReference<String?>(null)
+        val publishLock = Any()
+
+        fun publish(json: String, fresh: Boolean) {
+            synchronized(publishLock) {
+                if (!fresh && controlDelivered.get()) return
+                if (fresh) controlDelivered.set(true)
+                delivered.set(true)
+                store.setLastSnapshotJson(
+                    config.desktopId,
+                    config.deviceId,
+                    json,
+                )
+                post {
+                    if (!fresh && controlDelivered.get()) return@post
+                    refreshing.set(false)
+                    listener.onSnapshot(json)
+                    listener.onStateChanged()
+                }
+            }
+        }
+
+        fun complete(error: String? = null) {
+            if (!error.isNullOrBlank()) lastError.set(error)
+            if (completed.incrementAndGet() == 2 && !delivered.get()) {
+                val json = StatusCodec.error(
+                    lastError.get() ?: "Monitor 刷新失败。",
+                )
+                store.setLastSnapshotJson(
+                    config.desktopId,
+                    config.deviceId,
+                    json,
+                )
+                post {
+                    refreshing.set(false)
+                    listener.onSnapshot(json)
+                    listener.onStateChanged()
+                }
+            }
+        }
+
         executor.execute {
-            var notice: String? = null
-            val controlAttempt = runCatching {
-                MonitorControlClient(
+            val attempt = runCatching {
+                StatusCodec.snapshot(
+                    MonitorRepository(appContext).fetchSnapshot(),
+                )
+            }
+            attempt.getOrNull()?.let { publish(it, fresh = false) }
+            complete(attempt.exceptionOrNull()?.message)
+        }
+
+        executor.execute {
+            val attempt = runCatching {
+                val result = MonitorControlClient(
                     appContext,
                     config,
-                ).execute("refresh_snapshot", timeoutSeconds = 4L)
+                ).execute("refresh_snapshot", timeoutSeconds = 3L)
+                if (!result.ok) {
+                    error(result.message ?: "Desktop 拒绝实时刷新请求。")
+                }
+                controlSnapshotJson(config, result)
+                    ?: error("实时刷新响应缺少 Snapshot。")
             }
-            val json = controlAttempt.fold(
-                onSuccess = { result ->
-                    val controlJson = if (result.ok) {
-                        controlSnapshotJson(config, result)
-                    } else {
-                        notice = result.message
-                            ?: "Desktop 拒绝刷新请求，已改用 HTTPS 刷新。"
-                        null
-                    }
-                    controlJson ?: fallbackSnapshotJson(
-                        if (result.ok) "刷新响应缺少 Snapshot。" else notice,
-                    )
-                },
-                onFailure = { controlError ->
-                    fallbackSnapshotJson(
-                        controlError.message ?: "控制通道刷新失败。",
-                    )
-                },
-            )
-            store.setLastSnapshotJson(
-                config.desktopId,
-                config.deviceId,
-                json,
-            )
-            post {
-                refreshing.set(false)
-                listener.onSnapshot(json)
-                listener.onStateChanged()
-                notice?.let(listener::onToast)
-            }
+            attempt.getOrNull()?.let { publish(it, fresh = true) }
+            complete(attempt.exceptionOrNull()?.message)
         }
     }
 
@@ -197,19 +230,6 @@ class MonitorActionController(
         }
         return latestJson to "Tunnel 尚未恢复 Ready；ChatX 会继续按自动恢复策略处理。"
     }
-
-    private fun fallbackSnapshotJson(primaryError: String?): String =
-        runCatching {
-            StatusCodec.snapshot(
-                MonitorRepository(appContext).fetchSnapshot(),
-            )
-        }.getOrElse { fallbackError ->
-            StatusCodec.error(
-                fallbackError.message
-                    ?: primaryError
-                    ?: "连接失败",
-            )
-        }
 
     private fun notifyStateChanged() {
         post { listener.onStateChanged() }
