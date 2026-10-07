@@ -369,13 +369,21 @@ if (!/^[0-9a-f]{64}$/i.test(macRuntimeLock.node?.archiveSha256 ?? '')) throw new
 if (!/^[0-9a-f]{64}$/i.test(macRuntimeLock.tunnelClient?.sha256 ?? '')) throw new Error('macOS tunnel-client archive SHA-256 must be locked.');
 
 if (runtimeLock.schemaVersion !== 3) throw new Error('runtime-lock.json schemaVersion must be 3.');
-if (runtimeLock.desktopCommander?.version !== '0.2.48') throw new Error('Desktop Commander must be locked to 0.2.48.');
-if (runtimeLock.desktopCommander?.releaseTag !== 'v0.2.48') throw new Error('Desktop Commander release tag must be locked to v0.2.48.');
-if (runtimeLock.desktopCommander?.releaseAsset !== 'desktop-commander-0.2.48.mcpb') throw new Error('Desktop Commander MCPB release asset must be locked.');
-if (!/^https:\/\/github\.com\/wonderwhy-er\/DesktopCommanderMCP\/releases\/download\//.test(runtimeLock.desktopCommander?.releaseUrl ?? '')) {
+const desktopCommanderLock = runtimeLock.desktopCommander ?? {};
+const desktopCommanderVersion = desktopCommanderLock.version ?? '';
+if (!/^\d+\.\d+\.\d+$/.test(desktopCommanderVersion)) throw new Error('Desktop Commander version must be locked to semver.');
+if (desktopCommanderLock.releaseTag !== `v${desktopCommanderVersion}`) throw new Error('Desktop Commander release tag must match the locked version.');
+if (desktopCommanderLock.releaseAsset !== `desktop-commander-${desktopCommanderVersion}.mcpb`) throw new Error('Desktop Commander MCPB release asset must match the locked version.');
+if (!/^https:\/\/github\.com\/wonderwhy-er\/DesktopCommanderMCP\/releases\/download\//.test(desktopCommanderLock.releaseUrl ?? '')) {
   throw new Error('Desktop Commander release URL must point to the upstream GitHub release.');
 }
-if (!/^[0-9a-f]{64}$/i.test(runtimeLock.desktopCommander?.sha256 ?? '')) throw new Error('Desktop Commander MCPB SHA-256 must be locked.');
+if (!/^[0-9a-f]{40}$/i.test(desktopCommanderLock.sourceCommit ?? '')) throw new Error('Desktop Commander source commit must be locked to a full SHA.');
+if (!/^[0-9a-f]{64}$/i.test(desktopCommanderLock.sha256 ?? '')) throw new Error('Desktop Commander MCPB SHA-256 must be locked.');
+for (const key of ['version', 'sourceCommit', 'releaseTag', 'releaseAsset', 'releaseUrl', 'size', 'sha256']) {
+  if (macRuntimeLock.desktopCommander?.[key] !== desktopCommanderLock[key]) {
+    throw new Error(`Desktop Commander ${key} lock must match between Windows and macOS.`);
+  }
+}
 if (!/^\d+\.\d+\.\d+$/.test(pkg.version)) throw new Error('ChatX package version must be semver.');
 if (!pkg.scripts?.['test:runtime']?.includes('bridge-smoke-test.mjs')) throw new Error('runtime verification must include the real Desktop Commander bridge smoke test.');
 
