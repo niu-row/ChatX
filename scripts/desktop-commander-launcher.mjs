@@ -12,6 +12,23 @@ if (!homeArg || !entryArg) {
   process.exit(2);
 }
 
+// A stdio MCP server has no useful lifetime after its parent closes stdin.
+// Desktop Commander keeps timers/sockets alive, so without an explicit guard a
+// killed/restarted tunnel-client can leave this Node process orphaned for hours.
+let stdioDisconnected = false;
+function exitOnStdioDisconnect() {
+  if (stdioDisconnected) return;
+  stdioDisconnected = true;
+  process.exitCode = 0;
+  // Give the MCP stdio transport a brief chance to close its libuv handles
+  // cleanly. Desktop Commander keeps other referenced timers/sockets alive, so
+  // force exit after the grace period if natural shutdown does not complete.
+  const forceExit = setTimeout(() => process.exit(0), 750);
+  forceExit.unref();
+}
+process.stdin.once('end', exitOnStdioDisconnect);
+process.stdin.once('close', exitOnStdioDisconnect);
+
 const home = path.resolve(homeArg);
 const entry = path.resolve(entryArg);
 fs.mkdirSync(home, { recursive: true });

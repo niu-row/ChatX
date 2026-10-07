@@ -1,4 +1,6 @@
 import assert from 'node:assert/strict';
+import { spawn } from 'node:child_process';
+import { once } from 'node:events';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -60,7 +62,62 @@ async function call(name, args = {}) {
   return result;
 }
 
+async function assertLauncherExitsOnClosedStdin() {
+  const lifecycleHome = path.join(temp, 'lifecycle-home');
+  fs.mkdirSync(lifecycleHome, { recursive: true });
+  const child = spawn(node, [launcher, lifecycleHome, entry, '--no-onboarding'], {
+    env: transportEnv,
+    stdio: ['pipe', 'pipe', 'pipe'],
+    windowsHide: true,
+  });
+  let stdout = '';
+  let stderr = '';
+  child.stdout?.on('data', (chunk) => { stdout += chunk.toString(); });
+  child.stderr?.on('data', (chunk) => { stderr += chunk.toString(); });
+  await once(child, 'spawn');
+  child.stdin.write(`${JSON.stringify({
+    jsonrpc: '2.0',
+    id: 1,
+    method: 'initialize',
+    params: {
+      protocolVersion: '2024-11-05',
+      capabilities: {},
+      clientInfo: { name: 'chatx-lifecycle-smoke', version: pkg.version },
+    },
+  })}\n`);
+  await new Promise((resolve, reject) => {
+    const timer = setTimeout(() => {
+      child.kill('SIGKILL');
+      reject(new Error(`Desktop Commander launcher did not initialize for stdin-close smoke. stdout: ${stdout}; stderr: ${stderr}`));
+    }, 8000);
+    const poll = setInterval(() => {
+      if (/"id"\s*:\s*1/.test(stdout)) {
+        clearInterval(poll);
+        clearTimeout(timer);
+        resolve();
+      }
+    }, 25);
+  });
+  child.stdin.end();
+  const [code, signal] = await new Promise((resolve, reject) => {
+    const timer = setTimeout(() => {
+      child.kill('SIGKILL');
+      reject(new Error(`Desktop Commander launcher did not exit after initialized stdin closed. stderr: ${stderr}`));
+    }, 3000);
+    child.once('exit', (exitCode, exitSignal) => {
+      clearTimeout(timer);
+      resolve([exitCode, exitSignal]);
+    });
+    child.once('error', (error) => {
+      clearTimeout(timer);
+      reject(error);
+    });
+  });
+  assert.equal(code, 0, `Desktop Commander launcher stdin-close exit failed (signal=${signal}, stderr=${stderr})`);
+}
+
 try {
+  await assertLauncherExitsOnClosedStdin();
   await client.connect(transport);
   const listed = await client.listTools();
   assert.equal(listed.tools.length, 26, 'Removing UI must preserve the tool set');

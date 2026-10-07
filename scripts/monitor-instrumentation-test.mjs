@@ -16,6 +16,11 @@ fs.writeFileSync(path.join(dcRoot, 'package.json'), '{"type":"module"}\n');
 
 fs.writeFileSync(path.join(dist, 'bootstrap.js'), '');
 fs.writeFileSync(path.join(dist, 'index.js'), '');
+fs.writeFileSync(path.join(dist, 'terminal-manager.js'), `
+export class TerminalManager {
+  async executeCommand() { return { pid: 1, output: '', isBlocked: false }; }
+}
+`);
 fs.writeFileSync(path.join(sdk, 'types.js'), `
 export const ListToolsRequestSchema = {};
 export const CallToolRequestSchema = {};
