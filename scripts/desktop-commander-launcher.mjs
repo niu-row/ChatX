@@ -1,6 +1,10 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
+import {
+  resolveRealAccountHome,
+  restoreSafeHostEnvironment,
+} from './desktop-host-environment.mjs';
 
 const [, , homeArg, entryArg, ...serverArgs] = process.argv;
 if (!homeArg || !entryArg) {
@@ -12,6 +16,12 @@ const home = path.resolve(homeArg);
 const entry = path.resolve(entryArg);
 fs.mkdirSync(home, { recursive: true });
 
+// Resolve the real login-account home before replacing HOME/USERPROFILE for the
+// bundled Desktop Commander process. MCP stdio intentionally filters the parent
+// environment, so restore only deterministic, non-secret host values here.
+const realHome = resolveRealAccountHome();
+restoreSafeHostEnvironment({ realHome });
+
 // CHATX_TUNNEL_RUNTIME_KEY is only for tunnel-client authentication. The MCP
 // process must not retain it because Desktop Commander can launch arbitrary
 // child processes that would otherwise inherit the secret.
@@ -21,6 +31,9 @@ delete process.env.CHATX_TUNNEL_RUNTIME_KEY;
 // ChatX instance isolated from any separately installed Desktop Commander.
 process.env.HOME = home;
 process.env.USERPROFILE = home;
+process.env.CHATX_REAL_HOME = realHome;
+
+const dist = path.dirname(entry);
 // Hard upstream kill-switch: do not send Desktop Commander telemetry from ChatX.
 process.env.DESKTOP_COMMANDER_DISABLE_TELEMETRY = '1';
 
@@ -96,7 +109,6 @@ function recordRequest(method) {
 // Clear any stale in-flight snapshot left by a previous crashed launcher.
 writeActivitySnapshot();
 
-const dist = path.dirname(entry);
 await import(pathToFileURL(path.join(dist, 'bootstrap.js')).href);
 const sdk = path.join(dist, '..', 'node_modules', '@modelcontextprotocol', 'sdk', 'dist', 'esm');
 const { Server } = await import(pathToFileURL(path.join(sdk, 'server', 'index.js')).href);
@@ -162,4 +174,26 @@ try {
 } finally {
   Server.prototype.setRequestHandler = originalSetRequestHandler;
 }
+
+// server.js has now loaded the actual terminal-manager module used by the tool
+// handlers, while its config paths were still resolved from the isolated home.
+// Patch only the command-spawn phase so user shell processes inherit the real
+// login-account home without changing Desktop Commander's own config/history.
+const { TerminalManager } = await import(pathToFileURL(path.join(dist, 'terminal-manager.js')).href);
+const upstreamExecuteCommand = TerminalManager.prototype.executeCommand;
+TerminalManager.prototype.executeCommand = function chatxExecuteCommand(...args) {
+  const explicitShell = args[2];
+  if (!explicitShell) return upstreamExecuteCommand.apply(this, args);
+  const isolatedHome = process.env.HOME;
+  const isolatedProfile = process.env.USERPROFILE;
+  process.env.HOME = realHome;
+  process.env.USERPROFILE = realHome;
+  try {
+    return upstreamExecuteCommand.apply(this, args);
+  } finally {
+    process.env.HOME = isolatedHome;
+    process.env.USERPROFILE = isolatedProfile;
+  }
+};
+
 await import(pathToFileURL(entry).href);

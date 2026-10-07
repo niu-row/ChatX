@@ -8,7 +8,9 @@ import { pathToFileURL } from 'node:url';
 import { realHome } from './toolchain-env.mjs';
 
 const root = process.cwd();
-const resourceDir = path.join(root, 'src-tauri', 'resources');
+const resourceDir = process.env.CHATX_RUNTIME_RESOURCE_DIR?.trim()
+  ? path.resolve(process.env.CHATX_RUNTIME_RESOURCE_DIR.trim())
+  : path.join(root, 'src-tauri', 'resources');
 const platform = `${os.platform()}-${os.arch()}`;
 const supportedPlatforms = new Set(['win32-x64', 'darwin-arm64']);
 if (!supportedPlatforms.has(platform)) {
@@ -19,9 +21,11 @@ const lockPath = platform === 'win32-x64'
   ? path.join(root, 'runtime-lock.json')
   : path.join(root, `runtime-lock.${platform}.json`);
 const launcherSource = path.join(root, 'scripts', 'desktop-commander-launcher.mjs');
+const hostEnvironmentSource = path.join(root, 'scripts', 'desktop-host-environment.mjs');
 
 if (!fs.existsSync(lockPath)) throw new Error(`Runtime lock is missing for ${platform}: ${lockPath}`);
 if (!fs.existsSync(launcherSource)) throw new Error('Desktop Commander launcher source is missing.');
+if (!fs.existsSync(hostEnvironmentSource)) throw new Error('Desktop host environment helper source is missing.');
 const runtimeLock = JSON.parse(fs.readFileSync(lockPath, 'utf8'));
 if (runtimeLock.schemaVersion !== 3 || runtimeLock.platform !== platform) {
   throw new Error(`Runtime lock is for schema/platform ${runtimeLock.schemaVersion}/${runtimeLock.platform ?? 'unknown'}, current is 3/${platform}.`);
@@ -147,6 +151,12 @@ async function download(
 function extractZip(label, archive, destination) {
   fs.mkdirSync(destination, { recursive: true });
   if (process.platform === 'win32') {
+    const systemRoot = process.env.SystemRoot || process.env.WINDIR || 'C:\\Windows';
+    const tar = path.join(systemRoot, 'System32', 'tar.exe');
+    if (fs.existsSync(tar)) {
+      run(label, tar, ['-xf', archive, '-C', destination]);
+      return;
+    }
     run(
       label,
       'powershell.exe',
@@ -359,9 +369,15 @@ async function prepareTunnelClientRuntime() {
 }
 
 validateDesktopCommanderLock();
-fs.rmSync(resourceDir, { recursive: true, force: true });
+fs.rmSync(resourceDir, {
+  recursive: true,
+  force: true,
+  maxRetries: process.platform === 'win32' ? 8 : 2,
+  retryDelay: 250,
+});
 fs.mkdirSync(resourceDir, { recursive: true });
 fs.copyFileSync(launcherSource, path.join(resourceDir, 'desktop-commander-launcher.mjs'));
+fs.copyFileSync(hostEnvironmentSource, path.join(resourceDir, 'desktop-host-environment.mjs'));
 
 const nodeMetadata = await prepareNodeRuntime();
 const tunnelMetadata = await prepareTunnelClientRuntime();
@@ -415,6 +431,8 @@ const manifest = {
     bundleManifestSha256: sha256(dcManifestPath),
     entry: 'desktop-commander/dist/index.js',
     launcher: 'desktop-commander-launcher.mjs',
+    hostEnvironmentHelper: 'desktop-host-environment.mjs',
+    hostEnvironmentHelperSha256: sha256(path.join(resourceDir, 'desktop-host-environment.mjs')),
     telemetryDisabledByEnv: true,
     runtimeKeyStrippedByLauncher: true,
     ripgrep: ripgrepRelative,

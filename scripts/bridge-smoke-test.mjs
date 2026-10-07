@@ -6,7 +6,9 @@ import { Client } from '@modelcontextprotocol/client';
 import { StdioClientTransport } from '@modelcontextprotocol/client/stdio';
 
 const pkg = JSON.parse(fs.readFileSync('package.json', 'utf8'));
-const resourceDir = path.resolve('src-tauri', 'resources');
+const resourceDir = process.env.CHATX_RUNTIME_RESOURCE_DIR?.trim()
+  ? path.resolve(process.env.CHATX_RUNTIME_RESOURCE_DIR.trim())
+  : path.resolve('src-tauri', 'resources');
 const node = path.join(resourceDir, process.platform === 'win32' ? 'node.exe' : 'node');
 const launcher = path.join(resourceDir, 'desktop-commander-launcher.mjs');
 const entry = path.join(resourceDir, 'desktop-commander', 'dist', 'index.js');
@@ -16,15 +18,29 @@ for (const file of [node, launcher, entry]) {
 
 const temp = fs.mkdtempSync(path.join(os.tmpdir(), 'chatx-dc-smoke-'));
 const home = path.join(temp, 'dc-home');
+const hostHome = process.env.CHATX_BRIDGE_HOST_HOME?.trim() || path.join(temp, 'host-home');
+fs.mkdirSync(hostHome, { recursive: true });
+const homeProbeScript = path.join(temp, 'home-probe.mjs');
+fs.writeFileSync(homeProbeScript, "console.log(JSON.stringify({home:process.env.HOME,userProfile:process.env.USERPROFILE,realHome:process.env.CHATX_REAL_HOME,programData:process.env.ProgramData,allUsersProfile:process.env.ALLUSERSPROFILE,computerName:process.env.COMPUTERNAME,os:process.env.OS,publicDir:process.env.PUBLIC}));\n");
 const sample = path.join(temp, 'sample.txt');
 const client = new Client({
   name: 'chatx-bridge-smoke',
   version: pkg.version,
 });
+const inheritedNames = process.platform === 'win32'
+  ? [
+      'APPDATA', 'HOMEDRIVE', 'HOMEPATH', 'LOCALAPPDATA', 'PATH',
+      'PROCESSOR_ARCHITECTURE', 'SYSTEMDRIVE', 'SYSTEMROOT', 'TEMP',
+      'USERNAME', 'USERPROFILE', 'PROGRAMFILES',
+    ]
+  : ['HOME', 'LOGNAME', 'PATH', 'SHELL', 'TERM', 'USER'];
 const transportEnv = Object.fromEntries(
-  Object.entries(process.env).filter(([, value]) => typeof value === 'string'),
+  inheritedNames
+    .map((name) => [name, process.env[name]])
+    .filter(([, value]) => typeof value === 'string'),
 );
 transportEnv.CHATX_TUNNEL_RUNTIME_KEY = 'chatx-secret-smoke';
+transportEnv.CHATX_REAL_HOME = hostHome;
 const transport = new StdioClientTransport({
   command: node,
   args: [launcher, home, entry, '--no-onboarding'],
@@ -71,6 +87,34 @@ try {
   const secretProbeText = textOf(secretProbe);
   assert.match(secretProbeText, /CHATX_KEY_STRIPPED/, 'Desktop Commander child process did not confirm Runtime Key stripping');
   assert.doesNotMatch(secretProbeText, /chatx-secret-smoke/, 'Runtime API Key leaked into a Desktop Commander child process');
+
+  const escapedHomeProbeScript = `"${homeProbeScript.replace(/"/g, '\\"')}"`;
+  const homeProbeCommand = process.platform === 'win32'
+    ? `& ${escapedNode} ${escapedHomeProbeScript}`
+    : `${escapedNode} ${escapedHomeProbeScript}`;
+  const homeProbe = await call('start_process', {
+    command: homeProbeCommand,
+    timeout_ms: 5000,
+  });
+  const homeProbeText = textOf(homeProbe);
+  const homeProbeLine = homeProbeText.split(/\r?\n/).find((line) => line.trim().startsWith('{') && line.trim().endsWith('}'));
+  assert.ok(homeProbeLine, `Desktop Commander child environment probe returned no JSON:\n${homeProbeText}`);
+  const childEnv = JSON.parse(homeProbeLine);
+  assert.equal(path.resolve(childEnv.home), path.resolve(hostHome), 'Desktop Commander child process did not inherit the real account HOME');
+  assert.equal(path.resolve(childEnv.userProfile), path.resolve(hostHome), 'Desktop Commander child process did not inherit the real account USERPROFILE');
+  assert.equal(path.resolve(childEnv.realHome), path.resolve(hostHome), 'CHATX_REAL_HOME did not match the real account home');
+  assert.notEqual(path.resolve(childEnv.home), path.resolve(home), 'Desktop Commander child process still inherited the isolated Desktop Commander home');
+  assert.equal(process.env.HOME === home, false, 'Bridge smoke process unexpectedly mutated its own HOME');
+  if (process.platform === 'win32') {
+    const systemRoot = process.env.SystemRoot || process.env.WINDIR || 'C:\\Windows';
+    const systemDrive = process.env.SystemDrive || path.win32.parse(systemRoot).root.replace(/[\\/]$/, '') || 'C:';
+    const expectedProgramData = `${systemDrive}\\ProgramData`;
+    assert.equal(childEnv.programData?.toLowerCase(), expectedProgramData.toLowerCase(), 'ProgramData was not restored for Desktop Commander child processes');
+    assert.equal(childEnv.allUsersProfile?.toLowerCase(), expectedProgramData.toLowerCase(), 'ALLUSERSPROFILE was not restored for Desktop Commander child processes');
+    assert.equal(childEnv.computerName?.toLowerCase(), os.hostname().toLowerCase(), 'COMPUTERNAME was not restored for Desktop Commander child processes');
+    assert.equal(childEnv.os, 'Windows_NT', 'OS was not restored for Desktop Commander child processes');
+    assert.equal(childEnv.publicDir?.toLowerCase(), path.win32.join(path.win32.dirname(hostHome), 'Public').toLowerCase(), 'PUBLIC was not restored for Desktop Commander child processes');
+  }
 
   await call('write_file', { path: sample, content: 'chatx-ripgrep-smoke\n' });
   const read = await call('read_file', { path: sample, offset: 0, length: 20 });

@@ -2,12 +2,15 @@ import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 
-const resourceDir = path.resolve('src-tauri', 'resources');
+const resourceDir = process.env.CHATX_RUNTIME_RESOURCE_DIR?.trim()
+  ? path.resolve(process.env.CHATX_RUNTIME_RESOURCE_DIR.trim())
+  : path.resolve('src-tauri', 'resources');
 const executable = (name) => process.platform === 'win32' ? `${name}.exe` : name;
 const required = [
   executable('node'),
   executable('tunnel-client'),
   'desktop-commander-launcher.mjs',
+  'desktop-host-environment.mjs',
   'runtime-manifest.json',
   'tunnel-client-LICENSE.txt',
   'tunnel-client-NOTICE.txt',
@@ -53,6 +56,9 @@ if (manifest.desktopCommander?.releaseSha256 !== locked.desktopCommander.sha256)
 if (manifest.desktopCommander?.bundleManifestSha256 !== sha256(dcBundleManifest)) throw new Error('runtime manifest Desktop Commander bundle manifest SHA-256 mismatch.');
 if (manifest.desktopCommander?.entry !== 'desktop-commander/dist/index.js') throw new Error('runtime manifest Desktop Commander entry is invalid.');
 if (manifest.desktopCommander?.launcher !== 'desktop-commander-launcher.mjs') throw new Error('runtime manifest launcher is invalid.');
+if (manifest.desktopCommander?.hostEnvironmentHelper !== 'desktop-host-environment.mjs') throw new Error('runtime manifest host environment helper is invalid.');
+const hostEnvironmentHelper = path.join(resourceDir, manifest.desktopCommander.hostEnvironmentHelper);
+if (manifest.desktopCommander?.hostEnvironmentHelperSha256 !== sha256(hostEnvironmentHelper)) throw new Error('runtime manifest host environment helper SHA-256 mismatch.');
 if (manifest.desktopCommander?.telemetryDisabledByEnv !== true) throw new Error('Desktop Commander telemetry kill-switch must be enabled by the ChatX launcher.');
 if (manifest.desktopCommander?.runtimeKeyStrippedByLauncher !== true) throw new Error('Desktop Commander launcher must strip the Tunnel Runtime Key.');
 
