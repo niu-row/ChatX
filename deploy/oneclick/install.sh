@@ -6,7 +6,7 @@ domain="${2:-}"
 desktop="${3:-}"
 archive="${4:-}"
 if [[ ! "$domain" =~ ^[a-zA-Z0-9][a-zA-Z0-9.-]{0,251}[a-zA-Z0-9]$ ||
-      ! "$desktop" =~ ^d_[a-f0-9]{32}$ ]]; then echo 'ERROR=Invalid domain or Desktop ID' >&2; exit 2; fi
+      ! "$desktop" =~ ^d_[a-fA-F0-9]{16,78}$ ]]; then echo 'ERROR=Invalid domain or Desktop ID' >&2; exit 2; fi
 if [ "$(id -u)" -ne 0 ]; then echo 'ERROR=Root or passwordless sudo required' >&2; exit 2; fi
 for tool in systemctl python3 tar curl openssl; do
   command -v "$tool" >/dev/null || { echo "ERROR=Missing $tool" >&2; exit 2; }

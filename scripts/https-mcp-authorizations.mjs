@@ -83,6 +83,14 @@ export function authorizationStore({ directory, settingsPath, createLegacyIfMiss
       { flag: 'wx', mode: 0o600 });
     return record;
   }
+  // Both bearer-token verification and the authorization UI must use the
+  // same revocation predicate, including pre-generation migration records.
+  function grantRevoked(record, id) {
+    if (fs.existsSync(path.join(revokedDir, id))) return true;
+    return record.revocationGeneration === undefined
+      ? (record.approvedAtMs ?? record.issuedAt * 1000) <= revocationEpoch()
+      : record.revocationGeneration !== revocationGeneration();
+  }
   function activeGrant(id, clientId = null) {
     if (id === undefined || id === null) {
       if (!legacyRecord || revocationEpoch() > 0 ||
@@ -101,9 +109,7 @@ export function authorizationStore({ directory, settingsPath, createLegacyIfMiss
     if (record.id !== id || typeof record.clientHash !== 'string' ||
         (record.expiresAt !== null && (!Number.isSafeInteger(record.expiresAt)
           || record.expiresAt <= nowSec())) ||
-        (record.revocationGeneration === undefined
-          ? (record.approvedAtMs ?? record.issuedAt * 1000) <= revocationEpoch()
-          : record.revocationGeneration !== revocationGeneration())) return null;
+        grantRevoked(record, id)) return null;
     if (clientId !== null && record.clientHash !== clientHash(clientId)) return null;
     return record;
   }
@@ -167,8 +173,7 @@ export function authorizationStore({ directory, settingsPath, createLegacyIfMiss
         clientTag: typeof record.clientHash === 'string' ? record.clientHash : '',
         issuedAt: record.issuedAt,
         expiresAt: record.expiresAt,
-        revoked: fs.existsSync(path.join(revokedDir, id)) ||
-          (generation !== null && record.revocationGeneration !== generation),
+        revoked: grantRevoked(record, id),
       });
     }
     if (fs.existsSync(legacyPath)) {

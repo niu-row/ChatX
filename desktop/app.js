@@ -220,17 +220,17 @@ function render(s) {
             : down
               ? 'Down'
               : String(s.runtimeState || 'Stopped');
-  $('transportFactLabel').textContent = httpsConnected ? `HTTPS MCP · ${httpsTransportName}` : 'Secure MCP Tunnel';
-  if (httpsConnected) $('tunnelFact').textContent = 'Ready';
-  $('tunnelVersion').textContent = httpsConnected ? (s.httpsMcp.endpoint || 'HTTPS MCP') : (s.tunnelVersion || 'tunnel-client unavailable');
-  $('overviewTransportName').textContent = httpsConnected ? `HTTPS MCP · ${httpsTransportName}` : 'Secure MCP Tunnel';
-  $('overviewTransportDescription').textContent = httpsConnected ? (s.httpsMcp.baseUrl || 'newrow.fun') : 'OpenAI';
+  $('transportFactLabel').textContent = httpsEnabled ? `HTTPS MCP · ${httpsTransportName}` : 'Secure MCP Tunnel';
+  if (httpsEnabled) $('tunnelFact').textContent = httpsConnected ? 'Ready' : (s.httpsMcp?.state || 'Disconnected');
+  $('tunnelVersion').textContent = httpsEnabled ? (s.httpsMcp.endpoint || 'HTTPS MCP') : (s.tunnelVersion || 'tunnel-client unavailable');
+  $('overviewTransportName').textContent = httpsEnabled ? `HTTPS MCP · ${httpsTransportName}` : 'Secure MCP Tunnel';
+  $('overviewTransportDescription').textContent = httpsEnabled ? (s.httpsMcp.baseUrl || '尚未配置地址') : 'OpenAI';
   $('dcFact').textContent = unavailable ? 'Unavailable' : 'Bundled';
   $('dcVersion').textContent = `v${s.desktopCommander?.version || 'unknown'}`;
-  $('keyFactLabel').textContent = httpsConnected ? 'HTTPS OAuth' : 'Runtime Key';
-  $('keyFact').textContent = httpsConnected ? '已启用' : s.runtimeKeySaved ? '已保存' : '未保存';
+  $('keyFactLabel').textContent = httpsEnabled ? 'HTTPS OAuth' : 'Runtime Key';
+  $('keyFact').textContent = httpsEnabled ? '已启用' : s.runtimeKeySaved ? '已保存' : '未保存';
   const sessionOnly = s.keyStorage === 'session only';
-  $('keyStorageHint').textContent = httpsConnected ? '密码由本机安全密钥派生' : sessionOnly ? '仅本次输入' : `${s.keyStorage} / 本次输入`;
+  $('keyStorageHint').textContent = httpsEnabled ? '密码由本机安全密钥派生' : sessionOnly ? '仅本次输入' : `${s.keyStorage} / 本次输入`;
   $('rememberKeyText').textContent = sessionOnly ? '当前平台不支持保存 Runtime Key' : `使用 ${s.keyStorage === 'macOS Keychain' ? 'macOS 钥匙串' : s.keyStorage} 保存 Runtime Key`;
 
   if (s.tunnelId && document.activeElement !== $('tunnelId')) $('tunnelId').value = s.tunnelId;

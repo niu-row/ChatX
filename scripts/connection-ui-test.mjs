@@ -357,6 +357,8 @@ delete status.httpsMcp.connected;
 status.httpsMcp.transportConnected = false;
 await vm.runInContext('refresh()', context);
 assert.equal(element('sidebarStatus').textContent, '未连接');
+assert.equal(element('transportFactLabel').textContent, 'HTTPS MCP · WSS Relay',
+  'An offline HTTPS connection must not be misidentified as Secure Tunnel');
 status.httpsMcp.transportConnected = true;
 status.httpsMcp.manualStopBlocked = true;
 await vm.runInContext('refresh()', context);
@@ -427,7 +429,11 @@ assert.equal(httpsAutoEnabled, false,
   'HTTPS auto-reconnect switch must persist separately from Tunnel');
 
 await new Promise((resolve) => setImmediate(resolve));
-assert.equal(identityCalls, 1, 'Wizard should prepare one stable local Desktop identity');
+assert.equal(identityCalls, 0, 'Opening settings must not create a Desktop identity');
+element('relayDeployPanel').open = true;
+listeners.get('relayDeployPanel:toggle')();
+await new Promise((resolve) => setImmediate(resolve));
+assert.equal(identityCalls, 1, 'Wizard should prepare one stable local Desktop identity on demand');
 assert.equal(element('relayDeployDesktopId').value, 'd_' + 'a'.repeat(32),
   'A fresh server must not require an already-registered Relay Desktop');
 

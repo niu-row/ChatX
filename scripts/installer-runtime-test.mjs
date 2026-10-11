@@ -36,6 +36,8 @@ const required = [
   executable('tunnel-client'),
   'desktop-commander-launcher.mjs',
   'desktop-host-environment.mjs',
+  'https-mcp-bridge.mjs',
+  'https-mcp-authorizations-admin.mjs',
   'relay-deploy.mjs',
   'relay-deploy-install.sh',
   'relay-deploy-source.tar.gz',

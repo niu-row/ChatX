@@ -41,22 +41,34 @@ is intentionally not included.
   OAuth grant schema, rotation, listing and revocation. Rust never edits
   grant JSON: `https_mcp_authorizations.rs` invokes the bundled local-only
   `https-mcp-authorizations-admin.mjs` for administrative operations.
+  The admin process is bounded to 10 seconds and 1 MiB output; normal
+  listing/revocation runs via Tauri's blocking worker pool, not the UI thread.
+  Legacy grants use the same revocation predicate for token checks and UI.
 - The frontend has independent controllers:
   `pages/https-mcp.js` (connection),
   `pages/oauth-security.js` (OAuth settings),
   `pages/relay-deploy.js` (server provisioning).
-- The deployment page explicitly requests a stable local Desktop ID using
-  `prepare_relay_deploy_desktop_id`, even before initial Relay registration.
-  Read-only network settings do not create identity files.
+- Opening the deployment panel (not opening Settings) requests a stable local
+  Desktop ID via `prepare_relay_deploy_desktop_id`, even before initial Relay
+  registration. Read-only network settings do not create identity files.
+  The UI, Node deploy runner, Rust validator and Linux installer accept
+  `d_` followed by 16–78 hexadecimal characters, including historic uppercase.
 
 ## Performance contract
 
 The WSS v2 protocol uses 64 KiB frames, 64 MiB requests, 128 MiB responses,
 and up to 64 concurrent *transport* requests. Relay and desktop use bounded
 per-stream queues. The Node Bridge still materializes MCP JSON-RPC requests
-and SDK tool results; it is not zero-copy/end-to-end streaming. To avoid
-unbounded aggregate buffering, the Bridge admits eight concurrent MCP JSON
-requests and returns HTTP 429 plus Retry-After when saturated.
+and SDK tool results; it is not zero-copy/end-to-end streaming.
+The Bridge admits up to **eight running tool calls** with **four reserved
+slots for lightweight/control requests** (12 total). It also accounts for
+up to **80 MiB total buffered incoming request bytes** and returns HTTP 429
+plus Retry-After on saturation. These counters do not measure actual V8 heap
+usage or tool-result memory; one tool can still allocate a large result.
+The Bridge passes HTTP disconnects to the MCP SDK as cancellation signals,
+which sends `notifications/cancelled` to Desktop Commander. Actual tool
+termination is **cooperative**: canceling or disconnecting never guarantees
+rollback of file writes or shell side effects.
 
 Incoming Node requests have a 600-second timeout; the Relay request/stream
 timeouts are 605 seconds; Nginx MCP timeout is 630 seconds.

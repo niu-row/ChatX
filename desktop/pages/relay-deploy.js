@@ -5,6 +5,7 @@
     let validated = '';
     let dirty = false;
     let lines = [];
+    let identityPromise = null;
     const ids = ['relayDeployHost', 'relayDeployUser', 'relayDeployPort',
       'relayDeployDomain', 'relayDeployDesktopId', 'relayDeployKeyPath'];
 
@@ -37,8 +38,27 @@
           $('httpsMcpUrl').value.trim().replace(/^https:\/\//, '').split('/')[0] || '';
       }
     }
+    // Do not create local identity files merely because the settings page
+    // loaded. Prepare once when the deployment panel is actually opened.
+    function prepareIdentity() {
+      if (!invoke || $('relayDeployDesktopId').value.trim()) return Promise.resolve();
+      if (!identityPromise) {
+        identityPromise = invoke('prepare_relay_deploy_desktop_id')
+          .then((desktopId) => {
+            if (!$('relayDeployDesktopId').value.trim() &&
+                /^d_[a-fA-F0-9]{16,78}$/.test(desktopId || '')) {
+              $('relayDeployDesktopId').value = desktopId;
+            }
+          }).catch((error) => {
+            identityPromise = null; // A transient read failure can be retried.
+            log('无法读取本机 Desktop ID：' + normalizeError(error));
+          });
+      }
+      return identityPromise;
+    }
     async function action(apply) {
       if (!invoke || busy) return;
+      if (!apply) await prepareIdentity();
       const target = config();
       const fingerprint = JSON.stringify(target);
       if (apply && validated !== fingerprint) {
@@ -68,16 +88,9 @@
     }
     function bind() {
       for (const id of ids) $(id).addEventListener('input', invalidate);
-      if (invoke) {
-        // Can create a stable local identity before registering a new server.
-        invoke('prepare_relay_deploy_desktop_id').then((desktopId) => {
-          if (!dirty && /^d_[a-fA-F0-9]{16,78}$/.test(desktopId || '')) {
-            $('relayDeployDesktopId').value = desktopId;
-          }
-        }).catch((error) => {
-          log('无法读取本机 Desktop ID：' + normalizeError(error));
-        });
-      }
+      $('relayDeployPanel').addEventListener('toggle', () => {
+        if ($('relayDeployPanel').open) void prepareIdentity();
+      });
       $('relayDeployCheck').addEventListener('click', () => action(false));
       $('relayDeployApply').addEventListener('click', () => action(true));
       if (window.__TAURI__?.event?.listen) {

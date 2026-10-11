@@ -271,14 +271,26 @@ fn should_launch(attempted: bool, retry_enabled: bool) -> bool {
     !attempted || retry_enabled
 }
 
-fn run(
-    stop: Arc<AtomicBool>, status: Arc<Mutex<Snapshot>>,
-    settings: HttpsMcpSettings, paths: crate::app_state::RuntimePaths,
-    home: std::path::PathBuf, log_dir: std::path::PathBuf,
-    password: String, signing: String,
+// Group the owned runtime inputs so start_inner cannot accidentally swap
+// paths, credentials or reconnect state as lifecycle responsibilities grow.
+struct SupervisorContext {
+    stop: Arc<AtomicBool>,
+    status: Arc<Mutex<Snapshot>>,
+    settings: HttpsMcpSettings,
+    paths: crate::app_state::RuntimePaths,
+    home: std::path::PathBuf,
+    log_dir: std::path::PathBuf,
+    password: String,
+    signing: String,
     auto_reconnect: Arc<AtomicBool>,
     relay_credentials: Option<crate::relay::RelayCredentials>,
-) {
+}
+
+fn run(context: SupervisorContext) {
+    let SupervisorContext {
+        stop, status, settings, paths, home, log_dir, password, signing,
+        auto_reconnect, relay_credentials,
+    } = context;
     let mut local: Option<ManagedChild> = None;
     // Even without retry, each manually started session gets one attempt per
     // transport. Runtime toggling on permits further attempts.
@@ -409,7 +421,7 @@ fn run(
         snapshot.ssh_connected = false;
         snapshot.transport_connected = false;
         snapshot.remote_ready = false;
-    }
+    };
 }
 
 fn stop_inner(state: &AppState) {
@@ -473,8 +485,10 @@ fn start_inner(app: &tauri::AppHandle, state: &AppState, settings: HttpsMcpSetti
     state.https_mcp.auto_reconnect.store(settings.auto_reconnect, Ordering::SeqCst);
     let auto_reconnect = state.https_mcp.auto_reconnect.clone();
     let worker = thread::spawn(move || {
-        run(stopper, status, settings, paths, home, dir, password, signing,
-            auto_reconnect, relay_credentials);
+        run(SupervisorContext {
+            stop: stopper, status, settings, paths, home, log_dir: dir,
+            password, signing, auto_reconnect, relay_credentials,
+        });
     });
     *lock = Some(Supervisor { stop, worker });
     push_log(state, if load_settings(app).https_mcp.transport == "wss" {
@@ -646,7 +660,7 @@ pub(super) fn rotate_https_mcp_login_password(
     // Fail closed: terminate the active remote bridge before changing secrets.
     stop_inner(state.inner());
     // Invalidate grants/codes before installing the new signing key.
-    crate::https_mcp_authorizations::revoke_all_https_mcp_authorizations(app.clone())?;
+    crate::https_mcp_authorizations::revoke_all_sync(&app)?;
     let master = rotate_https_oauth_master_key(&app)?;
     let settings = load_settings(&app).https_mcp;
     if settings.enabled && connection_intent::restore_allowed(&app, Transport::HttpsMcp)? {

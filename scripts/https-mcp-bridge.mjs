@@ -2,6 +2,7 @@
 import http from 'node:http';
 import crypto from 'node:crypto';
 import { authorizationStore } from './https-mcp-authorizations.mjs';
+import { createMcpRequestBudget } from './mcp-request-budget.mjs';
 import { Client } from '@modelcontextprotocol/client';
 import { StdioClientTransport } from '@modelcontextprotocol/client/stdio';
 
@@ -22,11 +23,10 @@ const pending = new Map();
 const codes = new Map();
 const attempts = new Map();
 const rateBuckets = new Map();
-// WSS can multiplex 64 streams, but MCP JSON-RPC still materializes bodies
-// and results in the Node SDK. Bound simultaneous JSON processing so eight
-// 64 MiB requests cannot grow into sixty-four buffered 64 MiB requests.
-const MAX_ACTIVE_MCP_REQUESTS = 8;
-let activeMcpRequests = 0;
+// Eight long-running tools plus four reserved control requests. Accounting
+// also bounds buffered incoming body bytes across all active JSON requests.
+// This is not a cap on Desktop Commander output or V8 heap usage.
+const requestBudget = createMcpRequestBudget();
 let authStore;
 let client;
 let transport;
@@ -89,12 +89,17 @@ const clientRedirects = (id) => {
 };
 // JSON-RPC parsing still requires a bounded body, while WSS v2 streams to
 // this loopback endpoint without a base64 copy or gateway-side accumulation.
-async function readBody(req, limit = 64 * 1024 * 1024) {
+async function readBody(req, limit = 64 * 1024 * 1024, onChunk) {
   let length = 0;
   const chunks = [];
   for await (const chunk of req) {
     length += chunk.length;
-    if (length > limit) throw new Error('Request body too large');
+    if (length > limit) {
+      const error = new Error('Request body too large');
+      error.statusCode = 413;
+      throw error;
+    }
+    onChunk?.(chunk.length);
     chunks.push(chunk);
   }
   return Buffer.concat(chunks).toString('utf8');
@@ -334,23 +339,52 @@ async function handleMcp(req, res) {
   if (req.method === 'GET') return text(res, 405, 'SSE not supported', { Allow: 'POST' });
   if (req.method === 'DELETE') return text(res, 405, 'Stateless MCP has no sessions', { Allow: 'POST' });
   if (req.method !== 'POST') return text(res, 405, 'Method Not Allowed', { Allow: 'POST' });
-  if (activeMcpRequests >= MAX_ACTIVE_MCP_REQUESTS) {
+  const budget = requestBudget.open();
+  if (!budget) {
     return text(res, 429, 'MCP Bridge busy', { 'Retry-After': '1' });
   }
-  activeMcpRequests++;
+  // HTTP cancellation does not automatically abort a stdio MCP request.
+  // Forward it through the MCP SDK so cooperative tools can stop early.
+  const upstreamAbort = new AbortController();
+  const disconnected = () => {
+    if (!res.writableFinished && !upstreamAbort.signal.aborted) {
+      upstreamAbort.abort(new Error('MCP HTTP client disconnected'));
+    }
+  };
+  res.once('close', disconnected);
+  req.once('aborted', disconnected);
   try {
   const incomingOrigin = req.headers.origin;
   if (incomingOrigin && ![issuer, 'https://chatgpt.com', 'https://chat.openai.com'].includes(incomingOrigin)) {
     return text(res, 403, 'Invalid origin');
   }
   let request;
-  try { request = JSON.parse(await readBody(req)); }
-  catch { return json(res, 400, { jsonrpc: '2.0', id: null, error: { code: -32700, message: 'Parse error' } }); }
+  try {
+    request = JSON.parse(await readBody(req, 64 * 1024 * 1024, (bytes) => {
+      if (!budget.reserve(bytes)) {
+        const error = new Error('MCP incoming payload budget exhausted');
+        error.statusCode = 429;
+        throw error;
+      }
+    }));
+  } catch (error) {
+    if (upstreamAbort.signal.aborted || res.destroyed) return;
+    if (error.statusCode === 429) {
+      return text(res, 429, 'MCP Bridge payload budget exceeded', { 'Retry-After': '1' });
+    }
+    if (error.statusCode === 413) return text(res, 413, 'MCP request too large');
+    return json(res, 400, { jsonrpc: '2.0', id: null,
+      error: { code: -32700, message: 'Parse error' } });
+  }
   if (Array.isArray(request) || request?.jsonrpc !== '2.0' || typeof request.method !== 'string') {
     return json(res, 400, { jsonrpc: '2.0', id: request?.id ?? null,
       error: { code: -32600, message: 'Invalid Request' } });
   }
   if (!Object.hasOwn(request, 'id')) { res.writeHead(202); res.end(); return; }
+  if (request.method === 'tools/call' && !budget.admitTool()) {
+    return text(res, 429, 'MCP tool concurrency limit reached', { 'Retry-After': '1' });
+  }
+  if (upstreamAbort.signal.aborted || res.destroyed) return;
   try {
     let result;
     const params = request.params || {};
@@ -365,7 +399,8 @@ async function handleMcp(req, res) {
       case 'ping': result = {}; break;
       case 'tools/list': {
         const upstream = await ensureClient();
-        const listing = await upstream.listTools(params.cursor ? { cursor: params.cursor } : {});
+        const listing = await upstream.listTools(params.cursor ? { cursor: params.cursor } : {},
+          { signal: upstreamAbort.signal, timeout: 600_000 });
         result = { ...listing, tools: listing.tools.map((tool) => ({
           ...tool, securitySchemes: [{ type: 'oauth2', scopes: [scope] }]
         })) };
@@ -374,20 +409,27 @@ async function handleMcp(req, res) {
       case 'tools/call': {
         if (!params.name || typeof params.name !== 'string') throw Object.assign(new Error('Missing tool name'), { code: -32602 });
         const upstream = await ensureClient();
-        result = await upstream.callTool({ name: params.name, arguments: params.arguments || {} });
+        result = await upstream.callTool(
+          { name: params.name, arguments: params.arguments || {} },
+          { signal: upstreamAbort.signal, timeout: 600_000 }
+        );
         break;
       }
       default: throw Object.assign(new Error('Method not found'), { code: -32601 });
     }
+    if (upstreamAbort.signal.aborted || res.destroyed) return;
     json(res, 200, { jsonrpc: '2.0', id: request.id, result });
   } catch (error) {
+    if (upstreamAbort.signal.aborted || res.destroyed) return;
     const code = Number.isInteger(error.code) && error.code < 0 ? error.code : -32603;
     json(res, 200, { jsonrpc: '2.0', id: request.id, error: { code, message: code === -32603
       ? 'Desktop Commander unavailable or failed' : String(error.message) } });
     if (code === -32603) console.error('MCP backend request failed:', error.message);
   }
   } finally {
-    activeMcpRequests--;
+    res.off('close', disconnected);
+    req.off('aborted', disconnected);
+    budget.close();
   }
 }
 const server = http.createServer(async (req, res) => {

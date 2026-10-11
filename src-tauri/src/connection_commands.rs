@@ -197,7 +197,7 @@ pub(super) fn stop_tunnel_without_saving(
         control_plane: ControlPlaneObservation::default(),
         proxy_source: String::new(),
     };
-    update_runtime_snapshot(state, &stopped, false, &settings);
+    update_runtime_snapshot(state, &stopped, false, settings);
     Ok(())
 }
 

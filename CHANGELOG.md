@@ -8,6 +8,11 @@
 - Allowed fresh installs to generate stable Desktop ID before first Relay registration.
 - Removed deployment dependence on a historical Cargo build path, environment-specific UI defaults, and stale MCP version metadata.
 - Aligned Node upload timeout with the WSS pipeline, and bounded concurrent JSON-RPC processing.
+- Unified Linux installer Desktop ID validation with UI/Node/Rust and tested the real preflight validation in isolation.
+- Forwarded HTTP disconnects as MCP SDK cancellation notifications; tested cooperative cancellation with a disposable fake stdio tool. Non-cooperative tools are not guaranteed to stop or undo side effects.
+- Unified pre-generation OAuth revocation validity between token checks and UI; bounded the local OAuth administration child process to 10 seconds and 1 MiB output.
+- Introduced separate eight-tool and four-control request budgets plus 80 MiB aggregate inbound payload accounting, with HTTP 429 on saturation.
+- Deferred Desktop identity creation until deployment panel expansion, fixed offline HTTPS transport labels and removed stale UI examples.
 - Updated architecture docs, local tests and runtime resource manifests. **No installer or server deployment in this change.**
 
 

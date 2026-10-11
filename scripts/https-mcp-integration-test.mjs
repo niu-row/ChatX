@@ -10,6 +10,7 @@ import { spawn, spawnSync } from 'node:child_process';
 import { build } from 'esbuild';
 import { createShutdownCoordinator } from './https-mcp-parent-watch.mjs';
 import { authorizationStore } from './https-mcp-authorizations.mjs';
+import { createMcpRequestBudget } from './mcp-request-budget.mjs';
 
 // A watchdog must still SIGKILL its process group after the leader exits.
 // Importing the helper does not launch any child or touch live ChatX.
@@ -35,12 +36,36 @@ import { authorizationStore } from './https-mcp-authorizations.mjs';
 }
 
 
+// Byte budgets are shared across requests; tool slots remain independent
+// from control slots. Test exact admission behavior without huge allocations.
+{
+  const budget = createMcpRequestBudget({ maxRequests: 3, maxTools: 1,
+    maxPayloadBytes: 6 });
+  const first = budget.open(), control = budget.open(), third = budget.open();
+  assert.ok(first && control && third);
+  assert.equal(budget.open(), null, 'Total request concurrency must be bounded');
+  assert.equal(first.reserve(4), true);
+  assert.equal(control.reserve(3), false, 'Aggregate body bytes must be bounded');
+  assert.equal(control.reserve(2), true);
+  assert.equal(first.admitTool(), true);
+  assert.equal(third.admitTool(), false, 'Long tool slots must be separately bounded');
+  assert.deepEqual(budget.snapshot(), { requests: 3, tools: 1, payloadBytes: 6 });
+  first.close(); first.close(); // Idempotent release.
+  assert.equal(third.admitTool(), true);
+  assert.equal(third.reserve(4), true);
+  control.close(); third.close();
+  assert.deepEqual(budget.snapshot(), { requests: 0, tools: 0, payloadBytes: 0 });
+}
+
 const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'chatx-https-mcp-'));
 const bundle = path.join(dir, 'bridge.mjs');
 const adminBundle = path.join(dir, 'oauth-admin.mjs');
 const fixture = path.join(dir, 'fake-mcp.mjs');
 const settingsFile = path.join(dir, 'settings.json');
 const storeDir = path.join(dir, 'oauth-authorizations');
+const cancellationStarted = path.join(dir, 'cancel-started');
+const cancellationNotified = path.join(dir, 'cancel-notified');
+const cancellationFinished = path.join(dir, 'cancel-finished');
 fs.writeFileSync(settingsFile, JSON.stringify({ httpsMcp: { authorizationTtlHours: 168 } }));
 const issuer = 'https://newrow.fun';
 const redirectUri = 'https://chatgpt.com/connector/oauth/callback';
@@ -101,6 +126,29 @@ try {
     assert.equal(output.status, 0, output.stderr);
     return JSON.parse(output.stdout);
   };
+  // Older persisted grants predate generation markers. Listing must
+  // agree with actual token acceptance on both sides of global revocation.
+  const oldDir = path.join(dir, 'legacy-revocation-fixture');
+  const older = authorizationStore({ directory: oldDir, settingsPath: settingsFile,
+    createLegacyIfMissing: false });
+  older.revokeAll();
+  const revocationAt = JSON.parse(fs.readFileSync(
+    path.join(oldDir, 'revoked-all.json'), 'utf8')).revokedAtMs;
+  for (const [digit, approvedAtMs, expectedRevoked] of [
+    ['a', revocationAt - 3000, true],
+    ['b', revocationAt + 1000, false],
+  ]) {
+    const id = digit.repeat(64);
+    fs.writeFileSync(path.join(oldDir, 'grants', id + '.json'), JSON.stringify({
+      id, clientHash: 'e'.repeat(64),
+      issuedAt: Math.floor(Date.now() / 1000),
+      approvedAtMs, expiresAt: Math.floor(Date.now() / 1000) + 3600,
+    }));
+    assert.equal(older.activeGrant(id) === null, expectedRevoked);
+    assert.equal(older.listGrants().grants.find((g) => g.id === id).revoked,
+      expectedRevoked, 'Listing must match bearer authorization of legacy grants');
+  }
+
   const managed = adminStore.createGrant('client-a', 168, Date.now(),
     adminStore.revocationGeneration());
   assert.ok(cli('list').grants.some((row) => row.id === managed.id && !row.revoked));
@@ -116,9 +164,20 @@ try {
 
   fs.writeFileSync(fixture, `
 import readline from 'node:readline';
+import fs from 'node:fs';
 const rl = readline.createInterface({ input: process.stdin, crlfDelay: Infinity });
+const cancelable = new Map();
 for await (const line of rl) {
   const req = JSON.parse(line);
+  if (req.method === 'notifications/cancelled') {
+    const task = cancelable.get(req.params?.requestId);
+    if (task) {
+      clearTimeout(task);
+      cancelable.delete(req.params.requestId);
+      fs.writeFileSync(process.env.CHATX_TEST_CANCEL_NOTIFIED, 'yes');
+    }
+    continue;
+  }
   if (typeof req.id === 'undefined') continue;
   let result;
   if (req.method === 'initialize') {
@@ -128,6 +187,17 @@ for await (const line of rl) {
     result = { tools: [{ name: 'echo', description: 'Echo fixture',
       inputSchema: { type: 'object', properties: { value: { type: 'string' } } } }] };
   } else if (req.method === 'tools/call') {
+    if (req.params.arguments?.value === '__cancel__') {
+      fs.writeFileSync(process.env.CHATX_TEST_CANCEL_STARTED, 'yes');
+      const timer = setTimeout(() => {
+        cancelable.delete(req.id);
+        fs.writeFileSync(process.env.CHATX_TEST_CANCEL_FINISHED, 'yes');
+        process.stdout.write(JSON.stringify({ jsonrpc: '2.0', id: req.id,
+          result: { content: [{ type: 'text', text: 'uncanceled' }] } }) + '\\n');
+      }, 900);
+      cancelable.set(req.id, timer);
+      continue;
+    }
     if (req.params.arguments?.value === '__hold__') {
       await new Promise((resolve) => setTimeout(resolve, 300));
     }
@@ -155,7 +225,10 @@ for await (const line of rl) {
       CHATX_MCP_INSTANCE_NONCE: instanceNonce,
       CHATX_MCP_LAUNCHER: fixture, CHATX_MCP_ENTRY: fixture,
       CHATX_MCP_NODE: process.execPath, CHATX_MCP_HOME: dir,
-      CHATX_MCP_SETTINGS_PATH: settingsFile, CHATX_MCP_AUTH_STORE: storeDir
+      CHATX_MCP_SETTINGS_PATH: settingsFile, CHATX_MCP_AUTH_STORE: storeDir,
+      CHATX_TEST_CANCEL_STARTED: cancellationStarted,
+      CHATX_TEST_CANCEL_NOTIFIED: cancellationNotified,
+      CHATX_TEST_CANCEL_FINISHED: cancellationFinished
     }
   });
   let bridgeErrors = '';
@@ -281,16 +354,41 @@ for await (const line of rl) {
   assert.equal(tools.result.tools[0].securitySchemes?.[0].type, 'oauth2');
   assert.deepEqual(tools.result.tools[0].securitySchemes?.[0].scopes, ['chatx:tools']);
   const called = await rpc(3, 'tools/call', { name: 'echo', arguments: { value: 'https-mcp-ok' } });
+  const cancel = new AbortController();
+  const cancelledRequest = request('/mcp', { method: 'POST',
+    signal: cancel.signal, headers: authHeaders,
+    body: JSON.stringify({ jsonrpc: '2.0', id: 333, method: 'tools/call',
+      params: { name: 'echo', arguments: { value: '__cancel__' } } }),
+  }).catch(() => null);
+  for (let attempt = 0; attempt < 40 && !fs.existsSync(cancellationStarted); attempt++) {
+    await new Promise((resolve) => setTimeout(resolve, 25));
+  }
+  assert.ok(fs.existsSync(cancellationStarted), 'Test MCP tool must start');
+  cancel.abort();
+  await cancelledRequest;
+  for (let attempt = 0; attempt < 45 && !fs.existsSync(cancellationNotified); attempt++) {
+    await new Promise((resolve) => setTimeout(resolve, 25));
+  }
+  assert.ok(fs.existsSync(cancellationNotified),
+    'Aborted WSS/HTTP requests must send MCP notifications/cancelled to stdio');
+  await new Promise((resolve) => setTimeout(resolve, 930));
+  assert.equal(fs.existsSync(cancellationFinished), false,
+    'A cooperative Desktop Commander fixture must stop when notified');
   // Streaming transport supports 64 requests, but Node's JSON-RPC materializes
   // results. The local Bridge must refuse excess work instead of buffering
   // 64 * 64 MiB in the same process.
-  const concurrent = await Promise.all(Array.from({ length: 11 }, (_, i) =>
+  const competingTools = Array.from({ length: 11 }, (_, i) =>
     request('/mcp', {
       method: 'POST', headers: authHeaders,
       body: JSON.stringify({ jsonrpc: '2.0', id: 300 + i,
         method: 'tools/call', params: { name: 'echo', arguments: { value: '__hold__' } } }),
     })
-  ));
+  );
+  await new Promise((resolve) => setTimeout(resolve, 50));
+  const pingWhileToolsBusy = await rpc(500, 'ping');
+  assert.deepEqual(pingWhileToolsBusy.result, {},
+    'Control requests must remain serviceable under tool saturation');
+  const concurrent = await Promise.all(competingTools);
   const statuses = concurrent.map((response) => response.status);
   assert.ok(statuses.includes(429), 'Excess MCP JSON requests must get bounded 429');
   assert.ok(statuses.includes(200), 'Accepted MCP requests must continue normally');

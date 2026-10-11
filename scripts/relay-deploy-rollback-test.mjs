@@ -13,6 +13,11 @@ const begin = source.indexOf('\nrollback() {');
 const end = source.indexOf('\ntrap rollback ERR HUP INT TERM', begin);
 assert.ok(begin >= 0 && end > begin, 'rollback function must be available');
 const rollback = source.slice(begin, end);
+// Exercise the REAL install.sh argument validation before any root, Nginx or
+// systemd checks. This is where old IDs used to fail despite passing UI/Rust.
+const rootCheck = source.indexOf('\nif [ "$(id -u)"');
+assert.ok(rootCheck > 0, 'installer root safety check must exist');
+const validateOnly = source.slice(0, rootCheck);
 const bash = process.platform === 'win32'
   ? path.join(process.env.ProgramFiles || 'C:\\Program Files', 'Git', 'bin', 'bash.exe')
   : '/bin/bash';
@@ -21,6 +26,19 @@ const scratch = fs.mkdtempSync(path.join(os.tmpdir(), 'chatx-rollback-'));
 const slash = (p) => p.replace(/\\/g, '/');
 const quote = (value) => "'" + slash(value).replace(/'/g, "'\\''") + "'";
 try {
+  const checkId = (id) => spawnSync(bash,
+    ['-c', validateOnly, '--', 'check', 'relay.example.com', id],
+    { encoding: 'utf8', timeout: 10000 });
+  for (const size of [16, 32, 78]) {
+    for (const digit of ['a', 'A']) {
+      const id = 'd_' + digit.repeat(size);
+      assert.equal(checkId(id).status, 0, `installer must accept existing ${size}-character IDs`);
+    }
+  }
+  for (const id of ['d_' + 'a'.repeat(15), 'd_' + 'b'.repeat(79),
+    'd_' + 'z'.repeat(32), '../../invalid']) {
+    assert.equal(checkId(id).status, 2, 'installer must reject invalid ID: ' + id);
+  }
   const backup = path.join(scratch, 'backup');
   const active = path.join(scratch, 'active');
   fs.mkdirSync(backup);
