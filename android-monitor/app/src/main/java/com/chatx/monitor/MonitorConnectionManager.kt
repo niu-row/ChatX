@@ -1,6 +1,8 @@
 package com.chatx.monitor
 
 import android.content.Context
+import android.os.SystemClock
+import android.util.Log
 import java.io.Closeable
 import java.io.IOException
 import java.util.concurrent.CountDownLatch
@@ -58,7 +60,10 @@ class MonitorConnectionManager(
     private val stopped = AtomicBoolean(true)
     private val pollInFlight = AtomicBoolean(false)
     private val activeCandidate = AtomicReference<MonitorRouteCandidate?>(null)
-    private var pollFuture: ScheduledFuture<*>? = null
+    private val pollIntervalSeconds = store.getPollIntervalSeconds()
+    @Volatile private var pollFuture: ScheduledFuture<*>? = null
+    @Volatile private var lastPollCompletedAt = 0L
+    @Volatile private var unexpectedPollFailures = 0
     @Volatile private var consecutiveFailures = 0
     private var activeRouteFailures = 0
     private var preferredRecoverySuccesses = 0
@@ -70,13 +75,23 @@ class MonitorConnectionManager(
         activeRouteFailures = 0
         preferredRecoverySuccesses = 0
         lastPreferredProbeAt = 0L
+        unexpectedPollFailures = 0
+        lastPollCompletedAt = SystemClock.elapsedRealtime()
         pollFuture = scheduler.scheduleWithFixedDelay(
             { pollCycle() },
             0,
-            store.getPollIntervalSeconds(),
+            pollIntervalSeconds,
             TimeUnit.SECONDS,
         )
     }
+
+    /** A completed or silent periodic task must not look like a live monitor forever. */
+    fun isPollerStalled(now: Long = SystemClock.elapsedRealtime()): Boolean =
+        !stopped.get() && (
+            pollFuture?.isDone == true ||
+                unexpectedPollFailures >= 3 ||
+                MonitorPollWatchdog.isStalled(lastPollCompletedAt, now, pollIntervalSeconds)
+        )
 
     override fun close() = stop()
 
@@ -142,9 +157,18 @@ class MonitorConnectionManager(
         if (stopped.get() || !pollInFlight.compareAndSet(false, true)) return
         try {
             doPollCycle()
+            unexpectedPollFailures = 0
         } catch (error: Throwable) {
-            publishFailure(error.message ?: error.javaClass.simpleName, false)
+            unexpectedPollFailures += 1
+            Log.e(TAG, "Monitor polling cycle failed", error)
+            // A listener/notification error must not terminate scheduleWithFixedDelay.
+            runCatching {
+                if (!stopped.get()) {
+                    publishFailure(error.message ?: error.javaClass.simpleName, false)
+                }
+            }.onFailure { Log.e(TAG, "Failed to report Monitor poll error", it) }
         } finally {
+            lastPollCompletedAt = SystemClock.elapsedRealtime()
             pollInFlight.set(false)
         }
     }
@@ -270,6 +294,7 @@ class MonitorConnectionManager(
         candidate: MonitorRouteCandidate,
         snapshot: MonitorSnapshot,
     ) {
+        if (stopped.get()) return
         val previousUrl = activeCandidate.get()?.snapshotUrl
         consecutiveFailures = 0
         activeRouteFailures = 0
@@ -405,6 +430,7 @@ class MonitorConnectionManager(
         )
 
     companion object {
+        private const val TAG = "ChatXMonitorPoll"
         private const val AUTO_FAILOVER_FAILURE_THRESHOLD = 2
         private const val AUTO_RECOVERY_SUCCESS_THRESHOLD = 2
         private const val AUTO_RECOVERY_PROBE_INTERVAL_MS = 20_000L
@@ -492,5 +518,15 @@ class MonitorConnectionManager(
             return result.get()
                 ?: throw IOException(error.get() ?: "HTTPS Snapshot 不可用。")
         }
+    }
+}
+
+
+/** Detects missing periodic work, including a scheduled task cancelled by an exception. */
+internal object MonitorPollWatchdog {
+    fun isStalled(lastCompletedAt: Long, now: Long, pollIntervalSeconds: Long): Boolean {
+        if (lastCompletedAt <= 0L || now < lastCompletedAt) return false
+        val deadlineMs = maxOf(90_000L, pollIntervalSeconds * 3_000L)
+        return now - lastCompletedAt > deadlineMs
     }
 }

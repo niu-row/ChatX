@@ -3,6 +3,9 @@ package com.chatx.monitor
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Test
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.Executors
+import java.util.concurrent.TimeUnit
 
 class AlertEngineTest {
     private fun snapshot(
@@ -98,6 +101,68 @@ class AlertEngineTest {
         assertTrue(engine.onSnapshot(down, emptySet()).isEmpty())
         assertEquals(1, engine.onSnapshot(snapshot(), emptySet())
             .count { it.type == AlertType.RECOVERED })
+    }
+
+    @Test
+    fun httpsModeSuppressesTunnelAlarmsAndNotifiesOnlyAfterGracePeriod() {
+        val engine = AlertEngine()
+        val inactive = McpConnectionState(false, false, "stopped")
+        val checking = McpConnectionState(true, false, "reconnecting")
+        val first = snapshot(tunnelActive = false, desiredConnected = false)
+            .copy(connections = McpConnections("https", inactive, checking))
+        assertTrue(engine.onSnapshot(first, emptySet()).isEmpty())
+        assertTrue(engine.onSnapshot(
+            first.copy(serverTime = first.serverTime + 10_000L), emptySet()
+        ).isEmpty())
+        val delayed = engine.onSnapshot(
+            first.copy(serverTime = first.serverTime + 31_000L), emptySet()
+        )
+        assertEquals(1, delayed.count { it.type == AlertType.HTTPS_DOWN })
+        assertEquals(0, delayed.count { it.type == AlertType.TUNNEL_DOWN })
+        assertTrue(engine.onSnapshot(
+            first.copy(serverTime = first.serverTime + 45_000L), emptySet()
+        ).isEmpty())
+        val online = first.copy(
+            serverTime = first.serverTime + 50_000L,
+            connections = McpConnections(
+                "https", inactive, McpConnectionState(true, true, "connected")
+            )
+        )
+        assertEquals(1, engine.onSnapshot(online, emptySet())
+            .count { it.type == AlertType.RECOVERED })
+        assertTrue(engine.onSnapshot(online.copy(
+            connections = McpConnections("none", inactive, inactive)
+        ), emptySet()).isEmpty())
+    }
+
+    @Test
+    fun simultaneousOfflineChecksEmitOnlyOneAlert() {
+        val engine = AlertEngine()
+        val thresholds = setOf(60_000L)
+        assertTrue(engine.onUnreachable(1_000L, thresholds).isEmpty())
+        val pool = Executors.newFixedThreadPool(8)
+        val ready = CountDownLatch(1)
+        try {
+            val results = (0 until 80).map {
+                pool.submit<List<AlertEvent>> {
+                    check(ready.await(5, TimeUnit.SECONDS))
+                    engine.onUnreachable(61_001L, thresholds)
+                }
+            }
+            ready.countDown()
+            val count = results.sumOf { future ->
+                future.get(5, TimeUnit.SECONDS).count {
+                    it.type == AlertType.HOST_OFFLINE
+                }
+            }
+            assertEquals(1, count)
+            val recovered = engine.onSnapshot(
+                snapshot(receivedAt = 70_000L), thresholds,
+            )
+            assertEquals(1, recovered.count { it.type == AlertType.RECOVERED })
+        } finally {
+            pool.shutdownNow()
+        }
     }
 
     @Test

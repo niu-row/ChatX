@@ -5,17 +5,23 @@ import android.content.Context
 import android.content.Intent
 import android.content.pm.ServiceInfo
 import android.os.Build
+import android.os.Handler
 import android.os.IBinder
+import android.os.Looper
+import android.util.Log
 import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
 import org.json.JSONObject
 
 class MonitorService : Service() {
     private val alertEngine = AlertEngine()
+    private val alertDispatchLock = Any()
     private val timer = Executors.newSingleThreadScheduledExecutor()
+    private val mainHandler = Handler(Looper.getMainLooper())
     private lateinit var store: SecureStore
-    private var connection: MonitorConnectionManager? = null
-    private var activePairing: PairingConfig? = null
+    @Volatile private var connection: MonitorConnectionManager? = null
+    @Volatile private var activePairing: PairingConfig? = null
+    @Volatile private var connectionGeneration = 0L
 
     @Volatile
     private var transportReachable = false
@@ -39,7 +45,10 @@ class MonitorService : Service() {
             startForeground(NotificationCenter.FOREGROUND_ID, notification)
         }
         timer.scheduleAtFixedRate(
-            { offlineTick() },
+            {
+                runCatching { offlineTick() }
+                    .onFailure { Log.e(TAG, "Monitor watchdog tick failed", it) }
+            },
             30,
             30,
             TimeUnit.SECONDS,
@@ -56,15 +65,15 @@ class MonitorService : Service() {
             return START_NOT_STICKY
         }
         if (intent?.action == ACTION_RELOAD) {
-            connection?.stop()
-            connection = null
-            activePairing = null
-            transportReachable = false
-            startConnection()
+            restartConnection()
             return START_STICKY
         }
         if (intent?.action == ACTION_REEVALUATE) {
-            if (connection == null) startConnection() else connection?.reevaluatePolicy()
+            when {
+                connection == null -> startConnection()
+                connection?.isPollerStalled() == true -> restartConnection()
+                else -> connection?.reevaluatePolicy()
+            }
             return START_STICKY
         }
         if (connection == null) {
@@ -73,22 +82,29 @@ class MonitorService : Service() {
         return START_STICKY
     }
 
+    private fun restartConnection() {
+        connectionGeneration += 1 // Invalidate callbacks from the old worker first.
+        connection?.stop()
+        connection = null
+        activePairing = null
+        transportReachable = false
+        startConnection()
+    }
+
     private fun startConnection() {
         val config = store.loadPairing()
         if (config == null) {
-            NotificationCenter.updateForeground(
-                this,
-                "尚未配对 ChatX",
-            )
+            updateForegroundStatus("尚未配对 ChatX")
             return
         }
+        val generation = ++connectionGeneration
         activePairing = config
         connection = MonitorConnectionManager(
             applicationContext,
             config,
             object : MonitorConnectionManager.Listener {
                 override fun onTransportState(state: MonitorTransportState) {
-                    if (!isActivePairing(config)) return
+                    if (!isActivePairing(config, generation)) return
                     when (state.phase) {
                         "connected" -> transportReachable = state.desktopOnline != false
                         "desktop_offline", "closed" -> transportReachable = false
@@ -98,24 +114,26 @@ class MonitorService : Service() {
                             transportReachable = false
                         }
                     }
-                    handleTransportState(config, state)
+                    handleTransportState(config, state, generation)
                 }
 
                 override fun onSnapshot(snapshot: MonitorSnapshot) {
-                    if (!isActivePairing(config)) return
+                    if (!isActivePairing(config, generation)) return
                     transportReachable = true
-                    handleSnapshot(config, snapshot)
+                    handleSnapshot(config, snapshot, generation)
                 }
             },
         ).also { it.start() }
     }
 
     override fun onDestroy() {
+        connectionGeneration += 1
         store.setMonitorServiceRunning(false)
         connection?.stop()
         connection = null
         activePairing = null
         timer.shutdownNow()
+        mainHandler.removeCallbacksAndMessages(null)
         super.onDestroy()
     }
 
@@ -124,10 +142,9 @@ class MonitorService : Service() {
     private fun handleSnapshot(
         config: PairingConfig,
         snapshot: MonitorSnapshot,
+        generation: Long,
     ) {
-        if (!isActivePairing(config)) return
-        if (isOlderThanStoredSnapshot(snapshot.serverTime)) return
-        connection?.updateRoutes(snapshot.endpoints)
+        if (!isActivePairing(config, generation)) return
         val json = StatusCodec.snapshot(snapshot)
         if (!store.setLastSnapshotJson(
                 config.desktopId,
@@ -137,43 +154,33 @@ class MonitorService : Service() {
         ) {
             return
         }
-        NotificationCenter.updateForeground(
-            this,
-            StatusCodec.foregroundText(snapshot),
-        )
-        val thresholds = store.getAlertThresholds()
-        alertEngine.onSnapshot(
-            snapshot,
-            thresholds,
-            store.continuousModeStartedAt(),
-        ).forEach(::postAlert)
+        connection?.updateRoutes(snapshot.endpoints)
+        updateForegroundStatus(StatusCodec.foregroundText(snapshot))
+        synchronized(alertDispatchLock) {
+            val thresholds = store.getAlertThresholds()
+            alertEngine.onSnapshot(
+                snapshot,
+                thresholds,
+                store.continuousModeStartedAt(),
+            ).forEach(::postAlert)
+        }
         broadcast(json)
     }
 
-    private fun isActivePairing(config: PairingConfig): Boolean {
+    private fun isActivePairing(config: PairingConfig, generation: Long): Boolean {
+        if (generation != connectionGeneration) return false
         val active = activePairing ?: return false
         return active.desktopId == config.desktopId &&
             active.deviceId == config.deviceId &&
             store.hasPairing(config.desktopId, config.deviceId)
     }
 
-    private fun isOlderThanStoredSnapshot(serverTime: Long): Boolean {
-        if (serverTime <= 0L) return false
-        val previous = store.getLastSnapshotJson()
-            ?.let { raw ->
-                runCatching {
-                    JSONObject(raw).optLong("serverTime", 0L)
-                }.getOrDefault(0L)
-            }
-            ?: 0L
-        return previous > 0L && serverTime < previous
-    }
-
     private fun handleTransportState(
         config: PairingConfig,
         state: MonitorTransportState,
+        generation: Long,
     ) {
-        if (!isActivePairing(config)) return
+        if (!isActivePairing(config, generation)) return
         if (state.phase == "degraded" && transportReachable) {
             return
         }
@@ -190,7 +197,7 @@ class MonitorService : Service() {
             "closed" -> "监控已停止"
             else -> "正在寻找 ChatX…"
         }
-        NotificationCenter.updateForeground(this, text)
+        updateForegroundStatus(text)
 
         if (!transportReachable &&
             state.phase in setOf("desktop_offline", "reconnecting", "degraded")
@@ -210,12 +217,41 @@ class MonitorService : Service() {
     }
 
     private fun offlineTick() {
-        if (!transportReachable) {
-            checkOfflineAlerts()
+        val current = connection
+        if (current?.isPollerStalled() == true) {
+            mainHandler.post {
+                if (current === connection && current.isPollerStalled()) {
+                    val generation = connectionGeneration
+                    activePairing?.let { config ->
+                        transportReachable = false
+                        runCatching {
+                            handleTransportState(
+                                config,
+                                MonitorTransportState(
+                                    phase = "reconnecting",
+                                    error = "Monitor 轮询中断，正在自动重建连接。",
+                                ),
+                                generation,
+                            )
+                        }.onFailure { Log.e(TAG, "Failed to report stalled poller", it) }
+                    }
+                    Log.w(TAG, "Monitor poller stalled; rebuilding polling connection")
+                    runCatching { restartConnection() }
+                        .onFailure { Log.e(TAG, "Failed to restart Monitor polling", it) }
+                }
+            }
+        } else if (current == null) {
+            // Retry when a transient pairing/Keystore failure prevented startup.
+            mainHandler.post {
+                runCatching {
+                    if (connection == null && store.loadPairing() != null) startConnection()
+                }.onFailure { Log.e(TAG, "Failed to restore Monitor polling", it) }
+            }
         }
+        if (!transportReachable) checkOfflineAlerts()
     }
 
-    private fun checkOfflineAlerts() {
+    private fun checkOfflineAlerts() = synchronized(alertDispatchLock) {
         val now = System.currentTimeMillis()
         alertEngine.onUnreachable(
             now,
@@ -223,8 +259,14 @@ class MonitorService : Service() {
         ).forEach(::postAlert)
     }
 
+    private fun updateForegroundStatus(text: String) {
+        runCatching { NotificationCenter.updateForeground(this, text) }
+            .onFailure { Log.e(TAG, "Failed to update Monitor notification", it) }
+    }
+
     private fun postAlert(event: AlertEvent) {
-        NotificationCenter.postAlert(this, event)
+        runCatching { NotificationCenter.postAlert(this, event) }
+            .onFailure { Log.e(TAG, "Failed to post Monitor alert", it) }
         store.appendEvent(
             MonitorEvent(
                 at = System.currentTimeMillis(),
@@ -244,6 +286,7 @@ class MonitorService : Service() {
     }
 
     companion object {
+        private const val TAG = "ChatXMonitorService"
         const val ACTION_STATUS = "com.chatx.monitor.STATUS"
         const val EXTRA_STATUS_JSON = "status_json"
         private const val ACTION_STOP = "com.chatx.monitor.STOP"
@@ -274,5 +317,41 @@ class MonitorService : Service() {
         fun stop(context: Context) {
             context.stopService(Intent(context, MonitorService::class.java))
         }
+    }
+}
+
+
+/** Prevents cached high timestamps from blocking valid snapshots indefinitely. */
+internal object MonitorSnapshotFreshness {
+    fun shouldRejectNonNewer(
+        previousServerTime: Long,
+        previousReceivedAt: Long,
+        serverTime: Long,
+        now: Long,
+        staleAfterMs: Long,
+    ): Boolean {
+        if (serverTime <= 0L || previousServerTime <= 0L) return false
+        if (serverTime > previousServerTime) return false
+        if (serverTime < previousServerTime) {
+            return shouldRejectOlder(
+                previousServerTime, previousReceivedAt, serverTime, now, staleAfterMs,
+            )
+        }
+        return previousReceivedAt > 0L && now >= previousReceivedAt &&
+            now - previousReceivedAt <= staleAfterMs
+    }
+
+    fun shouldRejectOlder(
+        previousServerTime: Long,
+        previousReceivedAt: Long,
+        serverTime: Long,
+        now: Long,
+        staleAfterMs: Long,
+    ): Boolean {
+        if (serverTime <= 0L || previousServerTime <= 0L || serverTime >= previousServerTime) {
+            return false
+        }
+        if (previousReceivedAt <= 0L || now < previousReceivedAt) return false
+        return now - previousReceivedAt <= staleAfterMs
     }
 }

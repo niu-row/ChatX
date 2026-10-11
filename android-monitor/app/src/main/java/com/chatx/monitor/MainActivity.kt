@@ -18,6 +18,7 @@ import android.text.TextUtils
 import android.view.Gravity
 import android.view.View
 import android.view.ViewGroup
+import android.view.ViewTreeObserver
 import android.widget.CheckBox
 import android.widget.EditText
 import android.widget.ImageView
@@ -37,7 +38,10 @@ class MainActivity : Activity() {
     private lateinit var store: SecureStore
     private lateinit var ui: UiKit
     private lateinit var pageContent: LinearLayout
+    private lateinit var pageScroll: ScrollView
     private lateinit var bottomNav: LinearLayout
+    private var lastRenderedPage: Page? = null
+    private var renderRevision = 0L
     private lateinit var actions: MonitorActionController
     private lateinit var pairingActions: PairingActionController
     private lateinit var settingsDialogs: MonitorSettingsDialogController
@@ -50,7 +54,9 @@ class MainActivity : Activity() {
     private val statusReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context?, intent: Intent?) {
             val json = intent?.getStringExtra(MonitorService.EXTRA_STATUS_JSON) ?: return
-            latestStatusJson = json
+            val authoritative = store.getLastSnapshotJson() ?: json
+            if (authoritative == latestStatusJson) return
+            latestStatusJson = authoritative
             if (currentPage == Page.OVERVIEW || currentPage == Page.CONNECTION) {
                 renderCurrentPage()
             }
@@ -78,6 +84,12 @@ class MainActivity : Activity() {
 
     override fun onResume() {
         super.onResume()
+        // Broadcasts can be missed while the Activity/process is suspended.
+        latestStatusJson = store.getLastSnapshotJson()
+        if (store.isMonitorServiceRunning() && store.loadPairing() != null) {
+            MonitorService.start(this)
+            MonitorService.reevaluate(this)
+        }
         if (::pageContent.isInitialized) renderCurrentPage()
     }
 
@@ -151,7 +163,7 @@ class MainActivity : Activity() {
             setBackgroundColor(ui.color(R.color.cx_bg))
         }
         root.addView(buildHeader(), ui.margin(bottom = 8))
-        val scroll = ScrollView(this).apply {
+        pageScroll = ScrollView(this).apply {
             isFillViewport = true
             overScrollMode = View.OVER_SCROLL_NEVER
         }
@@ -159,7 +171,7 @@ class MainActivity : Activity() {
             val horizontal = ui.dp(ui.pageHorizontalPadding)
             setPadding(horizontal, ui.dp(6), horizontal, ui.dp(18))
         }
-        scroll.addView(
+        pageScroll.addView(
             pageContent,
             ViewGroup.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT,
@@ -167,7 +179,7 @@ class MainActivity : Activity() {
             ),
         )
         root.addView(
-            scroll,
+            pageScroll,
             LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT,
                 0,
@@ -268,12 +280,33 @@ class MainActivity : Activity() {
             renderApp()
             return
         }
+        val page = currentPage
+        val samePage = lastRenderedPage == page
+        val offset = if (samePage && ::pageScroll.isInitialized) pageScroll.scrollY else 0
+        val revision = ++renderRevision
         pageContent.removeAllViews()
-        when (currentPage) {
+        when (page) {
             Page.OVERVIEW -> renderOverview()
             Page.ALERTS -> renderAlerts()
             Page.CONNECTION -> renderConnection()
             Page.SETTINGS -> renderSettings()
+        }
+        lastRenderedPage = page
+        if (::pageScroll.isInitialized) {
+            // Restore before the next frame is drawn, not after a visible jump.
+            pageScroll.viewTreeObserver.addOnPreDrawListener(
+                object : ViewTreeObserver.OnPreDrawListener {
+                    override fun onPreDraw(): Boolean {
+                        pageScroll.viewTreeObserver.removeOnPreDrawListener(this)
+                        if (renderRevision == revision && currentPage == page) {
+                            val maximum =
+                                (pageContent.height - pageScroll.height).coerceAtLeast(0)
+                            pageScroll.scrollTo(0, offset.coerceAtMost(maximum))
+                        }
+                        return true
+                    }
+                },
+            )
         }
     }
 
@@ -283,9 +316,14 @@ class MainActivity : Activity() {
     }
 
     private fun renderOverview() {
-        pageHeading("概览", "ChatX、Tunnel 与 MCP 的实时运行状态")
+        pageHeading("概览", "ChatX 主机、当前 MCP 链路与工具调用")
         val root = latestStatusJson?.let { runCatching { JSONObject(it) }.getOrNull() }
-        val reachable = root?.optBoolean("reachable", false) == true
+        val receivedAt = root?.optLong("receivedAt", 0L) ?: 0L
+        val statusStale = root?.optBoolean("reachable", false) == true &&
+            (receivedAt <= 0L ||
+                (System.currentTimeMillis() - receivedAt).coerceAtLeast(0L) >
+                store.getSnapshotStaleSeconds() * 1_000L)
+        val reachable = root?.optBoolean("reachable", false) == true && !statusStale
         val hero = ui.heroCard()
         val top = ui.row()
         val heroCopy = ui.column()
@@ -294,6 +332,7 @@ class MainActivity : Activity() {
             ui.title(
                 when {
                     root == null -> "等待状态"
+                    statusStale -> "监控数据已过期"
                     reachable -> "ChatX 在线"
                     else -> "ChatX 不可达"
                 },
@@ -301,7 +340,6 @@ class MainActivity : Activity() {
             ),
             ui.margin(top = 6),
         )
-        val receivedAt = root?.optLong("receivedAt", 0L) ?: 0L
         heroCopy.addView(
             ui.muted(
                 if (receivedAt > 0) "更新于 ${formatTime(receivedAt)}"
@@ -312,8 +350,10 @@ class MainActivity : Activity() {
         top.addView(heroCopy, ui.margin(width = 0, weight = 1f))
         top.addView(
             ui.pill(
-                if (reachable) "ONLINE" else if (root == null) "WAITING" else "OFFLINE",
+                if (reachable) "ONLINE" else if (statusStale) "STALE"
+                else if (root == null) "WAITING" else "OFFLINE",
                 if (reachable) UiKit.Tone.SUCCESS
+                else if (statusStale) UiKit.Tone.WARNING
                 else if (root == null) UiKit.Tone.NEUTRAL
                 else UiKit.Tone.DANGER,
             ),
@@ -342,11 +382,39 @@ class MainActivity : Activity() {
                 else -> UiKit.Tone.DANGER
             }
             val mcpState = mcp.optString("state", "idle")
+            val connectionStates = root.optJSONObject("connections")
+            val selectedMode = connectionStates?.optString("activeMode", "") ?: ""
+            val selectedObject = when (selectedMode) {
+                "https" -> connectionStates?.optJSONObject("httpsMcp")
+                "tunnel" -> connectionStates?.optJSONObject("tunnel")
+                else -> null
+            }
+            val connectionLabel = when (selectedMode) {
+                "https" -> "HTTPS MCP"
+                "tunnel" -> "Tunnel"
+                "none" -> "连接方式"
+                else -> "Tunnel" // Legacy desktop snapshot.
+            }
+            val connectionStatus = when {
+                connectionStates == null -> tunnelLabel
+                selectedMode == "none" -> "Stopped"
+                selectedObject?.optBoolean("connected") == true -> "Ready"
+                selectedObject?.optString("state") == "reconnecting" -> "Retrying"
+                selectedObject?.optString("state") == "checking" -> "Checking"
+                else -> "Down"
+            }
+            val connectionTone = when {
+                connectionStates == null -> tunnelTone
+                connectionStatus == "Ready" -> UiKit.Tone.SUCCESS
+                connectionStatus == "Stopped" -> UiKit.Tone.NEUTRAL
+                connectionStatus == "Down" -> UiKit.Tone.DANGER
+                else -> UiKit.Tone.WARNING
+            }
             metrics.addView(
                 ui.statusTile(
-                    "Tunnel",
-                    tunnelLabel,
-                    tunnelTone,
+                    connectionLabel,
+                    connectionStatus,
+                    connectionTone,
                 ),
                 ui.margin(width = 0, weight = 1f, right = 4),
             )
@@ -382,13 +450,15 @@ class MainActivity : Activity() {
                 ui.muted("Proxy $proxyMode · $proxySource", 12f),
                 ui.margin(width = 0, weight = 1f, left = 10),
             )
-            hero.addView(networkRow, ui.margin(top = 14))
-            val controlPlaneReason = tunnel.optString("controlPlaneReason").trim()
-            if (controlPlaneReason.isNotBlank()) {
-                hero.addView(
-                    ui.muted("Control Plane: $controlPlaneReason", 11f),
-                    ui.margin(top = 7),
-                )
+            if (selectedMode != "https" && selectedMode != "none") {
+                hero.addView(networkRow, ui.margin(top = 14))
+                val controlPlaneReason = tunnel.optString("controlPlaneReason").trim()
+                if (controlPlaneReason.isNotBlank()) {
+                    hero.addView(
+                        ui.muted("Control Plane: $controlPlaneReason", 11f),
+                        ui.margin(top = 7),
+                    )
+                }
             }
             val endpoint = currentEndpointUrl()
                 ?: root.optString("endpointUrl", "")
@@ -398,7 +468,10 @@ class MainActivity : Activity() {
             )
         } else if (root != null) {
             hero.addView(
-                ui.muted(root.optString("error", "无法连接桌面 ChatX")),
+                ui.muted(
+                    if (statusStale) "状态长时间未更新；监控线程可能已中断，请检查监控服务。"
+                    else root.optString("error", "无法连接桌面 ChatX"),
+                ),
                 ui.margin(top = 14),
             )
         }
@@ -440,7 +513,16 @@ class MainActivity : Activity() {
             val probeFresh = probeAt > 0L && (statusRoot.optLong("serverTime", 0L) - probeAt).coerceAtLeast(0L) <= 12_000L
             val tunnelHealth = tunnel.optString("health", "unknown")
             val tunnelDown = tunnel.optBoolean("desiredConnected", false) && (tunnelHealth == "down" || !probeFresh)
+            val connections = statusRoot.optJSONObject("connections")
+            val https = connections?.optJSONObject("httpsMcp")
+            val httpsBad = connections?.optString("activeMode") == "https" &&
+                https?.optBoolean("connected") == false
             val alert = when {
+                httpsBad -> Triple(
+                    "HTTPS MCP 连接检查中",
+                    "公网 MCP 尚未验证成功；ChatX 正在检查 Node Bridge 与 SSH 转发。",
+                    UiKit.Tone.WARNING,
+                )
                 tunnelDown -> Triple(
                     "Tunnel 已断开",
                     tunnelRecoveryDetail(
@@ -591,7 +673,13 @@ class MainActivity : Activity() {
                 ui.body(item.optString("toolName", "unknown"), 14f),
             )
             left.addView(
-                ui.muted(recentCallTime(item), 12f),
+                ui.muted(
+                    listOfNotNull(
+                        recentCallTime(item),
+                        item.optString("source").takeIf { it.isNotBlank() },
+                    ).joinToString(" · "),
+                    12f,
+                ),
                 ui.margin(top = 3),
             )
             row.addView(left, ui.margin(width = 0, weight = 1f, right = 8))
@@ -1451,7 +1539,7 @@ class MainActivity : Activity() {
     private enum class Page(val label: String) {
         OVERVIEW("概览"),
         ALERTS("告警"),
-        CONNECTION("连接"),
+        CONNECTION("监控网络"),
         SETTINGS("设置"),
     }
 

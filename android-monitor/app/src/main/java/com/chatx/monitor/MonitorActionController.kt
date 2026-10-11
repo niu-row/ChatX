@@ -7,7 +7,6 @@ import android.os.SystemClock
 import java.io.Closeable
 import java.util.concurrent.Executors
 import java.util.concurrent.atomic.AtomicBoolean
-import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.atomic.AtomicReference
 
 class MonitorActionController(
@@ -39,47 +38,28 @@ class MonitorActionController(
         if (closed.get() || !refreshing.compareAndSet(false, true)) return
         notifyStateChanged()
 
-        val delivered = AtomicBoolean(false)
-        val controlDelivered = AtomicBoolean(false)
-        val completed = AtomicInteger(0)
-        val lastError = AtomicReference<String?>(null)
+        // Never render a cached HTTPS response only to replace it seconds later
+        // with the fresh control response. Publish at most once per manual refresh.
+        val selector = ManualRefreshSelector()
         val publishLock = Any()
+        val lastError = AtomicReference<String?>(null)
 
-        fun publish(json: String, fresh: Boolean) {
-            synchronized(publishLock) {
-                if (!fresh && controlDelivered.get()) return
-                if (fresh) controlDelivered.set(true)
-                delivered.set(true)
-                store.setLastSnapshotJson(
-                    config.desktopId,
-                    config.deviceId,
-                    json,
-                )
-                post {
-                    if (!fresh && controlDelivered.get()) return@post
-                    refreshing.set(false)
-                    listener.onSnapshot(json)
-                    listener.onStateChanged()
-                }
+        fun complete(fresh: Boolean, json: String?, error: String?) {
+            val choice = synchronized(publishLock) {
+                if (!error.isNullOrBlank()) lastError.set(error)
+                selector.complete(fresh, json)
+            } ?: return
+            choice.json?.let { selected ->
+                store.setLastSnapshotJson(config.desktopId, config.deviceId, selected)
             }
-        }
-
-        fun complete(error: String? = null) {
-            if (!error.isNullOrBlank()) lastError.set(error)
-            if (completed.incrementAndGet() == 2 && !delivered.get()) {
-                val json = StatusCodec.error(
-                    lastError.get() ?: "Monitor 刷新失败。",
-                )
-                store.setLastSnapshotJson(
-                    config.desktopId,
-                    config.deviceId,
-                    json,
-                )
-                post {
-                    refreshing.set(false)
-                    listener.onSnapshot(json)
-                    listener.onStateChanged()
+            post {
+                refreshing.set(false)
+                if (choice.json != null) {
+                    listener.onSnapshot(store.getLastSnapshotJson() ?: choice.json)
+                } else {
+                    listener.onToast(lastError.get() ?: "Monitor 刷新失败。")
                 }
+                listener.onStateChanged()
             }
         }
 
@@ -89,8 +69,11 @@ class MonitorActionController(
                     MonitorRepository(appContext).fetchSnapshot(),
                 )
             }
-            attempt.getOrNull()?.let { publish(it, fresh = false) }
-            complete(attempt.exceptionOrNull()?.message)
+            complete(
+                fresh = false,
+                json = attempt.getOrNull(),
+                error = attempt.exceptionOrNull()?.message,
+            )
         }
 
         executor.execute {
@@ -105,8 +88,11 @@ class MonitorActionController(
                 controlSnapshotJson(config, result)
                     ?: error("实时刷新响应缺少 Snapshot。")
             }
-            attempt.getOrNull()?.let { publish(it, fresh = true) }
-            complete(attempt.exceptionOrNull()?.message)
+            complete(
+                fresh = true,
+                json = attempt.getOrNull(),
+                error = attempt.exceptionOrNull()?.message,
+            )
         }
     }
 
@@ -139,7 +125,7 @@ class MonitorActionController(
                 reconnecting.set(false)
                 val outcome = attempt.getOrNull()
                 val json = outcome?.first
-                if (json != null) listener.onSnapshot(json)
+                if (json != null) listener.onSnapshot(store.getLastSnapshotJson() ?: json)
                 listener.onStateChanged()
                 listener.onToast(
                     outcome?.second
@@ -165,11 +151,17 @@ class MonitorActionController(
             }
         }
         executor.execute {
-            val results = MonitorRepository(appContext).testEndpoints()
+            val result = runCatching { MonitorRepository(appContext).testEndpoints() }
             post {
+                // A failed future/Keystore read must never lock the button in "testing".
                 testingEndpoints.set(false)
-                listener.onEndpointHealth(results)
+                listener.onEndpointHealth(result.getOrNull() ?: emptyList())
                 listener.onStateChanged()
+                result.exceptionOrNull()?.let { failure ->
+                    listener.onToast(
+                        "路径检测失败：" + (failure.message ?: failure.javaClass.simpleName),
+                    )
+                }
             }
         }
     }
@@ -240,5 +232,30 @@ class MonitorActionController(
         mainHandler.post {
             if (!closed.get()) block()
         }
+    }
+}
+
+internal data class ManualRefreshChoice(val json: String?)
+
+// Coordinates concurrent cached HTTPS + live control results without UI rollback.
+internal class ManualRefreshSelector {
+    private var controlDone = false
+    private var passiveDone = false
+    private var completed = false
+    private var controlJson: String? = null
+    private var passiveJson: String? = null
+
+    fun complete(fresh: Boolean, json: String?): ManualRefreshChoice? {
+        if (completed) return null
+        if (fresh) {
+            controlDone = true
+            controlJson = json
+        } else {
+            passiveDone = true
+            passiveJson = json
+        }
+        if (controlJson == null && !(controlDone && passiveDone)) return null
+        completed = true
+        return ManualRefreshChoice(controlJson ?: passiveJson)
     }
 }

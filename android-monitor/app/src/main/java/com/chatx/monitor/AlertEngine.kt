@@ -4,6 +4,7 @@ enum class AlertType {
     MCP_GAP,
     MCP_STALLED,
     TUNNEL_DOWN,
+    HTTPS_DOWN,
     HOST_OFFLINE,
     RECOVERED,
 }
@@ -20,8 +21,11 @@ class AlertEngine {
     private val offlineThresholdsSent = mutableSetOf<Long>()
     private val gapThresholdsSent = mutableSetOf<Long>()
     private var tunnelDownNotified = false
+    private var httpsDownNotified = false
+    private var httpsDownSince: Long? = null
     private var stalledNotified = false
 
+    @Synchronized
     fun onUnreachable(now: Long, thresholds: Set<Long>): List<AlertEvent> {
         val startedAt = offlineSince ?: now.also { offlineSince = it }
         val duration = (now - startedAt).coerceAtLeast(0)
@@ -36,6 +40,7 @@ class AlertEngine {
         )
     }
 
+    @Synchronized
     fun onSnapshot(
         snapshot: MonitorSnapshot,
         thresholds: Set<Long>,
@@ -60,7 +65,9 @@ class AlertEngine {
         } else Long.MAX_VALUE
         val probeFresh = probeAge <= 12_000L
         val tunnelHealthy = snapshot.tunnel.active && snapshot.tunnel.health == "healthy" && probeFresh
-        val tunnelDown = snapshot.tunnel.desiredConnected &&
+        val selected = snapshot.connections?.activeMode
+        val tunnelDown = (selected == null || selected == "tunnel") &&
+            snapshot.tunnel.desiredConnected &&
             (snapshot.tunnel.health == "down" || !probeFresh)
         if (tunnelDown) {
             if (!tunnelDownNotified) {
@@ -76,7 +83,7 @@ class AlertEngine {
                 )
                 tunnelDownNotified = true
             }
-        } else if (tunnelHealthy && tunnelDownNotified) {
+        } else if (selected != "https" && tunnelHealthy && tunnelDownNotified) {
             events += AlertEvent(
                 id = 3900,
                 type = AlertType.RECOVERED,
@@ -84,6 +91,31 @@ class AlertEngine {
                 message = "Tunnel 已重新进入 ${snapshot.tunnel.state} 状态。",
             )
             tunnelDownNotified = false
+        }
+        // A deliberate mode change is not a recovery notification.
+        if (selected == "https" || selected == "none") tunnelDownNotified = false
+        val httpsActive = selected == "https"
+        val httpsHealthy = snapshot.connections?.httpsMcp?.connected == true
+        if (httpsActive && !httpsHealthy) {
+            val startedAt = httpsDownSince ?: snapshot.serverTime.also { httpsDownSince = it }
+            if (!httpsDownNotified && snapshot.serverTime - startedAt >= 30_000L) {
+                events += AlertEvent(
+                    id = 3100, type = AlertType.HTTPS_DOWN,
+                    title = "HTTPS MCP 连接异常",
+                    message = "ChatX 在线，但 HTTPS MCP 已连续 30 秒未通过公网可用性验证。",
+                )
+                httpsDownNotified = true
+            }
+        } else {
+            if (httpsActive && httpsHealthy && httpsDownNotified) {
+                events += AlertEvent(
+                    id = 3910, type = AlertType.RECOVERED,
+                    title = "HTTPS MCP 已恢复",
+                    message = "HTTPS MCP 已重新通过公网连接检查。",
+                )
+            }
+            httpsDownNotified = false
+            httpsDownSince = null
         }
         val gapDuration = when {
             snapshot.mcp.state == "gap" -> snapshot.mcp.gapDurationMs ?: 0L

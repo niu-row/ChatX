@@ -136,6 +136,7 @@ internal fun eventTypeLabel(type: String): String = when (type) {
     "MCP_GAP" -> "GAP"
     "MCP_STALLED" -> "STALLED"
     "TUNNEL_DOWN" -> "TUNNEL"
+    "HTTPS_DOWN" -> "HTTPS"
     "HOST_OFFLINE" -> "OFFLINE"
     else -> type
 }
@@ -145,6 +146,7 @@ internal fun eventTone(type: String): UiKit.Tone = when (type) {
     "MCP_GAP",
     "MCP_STALLED",
     "TUNNEL_DOWN",
+    "HTTPS_DOWN",
     "HOST_OFFLINE",
     -> UiKit.Tone.DANGER
     else -> UiKit.Tone.NEUTRAL

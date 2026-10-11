@@ -79,7 +79,23 @@ object MonitorSnapshotParser {
             endpointUrl = endpointUrl,
             transportKind = transportKind,
             endpoints = parseEndpoints(root),
+            connections = parseConnections(root.optJSONObject("connections")),
         )
+    }
+
+    private fun parseConnections(root: JSONObject?): McpConnections? {
+        if (root == null) return null // Older desktop: preserve compatibility.
+        val mode = root.optString("activeMode", "none")
+        if (mode !in setOf("none", "tunnel", "https")) return null
+        fun parseState(key: String): McpConnectionState {
+            val value = root.optJSONObject(key)
+            return McpConnectionState(
+                enabled = value?.optBoolean("enabled", false) ?: false,
+                connected = value?.optBoolean("connected", false) ?: false,
+                state = value?.optString("state", "unknown") ?: "unknown",
+            )
+        }
+        return McpConnections(mode, parseState("tunnel"), parseState("httpsMcp"))
     }
 
     private fun parseEndpoints(root: JSONObject): List<MonitorEndpoint> {
@@ -116,6 +132,7 @@ object MonitorSnapshotParser {
                         durationMs = item.optLongOrNull("durationMs"),
                         success = item.optBooleanOrNull("success"),
                         running = item.optBoolean("running", false),
+                        source = item.optString("source").ifBlank { null },
                     ),
                 )
             }

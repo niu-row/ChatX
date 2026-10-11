@@ -327,6 +327,18 @@ data class TunnelStatus(
     val reconnectUnavailableReason: String? = null,
 )
 
+data class McpConnectionState(
+    val enabled: Boolean,
+    val connected: Boolean,
+    val state: String,
+)
+
+data class McpConnections(
+    val activeMode: String,
+    val tunnel: McpConnectionState,
+    val httpsMcp: McpConnectionState,
+)
+
 data class RecentMcpCall(
     val toolName: String,
     val timestamp: String?,
@@ -334,6 +346,7 @@ data class RecentMcpCall(
     val durationMs: Long?,
     val success: Boolean?,
     val running: Boolean,
+    val source: String? = null,
 )
 
 data class McpStatus(
@@ -357,4 +370,5 @@ data class MonitorSnapshot(
     val transportKind: String = "unknown",
     val endpoints: List<MonitorEndpoint> = emptyList(),
     val receivedAt: Long = System.currentTimeMillis(),
+    val connections: McpConnections? = null,
 )

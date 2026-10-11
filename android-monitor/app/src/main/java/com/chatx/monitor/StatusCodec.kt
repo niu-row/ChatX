@@ -36,6 +36,20 @@ object StatusCodec {
                     })
                 }
             })
+            // Preserve the new desktop's mutually exclusive MCP mode through
+            // the foreground service cache; older versions omit this field.
+            put("connections", snapshot.connections?.let { selected ->
+                JSONObject().apply {
+                    put("activeMode", selected.activeMode)
+                    fun state(value: McpConnectionState) = JSONObject().apply {
+                        put("enabled", value.enabled)
+                        put("connected", value.connected)
+                        put("state", value.state)
+                    }
+                    put("tunnel", state(selected.tunnel))
+                    put("httpsMcp", state(selected.httpsMcp))
+                }
+            })
             put("tunnel", JSONObject().apply {
                 put("state", snapshot.tunnel.state)
                 put("health", snapshot.tunnel.health)
@@ -77,6 +91,7 @@ object StatusCodec {
                             put("durationMs", call.durationMs)
                             put("success", call.success)
                             put("running", call.running)
+                            put("source", call.source)
                         })
                     }
                 })
@@ -126,7 +141,14 @@ object StatusCodec {
             "stalled" -> "MCP 卡住"
             else -> "MCP 空闲"
         }
-        return "$tunnel · $mcp · ${transportLabel(snapshot.transportKind)}"
+        val active = snapshot.connections?.let { connections ->
+            when (connections.activeMode) {
+                "https" -> if (connections.httpsMcp.connected) "HTTPS MCP Ready" else "HTTPS MCP ${connections.httpsMcp.state}"
+                "tunnel" -> if (connections.tunnel.connected) "Tunnel Ready" else "Tunnel ${connections.tunnel.state}"
+                else -> "MCP 已停止"
+            }
+        } ?: tunnel
+        return "$active · $mcp · ${transportLabel(snapshot.transportKind)}"
     }
 
     private fun transportLabel(kind: String): String = when (kind) {

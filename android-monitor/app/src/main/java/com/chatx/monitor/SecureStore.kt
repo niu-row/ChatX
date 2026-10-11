@@ -14,13 +14,25 @@ class SecureStore(context: Context) {
     private val prefs = context.getSharedPreferences("chatx_monitor", Context.MODE_PRIVATE)
 
     fun savePairing(config: PairingConfig) = synchronized(PAIRING_LOCK) {
+        val previous = loadPairing()
         val cipher = Cipher.getInstance(TRANSFORMATION)
         cipher.init(Cipher.ENCRYPT_MODE, getOrCreateKey())
         val encrypted = cipher.doFinal(config.toJson().toByteArray(Charsets.UTF_8))
-        prefs.edit()
+        val editor = prefs.edit()
             .putString("pairing_iv", Base64.encodeToString(cipher.iv, Base64.NO_WRAP))
             .putString("pairing_data", Base64.encodeToString(encrypted, Base64.NO_WRAP))
-            .apply()
+        if (previous == null ||
+            previous.desktopId != config.desktopId ||
+            previous.deviceId != config.deviceId ||
+            previous.deviceKey != config.deviceKey ||
+            previous.directToken != config.directToken
+        ) {
+            editor.remove("last_snapshot")
+                .remove("last_good_server_time")
+                .remove("last_good_received_at")
+                .remove("last_endpoint")
+        }
+        editor.apply()
     }
     fun loadPairing(): PairingConfig? = synchronized(PAIRING_LOCK) {
         val iv = prefs.getString("pairing_iv", null) ?: return@synchronized null
@@ -52,6 +64,8 @@ class SecureStore(context: Context) {
             .remove("pairing_data")
             .remove("last_endpoint")
             .remove("last_snapshot")
+            .remove("last_good_server_time")
+            .remove("last_good_received_at")
             .remove("event_history")
             .remove("monitor_service_running")
             .remove("route_policy")
@@ -171,7 +185,30 @@ class SecureStore(context: Context) {
         ) {
             return@synchronized false
         }
-        prefs.edit().putString("last_snapshot", value).apply()
+        val incoming = runCatching { org.json.JSONObject(value) }.getOrNull()
+        val now = System.currentTimeMillis()
+        val editor = prefs.edit().putString("last_snapshot", value)
+        if (incoming?.optBoolean("reachable") == true) {
+            val previous = prefs.getString("last_snapshot", null)
+                ?.let { runCatching { org.json.JSONObject(it) }.getOrNull() }
+            val previousServerTime = prefs.getLong(
+                "last_good_server_time", previous?.optLong("serverTime", 0L) ?: 0L,
+            )
+            val previousReceivedAt = prefs.getLong(
+                "last_good_received_at", previous?.optLong("receivedAt", 0L) ?: 0L,
+            )
+            val nextServerTime = incoming.optLong("serverTime", 0L)
+            if (MonitorSnapshotFreshness.shouldRejectNonNewer(
+                    previousServerTime, previousReceivedAt, nextServerTime,
+                    now, getSnapshotStaleSeconds() * 1_000L,
+                )
+            ) return@synchronized false
+            if (nextServerTime > 0L) {
+                editor.putLong("last_good_server_time", nextServerTime)
+                    .putLong("last_good_received_at", now)
+            }
+        }
+        editor.apply()
         true
     }
 
@@ -232,7 +269,7 @@ class SecureStore(context: Context) {
         prefs.edit().putInt("offline_failure_threshold", normalized).apply()
     }
 
-    fun appendEvent(event: MonitorEvent) {
+    fun appendEvent(event: MonitorEvent) = synchronized(PAIRING_LOCK) {
         val current = loadEvents().toMutableList()
         current.add(0, event)
         val trimmed = current.take(MAX_EVENTS)
@@ -266,7 +303,7 @@ class SecureStore(context: Context) {
         }.getOrDefault(emptyList())
     }
 
-    fun clearEvents() {
+    fun clearEvents() = synchronized(PAIRING_LOCK) {
         prefs.edit().remove("event_history").apply()
     }
 
