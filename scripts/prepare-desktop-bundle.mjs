@@ -382,6 +382,19 @@ fs.copyFileSync(path.join(root, 'scripts', 'https-mcp-parent-watch.mjs'),
   path.join(resourceDir, 'https-mcp-parent-watch.mjs'));
 fs.copyFileSync(hostEnvironmentSource, path.join(resourceDir, 'desktop-host-environment.mjs'));
 
+// Offline deployer resources: the desktop uploads the *same checked-in source*
+// used for the local Relay build. No remote curl|bash or floating release URL.
+fs.copyFileSync(path.join(root, 'scripts', 'relay-deploy.mjs'),
+  path.join(resourceDir, 'relay-deploy.mjs'));
+fs.copyFileSync(path.join(root, 'deploy', 'oneclick', 'install.sh'),
+  path.join(resourceDir, 'relay-deploy-install.sh'));
+const serverArchive = path.join(resourceDir, 'relay-deploy-source.tar.gz');
+run('Relay source archive', 'tar', ['-czf', serverArchive, '-C', root,
+  'relay-server/Cargo.toml', 'relay-server/Cargo.lock', 'relay-server/src',
+  'relay-protocol/Cargo.toml', 'relay-protocol/src',
+  'deploy/nginx/chatx-https-mcp-wss.conf',
+  'deploy/nginx/chatx-relay-base.conf']);
+
 // The HTTPS MCP bridge runs with the bundled Node and must not depend on npm being installed.
 await esbuild({
   entryPoints: [path.join(root, 'scripts', 'https-mcp-bridge.mjs')],

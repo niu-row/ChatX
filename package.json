@@ -1,6 +1,6 @@
 {
   "name": "chatx",
-  "version": "0.4.11",
+  "version": "0.4.13",
   "private": true,
   "description": "Desktop bridge connecting ChatGPT Secure MCP Tunnel to Desktop Commander on Windows and macOS",
   "type": "module",
@@ -20,7 +20,7 @@
     "test:android:gradle": "node scripts/dev-toolchain.mjs android-test",
     "test:local-full": "node scripts/dev-toolchain.mjs local-full",
     "test:runtime": "node scripts/installer-runtime-test.mjs && node scripts/bridge-smoke-test.mjs && node scripts/https-mcp-real-smoke-test.mjs && node scripts/developer-environment-smoke-test.mjs",
-    "test": "node scripts/version-consistency-test.mjs && node scripts/desktop-static-test.mjs && node scripts/https-mcp-integration-test.mjs && node scripts/connection-ui-test.mjs && node scripts/network-ui-test.mjs && node scripts/call-history-ui-test.mjs && node scripts/monitor-instrumentation-test.mjs && node scripts/monitor-ui-test.mjs && node scripts/android-monitor-static-test.mjs"
+    "test": "node scripts/relay-deploy-rollback-test.mjs && node scripts/version-consistency-test.mjs && node scripts/desktop-static-test.mjs && node scripts/https-mcp-integration-test.mjs && node scripts/connection-ui-test.mjs && node scripts/network-ui-test.mjs && node scripts/call-history-ui-test.mjs && node scripts/monitor-instrumentation-test.mjs && node scripts/monitor-ui-test.mjs && node scripts/android-monitor-static-test.mjs"
   },
   "dependencies": {
     "@modelcontextprotocol/node": "^2.0.0",

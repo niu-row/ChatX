@@ -56,6 +56,7 @@ impl Default for ProxySettings {
 }
 
 fn default_ssh_port() -> u16 { 22 }
+fn default_https_transport() -> String { "ssh".into() }
 fn default_local_mcp_port() -> u16 { 3000 }
 fn default_reverse_mcp_port() -> u16 { 18080 }
 fn default_https_auth_ttl_hours() -> Option<u32> { Some(7 * 24) }
@@ -66,6 +67,7 @@ pub(super) struct HttpsMcpSettings {
     #[serde(default)] pub(super) enabled: bool,
     #[serde(default = "default_auto_reconnect")] pub(super) auto_reconnect: bool,
     #[serde(default)] pub(super) base_url: String,
+    #[serde(default = "default_https_transport")] pub(super) transport: String,
     #[serde(default)] pub(super) ssh_host: String,
     #[serde(default)] pub(super) ssh_user: String,
     #[serde(default = "default_ssh_port")] pub(super) ssh_port: u16,
@@ -78,7 +80,8 @@ pub(super) struct HttpsMcpSettings {
 
 impl Default for HttpsMcpSettings {
     fn default() -> Self {
-        Self { enabled: false, auto_reconnect: true, base_url: String::new(), ssh_host: String::new(),
+        Self { enabled: false, auto_reconnect: true, base_url: String::new(),
+            transport: "wss".into(), ssh_host: String::new(),
             ssh_user: String::new(), ssh_port: default_ssh_port(),
             local_port: default_local_mcp_port(), remote_port: default_reverse_mcp_port(),
             authorization_ttl_hours: default_https_auth_ttl_hours() }

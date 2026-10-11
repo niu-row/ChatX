@@ -1,3 +1,5 @@
+pub mod mcp_stream;
+
 use serde::{Deserialize, Serialize};
 
 pub const PROTOCOL_VERSION: u32 = 1;

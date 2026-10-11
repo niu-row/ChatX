@@ -37,6 +37,7 @@ pub(super) struct AppState {
     pub(super) runtime_snapshot: Mutex<monitor::TunnelSnapshot>,
     pub(super) relay_status: Arc<Mutex<relay::RelayStatus>>,
     pub(super) relay_client: Mutex<Option<relay::RelayClientHandle>>,
+    pub(super) relay_deploy_busy: AtomicBool,
     pub(super) https_mcp: https_mcp::HttpsState,
     pub(super) monitor: monitor_manager::State,
     pub(super) monitor_control: monitor_control::State,

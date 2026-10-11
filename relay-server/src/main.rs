@@ -1,6 +1,7 @@
 mod desktop_session;
 mod device_session;
 mod pairing_session;
+mod mcp_gateway;
 mod registry;
 mod registry_routes;
 mod web_utils;
@@ -8,7 +9,7 @@ mod web_utils;
 use axum::{
     extract::{DefaultBodyLimit, State},
     response::IntoResponse,
-    routing::{get, post, put},
+    routing::{any, get, post, put},
     Json, Router,
 };
 use chatx_relay_protocol::{
@@ -128,6 +129,7 @@ struct AppState {
     desktop_ws_slots: Arc<Semaphore>,
     device_ws_slots: Arc<Semaphore>,
     pairing_ws_slots: Arc<Semaphore>,
+    mcp_gateway: mcp_gateway::Gateway,
 }
 
 impl AppState {
@@ -154,6 +156,7 @@ impl AppState {
             desktop_ws_slots: Arc::new(Semaphore::new(MAX_DESKTOP_WS)),
             device_ws_slots: Arc::new(Semaphore::new(MAX_DEVICE_WS)),
             pairing_ws_slots: Arc::new(Semaphore::new(MAX_PAIRING_WS)),
+            mcp_gateway: mcp_gateway::Gateway::from_env(),
         })
     }
 
@@ -372,6 +375,7 @@ async fn health(State(state): State<AppState>) -> impl IntoResponse {
         "ok": true,
         "protocolVersion": PROTOCOL_VERSION,
         "onlineDesktops": state.online_desktops.read().await.len(),
+        "mcpGateway": state.mcp_gateway.status().await,
         "serverTime": now_ms()
     }))
 }
@@ -396,6 +400,10 @@ async fn main() {
         .route("/healthz", get(health))
         .route("/v1/desktops/register", post(register_desktop))
         .route("/v1/ws/desktop", get(desktop_ws))
+        .route("/v1/ws/mcp", get(mcp_gateway::websocket))
+        .route("/mcp", any(mcp_gateway::public_request))
+        .route("/chatx-oauth/{action}", any(mcp_gateway::public_request))
+        .route("/.well-known/{*path}", any(mcp_gateway::public_request))
         .route("/v1/ws/device", get(device_ws))
         .route("/v1/ws/pair", get(pairing_ws))
         .route(

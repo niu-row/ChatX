@@ -6,6 +6,7 @@ mod connection_commands;
 mod connection_intent;
 mod diagnostics_commands;
 mod https_mcp;
+mod https_mcp_wss;
 mod mcp_sources;
 mod monitor;
 mod monitor_commands;
@@ -19,6 +20,7 @@ mod network_commands;
 mod platform_commands;
 mod process_utils;
 mod relay;
+mod relay_deploy;
 mod secrets;
 mod settings;
 mod tunnel_recovery;
@@ -58,6 +60,7 @@ use platform_commands::{
     request_all_permissions, set_clamshell_awake,
 };
 use process_utils::{command_output, command_output_with_timeout};
+use relay_deploy::manage_relay_server;
 use secrets::{ensure_monitor_master_key, load_runtime_key, read_relay_credentials, runtime_key_saved};
 use settings::{load_settings, Settings};
 use tunnel_recovery::{reconnect_capability, recovery_status, set_recovery_status};
@@ -996,7 +999,7 @@ fn main() {
             revoke_all_https_mcp_authorizations, rotate_https_mcp_login_password,
             set_https_mcp_authorization_lifetime, set_https_mcp_auto_reconnect,
             get_network_settings, set_network_settings, test_network_settings,
-            register_relay_desktop,
+            register_relay_desktop, manage_relay_server,
             get_monitor_info, set_monitor_enabled, create_monitor_pairing,
             revoke_monitor_device,
             get_permission_center, request_all_permissions, open_full_disk_access_settings,

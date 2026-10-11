@@ -160,7 +160,7 @@ pub fn normalized_base_url(value: &str) -> Result<String, String> {
     Ok(value.to_string())
 }
 
-fn websocket_url(base_url: &str, path: &str) -> Result<String, String> {
+pub(super) fn websocket_url(base_url: &str, path: &str) -> Result<String, String> {
     let base = normalized_base_url(base_url)?;
     if let Some(rest) = base.strip_prefix("https://") {
         Ok(format!("wss://{rest}{path}"))

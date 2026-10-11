@@ -60,6 +60,7 @@ pub(super) async fn register_desktop(
         Err(error) => return json_error(StatusCode::INTERNAL_SERVER_ERROR, error),
     };
 
+    {
     let mut registry = match state.registry.lock() {
         Ok(value) => value,
         Err(_) => return json_error(StatusCode::INTERNAL_SERVER_ERROR, "registry lock poisoned"),
@@ -75,6 +76,9 @@ pub(super) async fn register_desktop(
         }
         return json_error(StatusCode::INTERNAL_SERVER_ERROR, error);
     }
+    }
+    // A fresh Desktop Token revokes the previous MCP websocket immediately.
+    state.mcp_gateway.revoke_desktop(&desktop_id).await;
     Json(DesktopRegisterResponse { desktop_id, desktop_token }).into_response()
 }
 

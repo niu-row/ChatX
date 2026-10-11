@@ -80,8 +80,9 @@ const clientRedirects = (id) => {
   const data = verify(id.startsWith('chatx.') ? id.slice(6) : '');
   return data?.kind === 'client' && Array.isArray(data.redirects) ? data.redirects : false;
 };
-// Match the Nginx /mcp client_max_body_size of 5m.
-async function readBody(req, limit = 5 * 1024 * 1024) {
+// JSON-RPC parsing still requires a bounded body, while WSS v2 streams to
+// this loopback endpoint without a base64 copy or gateway-side accumulation.
+async function readBody(req, limit = 64 * 1024 * 1024) {
   let length = 0;
   const chunks = [];
   for await (const chunk of req) {

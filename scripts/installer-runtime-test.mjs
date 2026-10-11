@@ -19,6 +19,9 @@ for (const platformName of ['windows', 'macos']) {
     'desktop-host-environment.mjs',
     'https-mcp-bridge.mjs',
     'https-mcp-parent-watch.mjs',
+    'relay-deploy.mjs',
+    'relay-deploy-install.sh',
+    'relay-deploy-source.tar.gz',
     'runtime-manifest.json',
   ]) {
     if (resources[`resources/${name}`] !== name) {
@@ -32,6 +35,9 @@ const required = [
   executable('tunnel-client'),
   'desktop-commander-launcher.mjs',
   'desktop-host-environment.mjs',
+  'relay-deploy.mjs',
+  'relay-deploy-install.sh',
+  'relay-deploy-source.tar.gz',
   'runtime-manifest.json',
   'tunnel-client-LICENSE.txt',
   'tunnel-client-NOTICE.txt',

@@ -8,10 +8,73 @@
     let committedHours = 168;
     let httpsReconnectBusy = false;
     let grantRows = [];
-    const fields = ['httpsMcpUrl', 'httpsMcpHost', 'httpsMcpUser',
+    let deployBusy = false;
+    let deployValidated = '';
+    let deployDirty = false;
+    const deployIds = ['relayDeployHost', 'relayDeployUser', 'relayDeployPort',
+      'relayDeployDomain', 'relayDeployDesktopId', 'relayDeployKeyPath'];
+    let deployLines = [];
+    function deployLog(message, reset = false) {
+      if (reset) deployLines = [];
+      deployLines.push(String(message));
+      deployLines = deployLines.slice(-24);
+      $('relayDeployLog').textContent = deployLines.join('\n');
+    }
+    function deployConfig() {
+      return {
+        host: $('relayDeployHost').value.trim(),
+        user: $('relayDeployUser').value.trim(),
+        port: Number($('relayDeployPort').value),
+        domain: $('relayDeployDomain').value.trim().toLowerCase(),
+        desktopId: $('relayDeployDesktopId').value.trim(),
+        keyPath: $('relayDeployKeyPath').value.trim(),
+      };
+    }
+    function invalidateDeploy() {
+      deployDirty = true;
+      deployValidated = '';
+      $('relayDeployApply').disabled = true;
+    }
+    function autofillDeploy() {
+      if (deployDirty) return;
+      if (!$('relayDeployHost').value) $('relayDeployHost').value = $('httpsMcpHost').value || '';
+      if (!$('relayDeployDomain').value) {
+        $('relayDeployDomain').value =
+          $('httpsMcpUrl').value.trim().replace(/^https:\/\//, '').split('/')[0] || '';
+      }
+    }
+    async function deployAction(apply) {
+      if (!invoke || deployBusy) return;
+      const config = deployConfig();
+      const fingerprint = JSON.stringify(config);
+      if (apply && deployValidated !== fingerprint) {
+        deployLog('服务器信息变更后必须重新预检。'); return;
+      }
+      if (apply && !window.confirm(
+        '即将通过 SSH 更新服务器 Relay 和 Nginx，期间服务会短暂重启。已有配置会先备份，失败自动回滚。继续吗？'
+      )) return;
+      deployBusy = true;
+      $('relayDeployCheck').disabled = true;
+      $('relayDeployApply').disabled = true;
+      deployLog(apply ? '开始部署（远端 Cargo 编译可能需要数分钟）' : '开始只读预检…', true);
+      try {
+        const response = await invoke('manage_relay_server', { config, apply });
+        if (!response?.ok) throw new Error(response?.message || '服务器未返回成功状态');
+        if (!apply) deployValidated = fingerprint;
+        deployLog(response.message || '成功');
+      } catch (error) {
+        deployValidated = '';
+        deployLog('失败：' + normalizeError(error));
+      } finally {
+        deployBusy = false;
+        $('relayDeployCheck').disabled = false;
+        $('relayDeployApply').disabled = deployValidated !== JSON.stringify(deployConfig());
+      }
+    }
+    const fields = ['httpsMcpUrl', 'httpsMcpTransport', 'httpsMcpHost', 'httpsMcpUser',
       'httpsMcpSshPort', 'httpsMcpLocalPort', 'httpsMcpRemotePort'];
     const defaults = {
-      baseUrl: 'https://newrow.fun', sshHost: '47.103.79.86',
+      baseUrl: 'https://newrow.fun', transport: 'ssh', sshHost: '47.103.79.86',
       sshUser: 'chatx-mcp', sshPort: 22, localPort: 3000, remotePort: 18080,
     };
     const lifetimeOptions = [1, 24, 168, 720];
@@ -29,10 +92,16 @@
       $('httpsMcpCustomHoursWrap').hidden = choice !== 'custom';
       $('httpsMcpUnlimitedWarning').hidden = choice !== 'unlimited';
     }
+    function updateTransportVisibility() {
+      const legacy = $('httpsMcpTransport').value === 'ssh';
+      $('httpsMcpSshFields').hidden = !legacy;
+      $('httpsMcpSshAdvanced').hidden = !legacy;
+    }
     function payload() {
       return {
         enabled: true,
         baseUrl: $('httpsMcpUrl').value.trim().replace(/\/$/, ''),
+        transport: $('httpsMcpTransport').value,
         sshHost: $('httpsMcpHost').value.trim(),
         sshUser: $('httpsMcpUser').value.trim(),
         sshPort: Number($('httpsMcpSshPort').value),
@@ -59,16 +128,22 @@
       if (!dirty) {
         const data = { ...defaults, ...s };
         $('httpsMcpUrl').value = data.baseUrl || defaults.baseUrl;
+        $('httpsMcpTransport').value = data.transport || defaults.transport;
         $('httpsMcpHost').value = data.sshHost || defaults.sshHost;
         $('httpsMcpUser').value = data.sshUser || defaults.sshUser;
         $('httpsMcpSshPort').value = data.sshPort;
         $('httpsMcpLocalPort').value = data.localPort;
         $('httpsMcpRemotePort').value = data.remotePort;
       }
-      const connected = Boolean(!s?.manualStopBlocked && s?.sshConnected && s?.localReady && s?.remoteReady);
+      updateTransportVisibility();
+      autofillDeploy();
+      const routeUp = Boolean(s?.transportConnected ?? s?.sshConnected);
+      const isWss = $('httpsMcpTransport').value === 'wss';
+      const routeName = isWss ? 'WSS Relay' : 'SSH';
+      const connected = Boolean(!s?.manualStopBlocked && routeUp && s?.localReady && s?.remoteReady);
       started = Boolean(s?.enabled);
       const badge = $('httpsMcpStatus');
-      badge.textContent = s?.manualStopBlocked ? '已手动停止' : connected ? 'HTTPS 已验证' : s?.sshConnected ? '检测公网 HTTPS 中' : started ? '启动中 / 重连中' : '未启动';
+      badge.textContent = s?.manualStopBlocked ? '已手动停止' : connected ? 'HTTPS 已验证' : routeUp ? '检测公网 HTTPS 中' : started ? '启动中 / 重连中' : '未启动';
       badge.className = `setting-status ${connected ? 'ok' : started ? 'warn' : 'off'}`;
       $('startHttpsMcp').disabled = busy;
       $('stopHttpsMcp').disabled = busy || !started;
@@ -81,14 +156,18 @@
       $('httpsMcpHint').textContent = s?.manualStopBlocked
         ? '根据上次手动停止标记保持断开；持久配置仍可能显示启用。请检查设置保存权限，需要恢复时再手动启动。'
         : s?.lastError || s?.remoteLastError
-          ? `最近错误：${s.lastError || s.remoteLastError}。请检查 HTTPS MCP、SSH 或公网代理日志。`
+          ? `最近错误：${s.lastError || s.remoteLastError}。请检查 HTTPS MCP、${routeName} 和公网代理日志。`
         : connected
-          ? '公网 HTTPS、MCP OAuth 及 SSH 反向隧道已经通过实际探测。请在 ChatGPT 中添加上方 HTTPS /mcp 地址。'
+          ? `公网 HTTPS、MCP OAuth 和 ${routeName} 已通过实际探测。ChatGPT 端继续使用上方 /mcp 地址。`
           : started
             ? s?.autoReconnect === false
-              ? '连接尚未就绪，断线自动重连已关闭。检查网络后请手动点击“启动 HTTPS MCP”重试。'
-              : '正在启动或自动重连。SSH 需要已有 known_hosts 和免交互密钥。'
-            : '此模式不使用 OpenAI Tunnel ID。请先确认公网 Nginx 已代理 /mcp 与 OAuth 路径。';
+              ? '连接尚未就绪，断线自动重连已关闭。检查网络后请手动启动重试。'
+              : isWss
+                ? '正在建立 WSS Relay。先在网络设置完成同域名 Relay Desktop 注册；服务器须配置 CHATX_MCP_DESKTOP_ID 并部署新版网关。'
+                : '正在启动或自动重连。SSH 需要已有 known_hosts 和免交互密钥。'
+            : isWss
+              ? 'WSS 无 SSH 依赖；使用已注册的 Relay Desktop 凭据，公网 Nginx 须代理 /mcp、OAuth 和 /v1/ws/mcp。'
+              : 'SSH 兼容模式需要公网 Nginx 反向代理端口。';
     }
     function grantLabel(grant) {
       const expired = grant.expiresAt !== null && Number(grant.expiresAt) <= Date.now() / 1000;
@@ -266,6 +345,26 @@
           $('httpsMcpEndpoint').textContent = `${$('httpsMcpUrl').value.trim().replace(/\/$/, '')}/mcp`;
         });
       }
+      for (const id of deployIds) $(id).addEventListener('input', invalidateDeploy);
+      if (invoke) {
+        invoke('get_network_settings').then((snapshot) => {
+          const desktopId = snapshot?.relay?.status?.desktopId;
+          if (!deployDirty && /^d_[a-f0-9]{32}$/.test(desktopId || '')) {
+            $('relayDeployDesktopId').value = desktopId;
+          }
+        }).catch(() => {});
+      }
+      $('relayDeployCheck').addEventListener('click', () => deployAction(false));
+      $('relayDeployApply').addEventListener('click', () => deployAction(true));
+      if (window.__TAURI__?.event?.listen) {
+        window.__TAURI__.event.listen('relay-deploy-progress', (event) => {
+          if (deployBusy && event?.payload?.message) deployLog(event.payload.message);
+        }).catch(() => {});
+      }
+      $('httpsMcpTransport').addEventListener('change', () => {
+        dirty = true;
+        updateTransportVisibility();
+      });
       $('startHttpsMcp').addEventListener('click', start);
       $('stopHttpsMcp').addEventListener('click', stop);
       $('httpsAutoReconnect').addEventListener('change', setAutoReconnect);

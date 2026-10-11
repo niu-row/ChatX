@@ -1,5 +1,25 @@
 # Changelog
 
+## 0.4.13 - 2026-10-12
+
+### Reliability
+- Revokes an existing MCP WSS session immediately after Desktop Token re-registration; validates credential generation again at connection establishment and before dispatching public requests.
+- Prevents a saturated per-request response or upload queue from blocking unrelated WSS traffic. Slow streams fail individually rather than stalling shared heartbeats.
+- Returns HTTP 413 for chunked uploads exceeding 64 MiB and propagates request cancellation when a public HTTP stream ends prematurely.
+- Aligns v2 stream and proxy inactivity deadlines around the 600-second desktop request timeout.
+- Adds isolated deployment rollback failure injection to the local test suite, covering recovery of binary, environment, vhost and Nginx includes.
+- Preserves Desktop Commander permissions and single-Desktop routing.
+
+## 0.4.12 - 2026-10-12
+
+### Changed
+- Added native WSS MCP reverse transport and optional authenticated public Relay gateway, preserving existing SSH/Tunnel compatibility.
+- Added a two-step, fail-closed server deployment wizard with SSH host-key verification, bundled source, server backup, configuration validation and rollback.
+- Added WSS binary streaming v2 with protocol negotiation/fallback: 64 MiB request, 128 MiB response, 64 maximum in-flight requests.
+- Added bounded backpressure, cancellation handling, safe Relay health metadata, and local deployment audit logs.
+- Kept Desktop Commander permissions and the existing single-Desktop routing model unchanged.
+
+
 ## 0.4.11 - 2026-10-06
 
 ### Changed

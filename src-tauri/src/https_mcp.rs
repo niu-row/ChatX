@@ -22,6 +22,7 @@ use tauri::State;
 struct Snapshot {
     local_ready: bool,
     ssh_connected: bool,
+    transport_connected: bool,
     remote_ready: bool,
     last_public_probe_at: u64,
     remote_last_error: String,
@@ -56,19 +57,27 @@ fn validate(settings: &HttpsMcpSettings) -> Result<(), String> {
         || !domain.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'.') {
         return Err("HTTPS MCP 地址必须是没有端口和路径的 HTTPS 域名".into());
     }
-    let host = settings.ssh_host.trim();
-    if host.is_empty() || host.len() > 253 || host.starts_with('-')
-        || !host.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'.') {
-        return Err("SSH 主机无效".into());
+    if !matches!(settings.transport.as_str(), "ssh" | "wss") {
+        return Err("HTTPS MCP 传输模式无效".into());
     }
-    let user = settings.ssh_user.trim();
-    if user.is_empty() || user.len() > 64 ||
-        !user.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-') ||
-        user.starts_with('-') {
-        return Err("SSH 用户名无效".into());
+    if settings.transport == "ssh" {
+        let host = settings.ssh_host.trim();
+        if host.is_empty() || host.len() > 253 || host.starts_with('-')
+            || !host.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'.') {
+            return Err("SSH 主机无效".into());
+        }
+        let user = settings.ssh_user.trim();
+        if user.is_empty() || user.len() > 64 ||
+            !user.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-') ||
+            user.starts_with('-') {
+            return Err("SSH 用户名无效".into());
+        }
+        if settings.ssh_port == 0 || settings.remote_port < 1024 {
+            return Err("SSH 端口无效".into());
+        }
     }
-    if settings.ssh_port == 0 || settings.local_port < 1024 || settings.remote_port < 1024 {
-        return Err("SSH / 本地 / 反向转发端口无效".into());
+    if settings.local_port < 1024 {
+        return Err("本机 MCP 端口无效".into());
     }
     validate_authorization_lifetime(settings.authorization_ttl_hours)?;
     Ok(())
@@ -201,6 +210,10 @@ fn is_alive(child: &mut Option<ManagedChild>) -> bool {
     false
 }
 
+fn stop_wss(client: &mut Option<crate::https_mcp_wss::WssClient>) {
+    if let Some(client) = client.take() { client.stop(); }
+}
+
 fn kill_child(child: &mut Option<ManagedChild>) {
     if let Some(mut current) = child.take() {
         #[cfg(target_os = "macos")]
@@ -262,6 +275,7 @@ fn run(
     home: std::path::PathBuf, log_dir: std::path::PathBuf,
     password: String, signing: String,
     auto_reconnect: Arc<AtomicBool>,
+    relay_credentials: Option<crate::relay::RelayCredentials>,
 ) {
     let mut local: Option<ManagedChild> = None;
     // Even without retry, each manually started session gets one attempt per
@@ -270,6 +284,7 @@ fn run(
     let mut forward_attempted = false;
     let mut bridge_nonce = String::new();
     let mut forward: Option<ManagedChild> = None;
+    let mut wss: Option<crate::https_mcp_wss::WssClient> = None;
     let mut retries = 0u32;
     let mut last_error = String::new();
     let mut public_ready = false;
@@ -294,6 +309,7 @@ fn run(
             public_ready = false;
             last_probe = Instant::now() - Duration::from_secs(30);
             kill_child(&mut forward);
+            stop_wss(&mut wss);
             match crate::monitor_server::generate_monitor_token().and_then(|nonce| {
                 start_bridge(&settings, &paths, &home, &log_dir, &password, &signing, &nonce)
                     .map(|child| (child, nonce))
@@ -309,22 +325,55 @@ fn run(
         let ready = is_alive(&mut local)
             && loopback.as_ref().is_ok_and(|client|
                 probe_local_bridge(client, settings.local_port, &bridge_nonce));
-        let remote_alive = is_alive(&mut forward);
-        if ready && !remote_alive
+        // WSS reconnects within its own managed client; the supervisor must
+        // not create duplicate sockets while the client is reconnecting.
+        if wss.as_ref().is_some_and(|client| !client.alive()) {
+            stop_wss(&mut wss);
+        }
+        let needs_transport = if settings.transport == "wss" {
+            wss.is_none()
+        } else {
+            !is_alive(&mut forward)
+        };
+        if ready && needs_transport
             && should_launch(forward_attempted, auto_reconnect.load(Ordering::SeqCst))
         {
             forward_attempted = true;
             public_ready = false;
             last_probe = Instant::now() - Duration::from_secs(30);
-            match start_forward(&settings, &log_dir, &paths) {
-                Ok(child) => { forward = Some(child); last_error.clear(); }
-                Err(error) => { last_error = error; retries = retries.saturating_add(1); }
+            if settings.transport == "wss" {
+                if let Some(credentials) = relay_credentials.clone() {
+                    wss = Some(crate::https_mcp_wss::WssClient::start(
+                        settings.base_url.clone(), settings.local_port, credentials,
+                        auto_reconnect.clone(),
+                    ));
+                    last_error.clear();
+                } else {
+                    last_error = "缺少 HTTPS MCP WSS 凭据".into();
+                    retries = retries.saturating_add(1);
+                }
+            } else {
+                match start_forward(&settings, &log_dir, &paths) {
+                    Ok(child) => { forward = Some(child); last_error.clear(); }
+                    Err(error) => { last_error = error; retries = retries.saturating_add(1); }
+                }
             }
         }
-        if !ready { kill_child(&mut forward); }
-        let ssh_connected = ready && is_alive(&mut forward);
-        if !ssh_connected { public_ready = false; }
-        if ssh_connected && last_probe.elapsed() >= Duration::from_secs(15) {
+        if !ready { kill_child(&mut forward); stop_wss(&mut wss); }
+        let transport_connected = ready && if settings.transport == "wss" {
+            wss.as_ref().is_some_and(|client| client.connected())
+        } else { is_alive(&mut forward) };
+        if !transport_connected {
+            public_ready = false;
+            if settings.transport == "wss" {
+                if let Some(error) = wss.as_ref().and_then(|client| client.last_error()) {
+                    last_error = format!("WSS Relay: {error}");
+                }
+            }
+        } else if settings.transport == "wss" {
+            last_error.clear();
+        }
+        if transport_connected && last_probe.elapsed() >= Duration::from_secs(15) {
             last_probe = Instant::now();
             last_public_probe_at = crate::timestamp_ms();
             match &client {
@@ -337,8 +386,9 @@ fn run(
         }
         if let Ok(mut snapshot) = status.lock() {
             snapshot.local_ready = ready;
-            snapshot.ssh_connected = ssh_connected;
-            snapshot.remote_ready = ssh_connected && public_ready;
+            snapshot.ssh_connected = settings.transport == "ssh" && transport_connected;
+            snapshot.transport_connected = transport_connected;
+            snapshot.remote_ready = transport_connected && public_ready;
             snapshot.last_public_probe_at = last_public_probe_at;
             snapshot.remote_last_error.clone_from(&public_probe_error);
             snapshot.last_error.clone_from(&last_error);
@@ -350,10 +400,12 @@ fn run(
         }
     }
     kill_child(&mut forward);
+    stop_wss(&mut wss);
     kill_child(&mut local);
     if let Ok(mut snapshot) = status.lock() {
         snapshot.local_ready = false;
         snapshot.ssh_connected = false;
+        snapshot.transport_connected = false;
         snapshot.remote_ready = false;
     }
 }
@@ -377,7 +429,7 @@ pub(super) fn local_bridge_alive(state: &AppState) -> bool {
 
 pub(super) fn monitor_public_connection(state: &AppState) -> (bool, bool, bool, u64, u32) {
     state.https_mcp.status.lock().map(|status| (
-        status.local_ready, status.ssh_connected, status.remote_ready,
+        status.local_ready, status.transport_connected, status.remote_ready,
         status.last_public_probe_at, status.restarts,
     )).unwrap_or_default()
 }
@@ -388,6 +440,15 @@ fn start_inner(app: &tauri::AppHandle, state: &AppState, settings: HttpsMcpSetti
     let mut lock = state.https_mcp.supervisor.lock()
         .map_err(|_| "HTTPS MCP 连接管理锁已损坏".to_string())?;
     if lock.is_some() { return Ok(()); }
+    let relay_credentials = if settings.transport == "wss" {
+        let credentials = crate::secrets::read_relay_credentials(app)
+            .map_err(|_| "WSS 需要 Relay Desktop 凭据：请先在网络设置注册 Relay".to_string())?;
+        if crate::relay::normalized_base_url(&credentials.base_url)?
+            != crate::relay::normalized_base_url(&settings.base_url)? {
+            return Err("Relay 注册域名与 HTTPS MCP 域名不一致，请先为此域名注册 Relay".into());
+        }
+        Some(credentials)
+    } else { None };
     let paths = runtime_paths(app)?;
     let dir = state_dir(app)?;
     // Run an independent Desktop Commander instance; do not race the Tunnel
@@ -403,10 +464,15 @@ fn start_inner(app: &tauri::AppHandle, state: &AppState, settings: HttpsMcpSetti
     state.https_mcp.auto_reconnect.store(settings.auto_reconnect, Ordering::SeqCst);
     let auto_reconnect = state.https_mcp.auto_reconnect.clone();
     let worker = thread::spawn(move || {
-        run(stopper, status, settings, paths, home, dir, password, signing, auto_reconnect);
+        run(stopper, status, settings, paths, home, dir, password, signing,
+            auto_reconnect, relay_credentials);
     });
     *lock = Some(Supervisor { stop, worker });
-    push_log(state, "HTTPS MCP 已启用，本地 Bridge 与 SSH 反向隧道正在启动");
+    push_log(state, if load_settings(app).https_mcp.transport == "wss" {
+        "HTTPS MCP 已启用，本地 Bridge 与原生 WSS Relay 正在启动"
+    } else {
+        "HTTPS MCP 已启用，本地 Bridge 与 SSH 反向隧道正在启动"
+    });
     Ok(())
 }
 
@@ -448,7 +514,9 @@ pub(super) fn status_summary(app: &tauri::AppHandle, settings: &HttpsMcpSettings
         "sshHost": settings.ssh_host, "sshUser": settings.ssh_user, "sshPort": settings.ssh_port,
         "localPort": settings.local_port, "remotePort": settings.remote_port,
         "authorizationTtlHours": settings.authorization_ttl_hours,
+        "transport": settings.transport,
         "localReady": snapshot.local_ready, "sshConnected": snapshot.ssh_connected,
+        "transportConnected": snapshot.transport_connected,
         "remoteReady": snapshot.remote_ready,
         "lastPublicProbeAt": snapshot.last_public_probe_at,
         "remoteLastError": snapshot.remote_last_error,
@@ -720,6 +788,7 @@ mod tests {
     #[test]
     fn rejects_insecure_or_malformed_destinations() {
         let mut cfg = HttpsMcpSettings::default();
+        cfg.transport = "ssh".into();
         cfg.base_url = "http://newrow.fun".into();
         assert!(validate(&cfg).is_err());
         cfg.base_url = "https://newrow.fun".into();
@@ -735,6 +804,16 @@ mod tests {
         assert!(!should_launch(true, false));
         assert!(should_launch(true, true));
     }
+    #[test]
+    fn new_installs_use_wss_but_legacy_configs_keep_ssh() {
+        let fresh = HttpsMcpSettings::default();
+        assert_eq!(fresh.transport, "wss");
+        let mut value = serde_json::to_value(fresh).unwrap();
+        value.as_object_mut().unwrap().remove("transport");
+        let legacy: HttpsMcpSettings = serde_json::from_value(value).unwrap();
+        assert_eq!(legacy.transport, "ssh");
+    }
+
     #[test]
     fn credential_domains_are_distinct() {
         let seed = [12u8; 32];

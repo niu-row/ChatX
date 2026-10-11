@@ -33,6 +33,7 @@ let authorizationHours = 168;
 let httpsAutoEnabled = true;
 let grantsRead = 0;
 let httpsStarts = 0;
+const relayDeployCalls = [];
 let lastHttpsStart;
 let stoppedMarker = false;
 let lastAuthorizationUpdate;
@@ -53,6 +54,10 @@ const context = vm.createContext({
         return new Promise((resolve) => statusRequests.push(resolve));
       }
       return status;
+    }
+    if (command === 'manage_relay_server') {
+      relayDeployCalls.push(args);
+      return { ok: true, message: args.apply ? 'DEPLOY_OK relay=active' : 'PREFLIGHT_OK site=nginx' };
     }
     if (command === 'get_https_mcp_status') {
       return { enabled: !stoppedMarker, manualStopBlocked: stoppedMarker,
@@ -357,9 +362,16 @@ await vm.runInContext('httpsMcpPage.refreshSecurity()', context);
 const previouslySavedHours = authorizationHours;
 element('httpsMcpAuthorizationDuration').value = previouslySavedHours === null ? '24' : 'unlimited';
 listeners.get('httpsMcpAuthorizationDuration:change')();
+element('httpsMcpTransport').value = 'wss';
+listeners.get('httpsMcpTransport:change')();
+assert.equal(element('httpsMcpSshFields').hidden, true,
+  'WSS mode must not require SSH credentials');
+assert.equal(element('httpsMcpSshAdvanced').hidden, true);
 const startsBefore = httpsStarts;
 await listeners.get('startHttpsMcp:click')();
 assert.equal(httpsStarts, startsBefore + 1);
+assert.equal(lastHttpsStart.transport, 'wss',
+  'Starting HTTPS must send the selected native WSS transport');
 assert.equal(lastHttpsStart.authorizationTtlHours, previouslySavedHours,
   'Starting HTTPS must use saved OAuth lifetime, never the unsaved selection');
 assert.equal(authorizationHours, previouslySavedHours,
@@ -369,5 +381,26 @@ element('httpsAutoReconnect').checked = false;
 await listeners.get('httpsAutoReconnect:change')();
 assert.equal(httpsAutoEnabled, false,
   'HTTPS auto-reconnect switch must persist separately from Tunnel');
+
+element('relayDeployHost').value = '47.103.79.86';
+element('relayDeployUser').value = 'root';
+element('relayDeployPort').value = '22';
+element('relayDeployDomain').value = 'newrow.fun';
+element('relayDeployDesktopId').value = 'd_' + 'a'.repeat(32);
+element('relayDeployKeyPath').value = '';
+await listeners.get('relayDeployApply:click')();
+assert.equal(relayDeployCalls.length, 0, 'Deployment must require preflight');
+await listeners.get('relayDeployCheck:click')();
+assert.equal(relayDeployCalls.length, 1);
+assert.equal(relayDeployCalls[0].apply, false);
+assert.equal(element('relayDeployApply').disabled, false);
+element('relayDeployHost').value = '47.103.79.87';
+listeners.get('relayDeployHost:input')();
+assert.equal(element('relayDeployApply').disabled, true, 'Changing target invalidates preflight');
+await listeners.get('relayDeployCheck:click')();
+await listeners.get('relayDeployApply:click')();
+assert.equal(relayDeployCalls.at(-1).apply, true);
+assert.match(element('relayDeployLog').textContent, /DEPLOY_OK/);
+console.log('Relay deployment wizard passed: preflight gate, changes and apply');
 
 console.log('Settings reorganization passed: OAuth ownership, scoped refresh, independent policy, secret cleanup');

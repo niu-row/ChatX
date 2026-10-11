@@ -86,31 +86,56 @@
         </div>
         <div id="httpsConnectionPanel" class="connection-mode-panel">
         <div class="card form-card https-mcp-card">
-          <div class="section-head"><div><span class="eyebrow">HTTPS MCP · SSH REVERSE TUNNEL</span><h2>通过自有域名连接 ChatGPT</h2></div><span id="httpsMcpStatus" class="setting-status off">未启动</span></div>
-          <p class="muted">通过 SSH 转发本机 MCP，由 Nginx 提供 HTTPS 与 OAuth。启动时会先关闭 Tunnel。</p>
+          <div class="section-head"><div><span class="eyebrow">HTTPS MCP · WSS RELAY / SSH</span><h2>通过自有域名连接 ChatGPT</h2></div><span id="httpsMcpStatus" class="setting-status off">未启动</span></div>
+          <p class="muted">推荐原生 WSS Relay：无 SSH 依赖，通过现有 Relay 的桌面凭据建立加密出站连接。SSH 仅作为旧版兼容模式。</p>
           <div class="actions connection-primary-actions">
             <button id="startHttpsMcp" class="primary">启动 HTTPS MCP</button>
             <button id="stopHttpsMcp" class="secondary">停止 HTTPS MCP</button>
           </div>
           <div class="https-mcp-fields">
             <label>HTTPS 站点地址<input id="httpsMcpUrl" type="url" autocomplete="off" placeholder="https://newrow.fun"></label>
+            <label>传输方式<select id="httpsMcpTransport">
+              <option value="wss">原生 WSS Relay（推荐）</option>
+              <option value="ssh">SSH 反向转发（旧版兼容）</option>
+            </select></label>
+          </div>
+          <div id="httpsMcpSshFields" class="https-mcp-fields">
             <label>SSH 服务器<input id="httpsMcpHost" autocomplete="off" placeholder="服务器地址"></label>
             <label>SSH 用户<input id="httpsMcpUser" autocomplete="off" placeholder="受限 SSH 用户"></label>
           </div>
           <details class="connection-advanced">
-            <summary>高级设置 · SSH 与转发端口</summary>
+            <summary>高级设置 · 本地服务端口</summary>
             <p class="muted">仅在端口不同于默认配置时修改。</p>
             <div class="https-mcp-fields">
-              <label>SSH 端口<input id="httpsMcpSshPort" type="number" value="22" min="1" max="65535"></label>
               <label>本机 MCP 端口<input id="httpsMcpLocalPort" type="number" value="3000" min="1024" max="65535"></label>
+            </div>
+            <div id="httpsMcpSshAdvanced" class="https-mcp-fields">
+              <label>SSH 端口<input id="httpsMcpSshPort" type="number" value="22" min="1" max="65535"></label>
               <label>远端回环端口<input id="httpsMcpRemotePort" type="number" value="18080" min="1024" max="65535"></label>
             </div>
           </details>
           <p id="httpsMcpEndpoint" class="mono-block">https://newrow.fun/mcp</p>
           <p id="httpsMcpHint" class="muted">公网服务器须提供 HTTPS /mcp 与 OAuth 路径。授权密码和授权管理请前往“设置 → 安全与授权”。</p>
           <div class="actions"><button id="openHttpsSecurity" class="ghost" type="button">管理 OAuth 授权 →</button></div>
-
         </div>
+        <details id="relayDeployPanel" class="card form-card relay-deploy-card">
+          <summary>服务器一键部署 · 原生 WSS Relay</summary>
+          <p class="muted">首次填好 SSH 连接和目标 Desktop ID，先“预检”，再“一键部署”。自动上传同版本源码、备份旧服务、编译、切换 Nginx、健康检查；失败自动回滚。SSH 仅用于部署，不参与运行时连接。</p>
+          <div class="relay-deploy-fields">
+            <label>服务器 IP / 主机名<input id="relayDeployHost" autocomplete="off" placeholder="47.103.79.86"></label>
+            <label>SSH 用户<input id="relayDeployUser" autocomplete="off" value="root" placeholder="root"></label>
+            <label>SSH 端口<input id="relayDeployPort" type="number" value="22" min="1" max="65535"></label>
+            <label>HTTPS 域名<input id="relayDeployDomain" autocomplete="off" placeholder="newrow.fun"></label>
+            <label>Desktop ID<input id="relayDeployDesktopId" autocomplete="off" placeholder="d_..."></label>
+            <label>SSH 私钥路径（可留空）<input id="relayDeployKeyPath" autocomplete="off" placeholder="使用 ~/.ssh 默认密钥"></label>
+          </div>
+          <p class="muted">前提：Linux + systemd、已配 TLS 的 Nginx 443 站点、Rust Cargo、密钥登录的 root 或免密码 sudo。未知 SSH 主机指纹必须先在终端核验；不会自动信任。</p>
+          <div class="actions">
+            <button id="relayDeployCheck" class="secondary" type="button">1 · 预检服务器</button>
+            <button id="relayDeployApply" class="primary" type="button" disabled>2 · 一键部署</button>
+          </div>
+          <pre id="relayDeployLog" class="relay-deploy-log" aria-live="polite">尚未预检；部署前不会更改服务器。</pre>
+        </details>
         </div>
         <div id="tunnelConnectionPanel" class="connection-mode-panel" hidden>
         <div class="grid two">

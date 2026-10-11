@@ -48,7 +48,7 @@ Desktop Commander 通过 stdio 启动，不要求最终用户安装 Node、npm�
 
 因此 Desktop Commander 的运行依赖树由锁定的 GitHub Release MCPB 二进制整体确定，而不是由每次构建时的 `npm install` 结果决定。
 
-## 可选的 HTTPS MCP + SSH 反向隧道（不依赖 OpenAI Tunnel）
+## HTTPS MCP · 原生 WSS Relay（不依赖 OpenAI Tunnel / SSH 运行链路）
 
 ChatX 的“连接”页提供 **HTTPS MCP** 与 **Secure MCP Tunnel** 两种互斥模式。选择模式卡片只切换视图，点击启动才停止旧链路并启用新链路；启动与停止控制位于连接页，OAuth 授权由“设置 → 安全与授权”集中管理。与原 Secure MCP Tunnel **运行互斥**（旧模式仍保留）。启动任一链路会先停止另一条的服务并关闭其保存的连接意图；视图切换本身不会断线。升级时如果旧配置同时启用两条，则优先保留 HTTPS MCP，先停掉 Tunnel，自动重连不得将其重新开启。HTTPS 模式不需要 Tunnel ID、Runtime API Key 或 Tunnel 与 ChatGPT 工作空间的组织关联，但 ChatGPT 端仍须允许添加自定义 MCP 应用。
 
@@ -56,9 +56,33 @@ ChatX 的“连接”页提供 **HTTPS MCP** 与 **Secure MCP Tunnel** 两种互
 
 ```text
 ChatGPT --HTTPS/OAuth--> https://newrow.fun/mcp
-  --> 公网服务器 Nginx --127.0.0.1:18080--> SSH -R
-  --> ChatX 本机 127.0.0.1:3000 --> 独立的 stdio Desktop Commander
+  --> 公网服务器 Nginx (443) --> Relay Server (127.0.0.1:8787)
+  --> 原生 WSS (/v1/ws/mcp) --> ChatX 本机 127.0.0.1:3000
+  --> 独立的 stdio Desktop Commander
 ```
+
+### 推荐：原生 WSS Relay（无 SSH 运行时依赖）
+
+**新增一键部署向导**：在「连接 → HTTPS MCP」展开「服务器一键部署」，填写域名、SSH 服务器与 Desktop ID，先预检后点击部署。它会自动上传相同版本源码、编译、备份和验证；部署后不再使用 SSH。服务器初次需要已经配置好 Nginx HTTPS 与 Rust，详见 [服务器部署说明](deploy/oneclick/README.md)。WSS v2 用二进制分块代替 Base64，兼容旧 v1，且不会更改 Desktop Commander 权限模型。
+
+新的 HTTPS MCP「传输方式」可选「原生 WSS Relay」。已有 SSH 配置缺少 `transport` 字段时仍按 SSH 加载，**不会因升级自动切断旧链路**。准备好公网网关后，在连接页主动切换 WSS。该模式仍使用原有独立 HTTPS OAuth 主密钥、授权记录和本机 `127.0.0.1:3000` Bridge。
+
+```text
+ChatGPT -- HTTPS/OAuth --> newrow.fun:443 /mcp
+       -- Nginx --> relay-server:8787 -- (MCP 请求关联/响应分块)
+       -- WSS /v1/ws/mcp --> ChatX Desktop -- localhost:3000 --> Desktop Commander
+```
+
+部署步骤（**先部署公网网关，再升级/切换桌面端**）：
+
+1. 使用该仓库新版 `relay-server` 编译并更新现有 Relay 服务，**保留原来的 Relay registry 和环境变量**，勿重置 Android Monitor 注册信息。设置 `CHATX_MCP_DESKTOP_ID=d_...` 为目标桌面已注册的 Desktop ID；不设置时公网 MCP 接口保持不可用（503），不能默认为任意在线 Desktop。
+2. 检查 Relay 仍只监听服务器回环 `CHATX_RELAY_BIND=127.0.0.1:8787`（如自定义则同步更改 Nginx 代理端口）。将域名 HTTPS server 的旧 `deploy/nginx/chatx-https-mcp.conf` **替换**为 `deploy/nginx/chatx-https-mcp-wss.conf`，切勿同时 include 两套 `/mcp` location；执行 `nginx -t` 通过后 reload。公网只需要 HTTPS 443，新增的 `/v1/ws/mcp` 必须支持 WebSocket Upgrade。
+3. 桌面端必须先完成该 HTTPS 域名的 Relay Desktop 注册（注册凭据使用系统密钥保护存储），但运行 WSS MCP **不要求 Android Monitor 处于开启状态**。在 HTTPS MCP 页面选择「原生 WSS Relay」，启动连接即可；不需要 SSH 主机、用户、密钥或远端端口。
+4. 等 WSS 连接建立后，检查公网 `GET /.well-known/oauth-authorization-server` 应返回 200 和正确 issuer，未经授权的 `POST /mcp` 应返回 401 且携带 OAuth challenge。断线会返回 503（离线），超时返回 504；不应继续返回 502 的旧 SSH upstream 错误。ChatGPT 端 `https://newrow.fun/mcp` 和现有 OAuth 授权可保持不变。
+
+安全约束：WSS 握手必须携带**已注册的 Desktop Token**；网关只接受显式 `CHATX_MCP_DESKTOP_ID` 对应的 Desktop，不能跨 Desktop 路由，也不能代理任意 URL、`/healthz` 或 Relay 管理接口。本地 MCP 仍只监听 loopback。WSS v2 请求 64 MiB、响应 128 MiB、并发 64；旧 v1 仍保持 5 MiB/16 MiB。Relay 网关终止 TLS 并能访问透传的 HTTP 请求数据（包含 OAuth 登录/Token 请求），**服务器必须由可信管理员运维**；不要将 Relay 部署到不可信服务商或与不可信租户共享。若已泄露 Desktop Token，应重新注册并撤销旧凭据。
+
+原 SSH 反向转发模式仍可作为过渡回退：
 
 ### 在已配置公网域名的服务器部署
 
@@ -76,11 +100,11 @@ ChatX 桌面端使用 Tauri 官方 single-instance 插件限制 Windows/macOS �
 
 在 ChatGPT 支持的自定义 MCP/应用配置里使用 **`https://newrow.fun/mcp`**，选择 OAuth。授权页面需输入 ChatX 显示的密码。桥接端提供 OAuth discovery、动态客户端注册、authorization-code + PKCE (S256)、短期 Bearer Token 和 refresh token。登录页面仅允许 ChatGPT/OpenAI 的 HTTPS 回调域名，未经授权的 `/mcp` 请求返回 401。工具仍有读写文件和本机命令执行权限；请将授权密码视为敏感凭据，且只为可信的 ChatGPT 客户端授权。
 
-HTTPS 连接状态会在后台定期验证公网 OAuth 元数据（HTTP 200）与未经授权的 MCP 访问（HTTP 401），而不只是检查 SSH 进程是否存在。公网 OAuth 授权入口采用每 IP 限流和较高的全局安全上限，避免少量分布式无效请求耗尽低额度并阻断正常授权；Node.js 与 Nginx 的 MCP 请求上限均为 5 MiB。“设置 → 连接策略”分别提供 Tunnel 与 HTTPS 的断线自动重连开关。HTTPS 关闭自动重连后仍可手动启动一次 Bridge / SSH；启动 ChatX 时会恢复上次已选择的连接模式。设置页按连接策略、安全与授权、网络与代理、手机与 Relay 及 macOS 系统选项分组；手机配对继续保留在“手机连接”，运行日志归到“诊断”。首页“停止连接”会优先持久化两种传输的独立手动停止标记，断开旧 Tunnel 与 HTTPS MCP，再事务化保存停止意图；即使主设置文件保存失败，下次启动也会由停止标记阻止自动重连，并向用户提示保存故障。再次手动连接成功后才清除对应标记。HTTPS MCP 与 Tunnel 的手动连接启停共用生命周期操作锁，避免停止与启动互相覆盖。停用连接不代表撤销 OAuth 授权。本机健康检查使用每次启动随机生成的实例标识，避免端口被旧进程占用时误报就绪。
+HTTPS 连接状态会在后台定期验证公网 OAuth 元数据（HTTP 200）与未经授权的 MCP 访问（HTTP 401），而不只是检查 SSH 进程是否存在。公网 OAuth 授权入口采用每 IP 限流和较高的全局安全上限，避免少量分布式无效请求耗尽低额度并阻断正常授权；在 WSS v2 下 Node.js 与 Nginx 的 MCP 请求上限均为 64 MiB，WSS 响应上限 128 MiB（v1 仍采用旧限制）。“设置 → 连接策略”分别提供 Tunnel 与 HTTPS 的断线自动重连开关。HTTPS 关闭自动重连后仍可手动启动一次 Bridge / SSH；启动 ChatX 时会恢复上次已选择的连接模式。设置页按连接策略、安全与授权、网络与代理、手机与 Relay 及 macOS 系统选项分组；手机配对继续保留在“手机连接”，运行日志归到“诊断”。首页“停止连接”会优先持久化两种传输的独立手动停止标记，断开旧 Tunnel 与 HTTPS MCP，再事务化保存停止意图；即使主设置文件保存失败，下次启动也会由停止标记阻止自动重连，并向用户提示保存故障。再次手动连接成功后才清除对应标记。HTTPS MCP 与 Tunnel 的手动连接启停共用生命周期操作锁，避免停止与启动互相覆盖。停用连接不代表撤销 OAuth 授权。本机健康检查使用每次启动随机生成的实例标识，避免端口被旧进程占用时误报就绪。
 
 调用记录及实时状态分别读取两套 Desktop Commander 工作目录，并按时间合并、标注来源；历史记录读取限制为每个传输最近 2 MiB 的 JSONL 数据，统计只涵盖这个窗口。状态汇总优先展示仍存活、快照有效的进行中调用，避免另一条较新的空闲快照覆盖活跃调用；Android Monitor 保留旧 `tunnel`/`mcp` 字段，另提供只读 `connections.activeMode`、`connections.tunnel`、`connections.httpsMcp` 以表示唯一选中的链路，并按来源标注工具调用；新版 Android 的首页和通知使用此数据，旧版桌面缺少新字段时自动兼容。手机仍经 Monitor Direct HTTPS / Relay 获取状态，不直接连接高权限 MCP/OAuth 接口。
 
-**排障**：先检查连接页中的“本地 MCP/SSH 状态”，再查 ChatX state 目录中的 `https-mcp-bridge.log` 与 `https-mcp-ssh.log`。如果公网 `/mcp` 返回 502，通常是 ChatX/SSH 尚未连接到服务器的 `18080`；如果返回 401，证明 OAuth 保护已生效；如果连接状态仍然显示“启动中”，排查 SSH 免密登录或服务器端转发端口占用。保留原 Secure MCP Tunnel 作为回退方式。
+**排障**：优先检查连接页 WSS 状态、ChatX state 下的 `https-mcp-bridge.log`、`relay-deploy.log` 以及服务器 `journalctl -u chatx-relay.service`。SSH 兼容模式再查 `https-mcp-ssh.log`。如果公网 `/mcp` 返回 502，通常是 ChatX/SSH 尚未连接到服务器的 `18080`；如果返回 401，证明 OAuth 保护已生效；如果连接状态仍然显示“启动中”，排查 SSH 免密登录或服务器端转发端口占用。保留原 Secure MCP Tunnel 作为回退方式。
 
 本机验证命令：`npm test`（OAuth 模拟 MCP）和 `npm run test:runtime`（真实 bundled Desktop Commander，含 HTTPS Bridge）。完整验证使用 `npm run test:local-full`。Windows 测试安装包可通过 `npm run desktop:installer` 构建；正式发布仍要求代码签名。
 
