@@ -324,6 +324,38 @@ assert.equal(element('tunnelConnectionPanel').hidden, false,
   'Status polling must not override the user-selected connection view');
 console.log('Mutually exclusive mode UI checks passed: selection is safe and inert');
 
+// Native WSS deliberately never reports sshConnected=true. The overview
+// must use the transport-neutral field, as the HTTPS connection page does.
+status = {
+  ...status, activeMcpMode: 'https', desiredConnected: false, runtimeActive: false,
+  reconnecting: false, reconnectPhase: 'idle', runtimeHealth: 'stopped',
+  httpsMcp: {
+    enabled: true, transport: 'wss', localReady: true, transportConnected: true,
+    sshConnected: false, remoteReady: true, endpoint: 'https://newrow.fun/mcp',
+  },
+};
+await vm.runInContext('refresh()', context);
+assert.equal(element('sidebarStatus').textContent, 'HTTPS MCP 已连接');
+assert.equal(element('sidebarDot').className, 'dot ok');
+assert.match(element('heroTitle').textContent, /HTTPS MCP 已就绪/);
+assert.equal(element('transportFactLabel').textContent, 'HTTPS MCP · WSS Relay');
+assert.equal(element('overviewTransportName').textContent, 'HTTPS MCP · WSS Relay');
+assert.match(element('heroCopy').textContent, /WSS Relay/);
+assert.doesNotMatch(element('heroCopy').textContent, /SSH 反向隧道/);
+status.httpsMcp.transportConnected = false;
+await vm.runInContext('refresh()', context);
+assert.equal(element('sidebarStatus').textContent, '未连接');
+status.httpsMcp.transportConnected = true;
+status.httpsMcp.manualStopBlocked = true;
+await vm.runInContext('refresh()', context);
+assert.equal(element('sidebarStatus').textContent, '未连接');
+status.httpsMcp = { enabled: true, transport: 'ssh', localReady: true,
+  sshConnected: true, remoteReady: true };
+await vm.runInContext('refresh()', context);
+assert.equal(element('sidebarStatus').textContent, 'HTTPS MCP 已连接');
+assert.equal(element('transportFactLabel').textContent, 'HTTPS MCP · SSH 反向隧道');
+console.log('WSS sidebar status checks passed: transport-neutral health, stop and SSH compatibility');
+
 const markup = fs.readFileSync('desktop/index.html', 'utf8');
 const securityLocation = markup.indexOf('data-settings-panel="security"');
 const grantsLocation = markup.indexOf('id="httpsMcpAuthorizationList"');

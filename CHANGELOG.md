@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.4.14 - 2026-10-12
+
+### Fixed
+- Corrected overview and sidebar HTTPS MCP connection status for native WSS Relay. Previously the UI checked the SSH-only `sshConnected` flag, so a healthy WSS v2 session incorrectly showed an orange `未连接` status.
+- The status now honors `transportConnected`, public/local readiness and the manual Stop marker; the connection labels reflect WSS versus legacy SSH.
+- Added regression coverage for WSS healthy/disconnected, manual Stop and older SSH status snapshots.
+
 ## 0.4.13 - 2026-10-12
 
 ### Reliability

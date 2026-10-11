@@ -129,7 +129,12 @@ function render(s) {
   }
   const running = runtimeRunning(s);
   const httpsEnabled = Boolean(s.httpsMcp?.enabled);
-  const httpsConnected = httpsEnabled && Boolean(s.httpsMcp?.localReady && s.httpsMcp?.sshConnected && s.httpsMcp?.remoteReady);
+  // sshConnected is deliberately false when HTTPS MCP uses WSS. Use the
+  // transport-neutral status, with a fallback for older status snapshots.
+  const transportConnected = Boolean(s.httpsMcp?.transportConnected ?? s.httpsMcp?.sshConnected);
+  const httpsConnected = httpsEnabled && !s.httpsMcp?.manualStopBlocked &&
+    Boolean(s.httpsMcp?.localReady && transportConnected && s.httpsMcp?.remoteReady);
+  const httpsTransportName = s.httpsMcp?.transport === 'wss' ? 'WSS Relay' : 'SSH 反向隧道';
   const connected = running || httpsConnected;
   const unavailable = s.runtimeState === 'unavailable';
   const reconnecting = Boolean(s.reconnecting);
@@ -186,7 +191,7 @@ function render(s) {
         : down ? 'Tunnel 连接已中断'
           : s.configured ? '连接已配置' : '配置一次即可连接';
   $('heroCopy').textContent = httpsConnected
-    ? `HTTPS 与 SSH 反向隧道正在运行。请在 ChatGPT 自定义应用中使用 ${s.httpsMcp?.endpoint || 'HTTPS /mcp'}，通过 OAuth 授权后访问 Desktop Commander。`
+    ? `HTTPS 与 ${httpsTransportName} 正在运行。请在 ChatGPT 自定义应用中使用 ${s.httpsMcp?.endpoint || 'HTTPS /mcp'}，通过 OAuth 授权后访问 Desktop Commander。`
     : running
       ? 'Secure MCP Tunnel 正在把 ChatGPT 的 MCP 调用转发给 Desktop Commander。'
     : recoveryBusy || recoveryWaiting || recoveryBlocked
@@ -213,10 +218,10 @@ function render(s) {
             : down
               ? 'Down'
               : String(s.runtimeState || 'Stopped');
-  $('transportFactLabel').textContent = httpsConnected ? 'HTTPS MCP + SSH' : 'Secure MCP Tunnel';
+  $('transportFactLabel').textContent = httpsConnected ? `HTTPS MCP · ${httpsTransportName}` : 'Secure MCP Tunnel';
   if (httpsConnected) $('tunnelFact').textContent = 'Ready';
   $('tunnelVersion').textContent = httpsConnected ? (s.httpsMcp.endpoint || 'HTTPS MCP') : (s.tunnelVersion || 'tunnel-client unavailable');
-  $('overviewTransportName').textContent = httpsConnected ? 'HTTPS MCP + SSH' : 'Secure MCP Tunnel';
+  $('overviewTransportName').textContent = httpsConnected ? `HTTPS MCP · ${httpsTransportName}` : 'Secure MCP Tunnel';
   $('overviewTransportDescription').textContent = httpsConnected ? (s.httpsMcp.baseUrl || 'newrow.fun') : 'OpenAI';
   $('dcFact').textContent = unavailable ? 'Unavailable' : 'Bundled';
   $('dcVersion').textContent = `v${s.desktopCommander?.version || 'unknown'}`;
