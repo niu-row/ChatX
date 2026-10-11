@@ -113,9 +113,14 @@ trap rollback ERR HUP INT TERM
 echo 'STAGE=extract'
 tar -tzf "$archive" | grep -x 'relay-server/Cargo.toml' >/dev/null
 tar -xzf "$archive" -C "$stage"
-if [ -f /opt/chatx-relay/build-a7969bb/.cargo/config.toml ]; then
+if [ -n "${CHATX_RELAY_CARGO_CONFIG:-}" ]; then
+  # Optional, explicit Cargo mirror config for offline/restricted hosts.
+  # Normal installations use Cargo's standard $CARGO_HOME/config.toml.
+  [ -f "$CHATX_RELAY_CARGO_CONFIG" ] || {
+    echo 'ERROR=CHATX_RELAY_CARGO_CONFIG file does not exist' >&2; false;
+  }
   install -d "$stage/.cargo"
-  cp /opt/chatx-relay/build-a7969bb/.cargo/config.toml "$stage/.cargo/config.toml"
+  install -m 600 "$CHATX_RELAY_CARGO_CONFIG" "$stage/.cargo/config.toml"
 fi
 echo 'STAGE=compile'
 (cd "$stage/relay-server" && "$cargo_bin" build --release --locked)

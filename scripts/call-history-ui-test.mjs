@@ -50,6 +50,8 @@ vm.runInContext(fs.readFileSync('desktop/api.js', 'utf8'), context);
 vm.runInContext(fs.readFileSync('desktop/state.js', 'utf8'), context);
 vm.runInContext(fs.readFileSync('desktop/pages/calls.js', 'utf8'), context);
 vm.runInContext(fs.readFileSync('desktop/pages/network.js', 'utf8'), context);
+vm.runInContext(fs.readFileSync('desktop/pages/relay-deploy.js', 'utf8'), context);
+vm.runInContext(fs.readFileSync('desktop/pages/oauth-security.js', 'utf8'), context);
 vm.runInContext(fs.readFileSync('desktop/pages/https-mcp.js', 'utf8'), context);
 vm.runInContext(fs.readFileSync('desktop/pages/permissions.js', 'utf8'), context);
 vm.runInContext(fs.readFileSync('desktop/pages/power.js', 'utf8'), context);

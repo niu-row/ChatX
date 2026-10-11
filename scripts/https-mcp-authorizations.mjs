@@ -11,7 +11,7 @@ const clientHash = (clientId) =>
 const readJson = (file) => JSON.parse(fs.readFileSync(file, 'utf8'));
 const nowSec = () => Math.floor(Date.now() / 1000);
 
-export function authorizationStore({ directory, settingsPath }) {
+export function authorizationStore({ directory, settingsPath, createLegacyIfMissing = true }) {
   if (!path.isAbsolute(directory || '') || !path.isAbsolute(settingsPath || '')) {
     throw new Error('OAuth authorization store requires absolute local paths');
   }
@@ -23,7 +23,7 @@ export function authorizationStore({ directory, settingsPath }) {
   }
   const legacyPath = path.join(directory, 'legacy.json');
   const revokedAllPath = path.join(directory, 'revoked-all.json');
-  if (!fs.existsSync(legacyPath)) {
+  if (createLegacyIfMissing && !fs.existsSync(legacyPath)) {
     try {
       fs.writeFileSync(legacyPath,
         JSON.stringify({ expiresAt: nowSec() + LEGACY_GRACE_SECONDS }),
@@ -32,8 +32,8 @@ export function authorizationStore({ directory, settingsPath }) {
   }
   // Existing OAuth tokens have no grant ID. Allow them only during a
   // one-time migration window, then require a fresh consent.
-  const legacyRecord = readJson(legacyPath);
-  if (!Number.isSafeInteger(legacyRecord.expiresAt)) {
+  const legacyRecord = fs.existsSync(legacyPath) ? readJson(legacyPath) : null;
+  if (legacyRecord && !Number.isSafeInteger(legacyRecord.expiresAt)) {
     throw new Error('Invalid legacy OAuth migration cutoff');
   }
   function lifetimeHours() {
@@ -85,7 +85,8 @@ export function authorizationStore({ directory, settingsPath }) {
   }
   function activeGrant(id, clientId = null) {
     if (id === undefined || id === null) {
-      if (revocationEpoch() > 0 || fs.existsSync(path.join(revokedDir, 'legacy'))) return null;
+      if (!legacyRecord || revocationEpoch() > 0 ||
+          fs.existsSync(path.join(revokedDir, 'legacy'))) return null;
       return legacyRecord.expiresAt > nowSec()
         ? { id: 'legacy', expiresAt: legacyRecord.expiresAt } : null;
     }
@@ -147,5 +148,65 @@ export function authorizationStore({ directory, settingsPath }) {
   function expiresAt(grant) {
     return grant?.expiresAt ?? null;
   }
-  return { lifetimeHours, createGrant, activeGrant, expiresAt, revocationGeneration, advanceRefresh };
+
+  // The authorization store is the ONLY owner of persisted grant formats.
+  // The desktop administrative command invokes these methods through a local
+  // bundled Node CLI; Rust no longer parses or writes grant records.
+  function listGrants() {
+    const generation = fs.existsSync(revokedAllPath) ? revocationGeneration() : null;
+    const grants = [];
+    for (const entry of fs.readdirSync(grantsDir, { withFileTypes: true })) {
+      if (!entry.isFile() || !entry.name.endsWith('.json')) continue;
+      const record = readJson(path.join(grantsDir, entry.name));
+      const id = record.id;
+      if (!validGrantId(id) || entry.name !== id + '.json') {
+        throw new Error('Invalid OAuth grant ID in persisted store');
+      }
+      grants.push({
+        id,
+        clientTag: typeof record.clientHash === 'string' ? record.clientHash : '',
+        issuedAt: record.issuedAt,
+        expiresAt: record.expiresAt,
+        revoked: fs.existsSync(path.join(revokedDir, id)) ||
+          (generation !== null && record.revocationGeneration !== generation),
+      });
+    }
+    if (fs.existsSync(legacyPath)) {
+      grants.push({
+        id: 'legacy',
+        clientTag: '旧版授权（需重新授权以选择有效期）',
+        issuedAt: 0,
+        expiresAt: (legacyRecord ?? readJson(legacyPath)).expiresAt,
+        revoked: generation !== null || fs.existsSync(path.join(revokedDir, 'legacy')),
+      });
+    }
+    grants.sort((a, b) => (b.issuedAt ?? 0) - (a.issuedAt ?? 0));
+    return { grants };
+  }
+  function revokeGrant(id) {
+    if (id !== 'legacy' && !validGrantId(id)) throw new Error('Invalid OAuth grant ID');
+    const file = id === 'legacy' ? legacyPath : path.join(grantsDir, id + '.json');
+    if (!fs.existsSync(file)) throw new Error('OAuth grant does not exist');
+    fs.writeFileSync(path.join(revokedDir, id), 'revoked', { mode: 0o600 });
+    return listGrants();
+  }
+  function revokeAll() {
+    // A new generation invalidates existing grants and pending OAuth codes
+    // while allowing new consent after this point. Write atomically.
+    const generation = crypto.randomBytes(32).toString('hex');
+    const next = path.join(directory, 'revoked-all.' + generation + '.tmp');
+    try {
+      fs.writeFileSync(next, JSON.stringify({
+        revokedAtMs: Date.now(), generation,
+      }), { flag: 'wx', mode: 0o600 });
+      fs.renameSync(next, revokedAllPath);
+    } finally {
+      try { fs.unlinkSync(next); } catch (e) { if (e.code !== 'ENOENT') throw e; }
+    }
+    return listGrants();
+  }
+  return {
+    lifetimeHours, createGrant, activeGrant, expiresAt, revocationGeneration,
+    advanceRefresh, listGrants, revokeGrant, revokeAll,
+  };
 }

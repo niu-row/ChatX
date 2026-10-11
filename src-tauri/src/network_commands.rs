@@ -318,6 +318,14 @@ pub(super) fn get_network_settings(
     Ok(network_settings_payload(&app, state.inner()))
 }
 
+// Identity creation is an explicit, idempotent user action. A read-only
+// network status refresh must not create or change the Desktop identity.
+// The deploy wizard needs the stable ID *before* first Relay registration.
+#[tauri::command]
+pub(super) fn prepare_relay_deploy_desktop_id(app: tauri::AppHandle) -> Result<String, String> {
+    ensure_monitor_desktop_id(&app)
+}
+
 #[tauri::command]
 pub(super) fn register_relay_desktop(
     app: tauri::AppHandle,

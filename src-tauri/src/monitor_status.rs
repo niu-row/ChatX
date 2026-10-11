@@ -298,25 +298,14 @@ fn payload_with_tunnel(
     // A separately named, read-only transport summary for Android. It uses
     // the same mode selection as the desktop UI, but never exposes SSH users,
     // passwords, OAuth tokens or local filesystem paths.
-    let https_allowed = crate::connection_intent::restore_allowed(
-        app, crate::connection_intent::Transport::HttpsMcp
-    ).unwrap_or(false);
-    let selected_mode = if settings.https_mcp.enabled && https_allowed {
-        "https"
-    } else if !settings.https_mcp.enabled &&
-        state.desired_connected.load(Ordering::SeqCst) {
-        "tunnel"
-    } else { "none" };
-    let (https_local_ready, https_ssh_connected, https_remote_ready,
-        last_public_probe_at, https_restarts) =
-        crate::https_mcp::monitor_public_connection(state);
-    let https_connected = selected_mode == "https"
-        && https_local_ready && https_ssh_connected
-        && https_remote_ready;
-    let https_state = if selected_mode != "https" { "stopped" }
-        else if https_connected { "connected" }
-        else if https_ssh_connected { "checking" }
-        else { "reconnecting" };
+    let (https_health, last_public_probe_at, https_restarts) =
+        crate::https_mcp::monitor_public_connection(app, &settings.https_mcp, state);
+    let selected_mode = crate::settings::effective_mcp_mode(
+        &settings, https_health.enabled, state.desired_connected.load(Ordering::SeqCst),
+    );
+    let https_connected = selected_mode == "https" && https_health.connected;
+    let https_state = if selected_mode == "https" { https_health.state }
+        else { "stopped" };
     let tunnel_connected = selected_mode == "tunnel"
         && tunnel.active && tunnel.health == "healthy"
         && tunnel.last_probe_at > 0
@@ -335,9 +324,12 @@ fn payload_with_tunnel(
             "enabled": selected_mode == "https",
             "connected": https_connected,
             "state": https_state,
-            "localReady": https_local_ready,
-            "sshConnected": https_ssh_connected,
-            "remoteReady": https_remote_ready,
+            "localReady": https_health.local_ready,
+            // Historical Android field used transport-neutral semantics.
+            // Preserve it for old clients; new clients use transportConnected.
+            "sshConnected": https_health.transport_connected,
+            "transportConnected": https_health.transport_connected,
+            "remoteReady": https_health.remote_ready,
             "lastPublicProbeAt": last_public_probe_at,
             "restarts": https_restarts,
         }

@@ -33,6 +33,7 @@ let authorizationHours = 168;
 let httpsAutoEnabled = true;
 let grantsRead = 0;
 let httpsStarts = 0;
+let identityCalls = 0;
 const relayDeployCalls = [];
 let lastHttpsStart;
 let stoppedMarker = false;
@@ -54,6 +55,10 @@ const context = vm.createContext({
         return new Promise((resolve) => statusRequests.push(resolve));
       }
       return status;
+    }
+    if (command === 'prepare_relay_deploy_desktop_id') {
+      identityCalls++;
+      return 'd_' + 'a'.repeat(32);
     }
     if (command === 'manage_relay_server') {
       relayDeployCalls.push(args);
@@ -122,6 +127,8 @@ vm.runInContext(fs.readFileSync('desktop/api.js', 'utf8'), context);
 vm.runInContext(fs.readFileSync('desktop/state.js', 'utf8'), context);
 vm.runInContext(fs.readFileSync('desktop/pages/calls.js', 'utf8'), context);
 vm.runInContext(fs.readFileSync('desktop/pages/network.js', 'utf8'), context);
+vm.runInContext(fs.readFileSync('desktop/pages/relay-deploy.js', 'utf8'), context);
+vm.runInContext(fs.readFileSync('desktop/pages/oauth-security.js', 'utf8'), context);
 vm.runInContext(fs.readFileSync('desktop/pages/https-mcp.js', 'utf8'), context);
 vm.runInContext(fs.readFileSync('desktop/pages/permissions.js', 'utf8'), context);
 vm.runInContext(fs.readFileSync('desktop/pages/power.js', 'utf8'), context);
@@ -342,6 +349,11 @@ assert.equal(element('transportFactLabel').textContent, 'HTTPS MCP · WSS Relay'
 assert.equal(element('overviewTransportName').textContent, 'HTTPS MCP · WSS Relay');
 assert.match(element('heroCopy').textContent, /WSS Relay/);
 assert.doesNotMatch(element('heroCopy').textContent, /SSH 反向隧道/);
+// A Rust authoritative verdict overrides any independently inferred flags.
+status.httpsMcp.connected = false;
+await vm.runInContext('refresh()', context);
+assert.equal(element('sidebarStatus').textContent, '未连接');
+delete status.httpsMcp.connected;
 status.httpsMcp.transportConnected = false;
 await vm.runInContext('refresh()', context);
 assert.equal(element('sidebarStatus').textContent, '未连接');
@@ -413,6 +425,11 @@ element('httpsAutoReconnect').checked = false;
 await listeners.get('httpsAutoReconnect:change')();
 assert.equal(httpsAutoEnabled, false,
   'HTTPS auto-reconnect switch must persist separately from Tunnel');
+
+await new Promise((resolve) => setImmediate(resolve));
+assert.equal(identityCalls, 1, 'Wizard should prepare one stable local Desktop identity');
+assert.equal(element('relayDeployDesktopId').value, 'd_' + 'a'.repeat(32),
+  'A fresh server must not require an already-registered Relay Desktop');
 
 element('relayDeployHost').value = '47.103.79.86';
 element('relayDeployUser').value = 'root';

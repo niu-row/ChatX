@@ -3,9 +3,11 @@
 mod app_state;
 mod call_history;
 mod connection_commands;
+mod connection_health;
 mod connection_intent;
 mod diagnostics_commands;
 mod https_mcp;
+mod https_mcp_authorizations;
 mod https_mcp_wss;
 mod mcp_sources;
 mod monitor;
@@ -39,18 +41,20 @@ use diagnostics_commands::{
     get_mcp_live_status, open_external, open_logs, run_diagnostics,
 };
 use https_mcp::{
-    get_https_mcp_authorizations, get_https_mcp_login_password, get_https_mcp_status,
-    revoke_all_https_mcp_authorizations, revoke_https_mcp_authorization,
-    rotate_https_mcp_login_password, set_https_mcp_authorization_lifetime,
-    set_https_mcp_auto_reconnect,
-    start_https_mcp, stop_https_mcp,
+    get_https_mcp_login_password, get_https_mcp_status,
+    rotate_https_mcp_login_password,
+    set_https_mcp_auto_reconnect, start_https_mcp, stop_https_mcp,
+};
+use https_mcp_authorizations::{
+    get_https_mcp_authorizations, revoke_all_https_mcp_authorizations,
+    revoke_https_mcp_authorization, set_https_mcp_authorization_lifetime,
 };
 use monitor_commands::{
     create_monitor_pairing, get_monitor_info, revoke_monitor_device,
     set_monitor_enabled,
 };
 use network_commands::{
-    get_network_settings, register_relay_desktop, relay_account_home,
+    get_network_settings, prepare_relay_deploy_desktop_id, register_relay_desktop, relay_account_home,
     relay_credentials_for_settings, set_network_settings,
     start_relay_client_for_settings, stop_relay_client,
     test_network_settings,
@@ -999,7 +1003,7 @@ fn main() {
             revoke_all_https_mcp_authorizations, rotate_https_mcp_login_password,
             set_https_mcp_authorization_lifetime, set_https_mcp_auto_reconnect,
             get_network_settings, set_network_settings, test_network_settings,
-            register_relay_desktop, manage_relay_server,
+            prepare_relay_deploy_desktop_id, register_relay_desktop, manage_relay_server,
             get_monitor_info, set_monitor_enabled, create_monitor_pairing,
             revoke_monitor_device,
             get_permission_center, request_all_permissions, open_full_disk_access_settings,

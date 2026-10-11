@@ -6,7 +6,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import net from 'node:net';
-import { spawn } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import { build } from 'esbuild';
 import { createShutdownCoordinator } from './https-mcp-parent-watch.mjs';
 import { authorizationStore } from './https-mcp-authorizations.mjs';
@@ -37,6 +37,7 @@ import { authorizationStore } from './https-mcp-authorizations.mjs';
 
 const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'chatx-https-mcp-'));
 const bundle = path.join(dir, 'bridge.mjs');
+const adminBundle = path.join(dir, 'oauth-admin.mjs');
 const fixture = path.join(dir, 'fake-mcp.mjs');
 const settingsFile = path.join(dir, 'settings.json');
 const storeDir = path.join(dir, 'oauth-authorizations');
@@ -69,6 +70,50 @@ try {
     /invalid_grant/, 'A stale token used after the retry window must be rejected');
   assert.equal(retryStore.activeGrant(grant.id), null, 'A stale-token replay revokes the grant');
 
+  await build({
+    entryPoints: ['scripts/https-mcp-authorizations-admin.mjs'], outfile: adminBundle,
+    platform: 'node', format: 'esm', target: 'node20', bundle: true, logLevel: 'silent',
+  });
+  // Merely opening OAuth Settings must not manufacture a new legacy grant
+  // or start the seven-day migration window on a fresh installation.
+  const freshAdminDir = path.join(dir, 'new-admin-fixture');
+  const fresh = spawnSync(process.execPath, [adminBundle, 'list'], {
+    env: { ...process.env, CHATX_MCP_AUTH_STORE: freshAdminDir,
+      CHATX_MCP_SETTINGS_PATH: settingsFile },
+    encoding: 'utf8',
+  });
+  assert.equal(fresh.status, 0, fresh.stderr);
+  assert.deepEqual(JSON.parse(fresh.stdout).grants, []);
+  assert.equal(fs.existsSync(path.join(freshAdminDir, 'legacy.json')), false);
+
+  // The desktop administrative CLI must use the exact same authorization
+  // format and revocation rules as the running OAuth bridge.
+  const adminDir = path.join(dir, 'admin-fixture');
+  const adminStore = authorizationStore({ directory: adminDir, settingsPath: settingsFile });
+  const cli = (action, grantId) => {
+    const output = spawnSync(process.execPath,
+      [adminBundle, action,
+        ...(grantId ? [grantId] : [])], {
+        env: { ...process.env, CHATX_MCP_AUTH_STORE: adminDir,
+          CHATX_MCP_SETTINGS_PATH: settingsFile },
+        encoding: 'utf8',
+      });
+    assert.equal(output.status, 0, output.stderr);
+    return JSON.parse(output.stdout);
+  };
+  const managed = adminStore.createGrant('client-a', 168, Date.now(),
+    adminStore.revocationGeneration());
+  assert.ok(cli('list').grants.some((row) => row.id === managed.id && !row.revoked));
+  assert.equal(cli('revoke', managed.id).grants.find((row) => row.id === managed.id).revoked, true);
+  const second = adminStore.createGrant('client-b', 168, Date.now(),
+    adminStore.revocationGeneration());
+  assert.equal(cli('revoke-all').grants.find((row) => row.id === second.id).revoked, true);
+  assert.equal(adminStore.activeGrant(second.id), null);
+  const after = adminStore.createGrant('client-c', 168, Date.now(),
+    adminStore.revocationGeneration());
+  assert.ok(adminStore.activeGrant(after.id), 'A grant issued after revocation remains valid');
+  assert.equal(cli('list').grants.find((row) => row.id === after.id).revoked, false);
+
   fs.writeFileSync(fixture, `
 import readline from 'node:readline';
 const rl = readline.createInterface({ input: process.stdin, crlfDelay: Infinity });
@@ -83,6 +128,9 @@ for await (const line of rl) {
     result = { tools: [{ name: 'echo', description: 'Echo fixture',
       inputSchema: { type: 'object', properties: { value: { type: 'string' } } } }] };
   } else if (req.method === 'tools/call') {
+    if (req.params.arguments?.value === '__hold__') {
+      await new Promise((resolve) => setTimeout(resolve, 300));
+    }
     result = { content: [{ type: 'text', text: req.params.arguments.value }] };
   } else {
     result = {};
@@ -103,6 +151,7 @@ for await (const line of rl) {
     env: { ...process.env,
       CHATX_MCP_ISSUER: issuer, CHATX_MCP_PORT: String(port),
       CHATX_MCP_LOGIN_PASSWORD: password, CHATX_MCP_SIGNING_KEY: signingKey,
+      CHATX_MCP_APP_VERSION: '9.8.7',
       CHATX_MCP_INSTANCE_NONCE: instanceNonce,
       CHATX_MCP_LAUNCHER: fixture, CHATX_MCP_ENTRY: fixture,
       CHATX_MCP_NODE: process.execPath, CHATX_MCP_HOME: dir,
@@ -225,11 +274,26 @@ for await (const line of rl) {
     protocolVersion: '2025-06-18', capabilities: {}, clientInfo: { name: 'test', version: '1' }
   });
   assert.equal(init.result.protocolVersion, '2025-06-18');
+  assert.equal(init.result.serverInfo.version, '9.8.7',
+    'MCP protocol version metadata must come from the desktop runtime');
   const tools = await rpc(2, 'tools/list');
   assert.equal(tools.result.tools[0].name, 'echo');
   assert.equal(tools.result.tools[0].securitySchemes?.[0].type, 'oauth2');
   assert.deepEqual(tools.result.tools[0].securitySchemes?.[0].scopes, ['chatx:tools']);
   const called = await rpc(3, 'tools/call', { name: 'echo', arguments: { value: 'https-mcp-ok' } });
+  // Streaming transport supports 64 requests, but Node's JSON-RPC materializes
+  // results. The local Bridge must refuse excess work instead of buffering
+  // 64 * 64 MiB in the same process.
+  const concurrent = await Promise.all(Array.from({ length: 11 }, (_, i) =>
+    request('/mcp', {
+      method: 'POST', headers: authHeaders,
+      body: JSON.stringify({ jsonrpc: '2.0', id: 300 + i,
+        method: 'tools/call', params: { name: 'echo', arguments: { value: '__hold__' } } }),
+    })
+  ));
+  const statuses = concurrent.map((response) => response.status);
+  assert.ok(statuses.includes(429), 'Excess MCP JSON requests must get bounded 429');
+  assert.ok(statuses.includes(200), 'Accepted MCP requests must continue normally');
   assert.equal(called.result.content[0].text, 'https-mcp-ok');
   const forbiddenOrigin = await request('/mcp', { method: 'POST',
     headers: { ...authHeaders, origin: 'https://untrusted.example' }, body: '{}' });

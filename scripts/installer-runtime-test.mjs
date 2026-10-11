@@ -18,6 +18,7 @@ for (const platformName of ['windows', 'macos']) {
     'desktop-commander-launcher.mjs',
     'desktop-host-environment.mjs',
     'https-mcp-bridge.mjs',
+    'https-mcp-authorizations-admin.mjs',
     'https-mcp-parent-watch.mjs',
     'relay-deploy.mjs',
     'relay-deploy-install.sh',

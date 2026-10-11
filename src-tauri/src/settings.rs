@@ -14,11 +14,15 @@ fn settings_path(app: &tauri::AppHandle) -> Result<std::path::PathBuf, String> {
     Ok(state_dir(app)?.join("settings.json"))
 }
 
-/// At most one ChatGPT-facing MCP transport may be selected. Existing
-/// settings with both intents set migrate deterministically to HTTPS MCP.
-pub(super) fn active_mcp_mode(settings: &Settings) -> &'static str {
-    if settings.https_mcp.enabled { "https" }
-    else if settings.connection_intent { "tunnel" }
+/// The actual user intent may be blocked by a durable Stop marker.
+// At most one ChatGPT-facing MCP transport is effective.
+// The same predicate is shared by Desktop and Android Monitor.
+// Both Desktop status and Android Monitor must choose the same effective mode.
+pub(super) fn effective_mcp_mode(
+    settings: &Settings, https_allowed: bool, tunnel_desired: bool,
+) -> &'static str {
+    if settings.https_mcp.enabled && https_allowed { "https" }
+    else if !settings.https_mcp.enabled && tunnel_desired { "tunnel" }
     else { "none" }
 }
 
@@ -252,17 +256,16 @@ pub(super) fn update_settings(
 mod settings_file_tests {
     use super::*;
     #[test]
-    fn mutually_exclusive_mode_prefers_https_when_legacy_flags_overlap() {
+    fn effective_mode_is_shared_and_obeys_stop_markers() {
         let mut settings = Settings::default();
-        assert_eq!(active_mcp_mode(&settings), "none");
-        settings.connection_intent = true;
-        assert_eq!(active_mcp_mode(&settings), "tunnel");
+        assert_eq!(effective_mcp_mode(&settings, false, false), "none");
+        assert_eq!(effective_mcp_mode(&settings, false, true), "tunnel");
         settings.https_mcp.enabled = true;
-        assert_eq!(active_mcp_mode(&settings), "https");
-        settings.connection_intent = false;
-        assert_eq!(active_mcp_mode(&settings), "https");
+        settings.connection_intent = true; // old two-mode settings
+        assert_eq!(effective_mcp_mode(&settings, true, true), "https");
+        assert_eq!(effective_mcp_mode(&settings, false, true), "none");
         settings.https_mcp.enabled = false;
-        assert_eq!(active_mcp_mode(&settings), "none");
+        assert_eq!(effective_mcp_mode(&settings, false, true), "tunnel");
     }
     #[test]
     fn concurrent_transactions_preserve_both_fields() {

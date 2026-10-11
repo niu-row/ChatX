@@ -133,7 +133,9 @@ function render(s) {
   // transport-neutral status, with a fallback for older status snapshots.
   const transportConnected = Boolean(s.httpsMcp?.transportConnected ?? s.httpsMcp?.sshConnected);
   const httpsConnected = httpsEnabled && !s.httpsMcp?.manualStopBlocked &&
-    Boolean(s.httpsMcp?.localReady && transportConnected && s.httpsMcp?.remoteReady);
+    Boolean(s.httpsMcp?.connected ?? (
+      s.httpsMcp?.localReady && transportConnected && s.httpsMcp?.remoteReady
+    ));
   const httpsTransportName = s.httpsMcp?.transport === 'wss' ? 'WSS Relay' : 'SSH 反向隧道';
   const connected = running || httpsConnected;
   const unavailable = s.runtimeState === 'unavailable';

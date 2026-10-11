@@ -41,9 +41,9 @@ impl RelayDeployConfig {
                 && self.user.as_bytes()[0] != b'_' {
             return Err("SSH 用户名不合法".into());
         }
-        if self.desktop_id.len() != 34 || !self.desktop_id.starts_with("d_")
+        if !(18..=80).contains(&self.desktop_id.len()) || !self.desktop_id.starts_with("d_")
             || !self.desktop_id[2..].bytes()
-                .all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase()) {
+                .all(|b| b.is_ascii_hexdigit()) {
             return Err("请先在网络设置注册本机 Desktop，再填写 Desktop ID".into());
         }
         if !self.key_path.is_empty() && !PathBuf::from(&self.key_path).is_absolute() {
@@ -173,6 +173,14 @@ mod tests {
             key_path: String::new(),
         };
         assert!(config.validate().is_ok());
+        for length in [16, 32, 78] {
+            let mut legacy = config.clone();
+            legacy.desktop_id = format!("d_{}", "a".repeat(length));
+            assert!(legacy.validate().is_ok(), "valid existing Desktop ID must be preserved");
+        }
+        let mut uppercase = config.clone();
+        uppercase.desktop_id = format!("d_{}", "A".repeat(32));
+        assert!(uppercase.validate().is_ok());
         for host in ["-oProxyCommand=evil", "hi;id", "a..b"] {
             let mut invalid = config.clone();
             invalid.host = host.into();

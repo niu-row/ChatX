@@ -41,11 +41,10 @@ pub(super) fn get_status(app: tauri::AppHandle, state: State<'_, AppState>) -> R
     let tray_stop_error = state.tray_stop_error.lock()
         .map(|value| value.clone()).unwrap_or_default();
     let https_mcp_status = crate::https_mcp::status_summary(&app, &settings.https_mcp, state.inner());
-    let active_mcp_mode = match crate::settings::active_mcp_mode(&settings) {
-        "https" if https_mcp_status["enabled"].as_bool() == Some(true) => "https",
-        "tunnel" if state.desired_connected.load(Ordering::SeqCst) => "tunnel",
-        _ => "none",
-    };
+    let active_mcp_mode = crate::settings::effective_mcp_mode(
+        &settings, https_mcp_status["enabled"] == true,
+        state.desired_connected.load(Ordering::SeqCst),
+    );
     let (reconnect_available, reconnect_unavailable_reason) =
         reconnect_capability(&app, state.inner(), &settings);
     match runtime_paths(&app) {

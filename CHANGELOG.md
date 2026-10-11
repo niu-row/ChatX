@@ -1,5 +1,16 @@
 # Changelog
 
+## Unreleased — source refactor (not packaged or deployed)
+
+- Centralized HTTPS MCP connection health and freshness across desktop and Android.
+- Split frontend HTTPS settings, OAuth security UI, and server deployment wizard.
+- Moved OAuth grant administration to the same bundled Node store used by the Bridge; Rust acts only as a local CLI adapter.
+- Allowed fresh installs to generate stable Desktop ID before first Relay registration.
+- Removed deployment dependence on a historical Cargo build path, environment-specific UI defaults, and stale MCP version metadata.
+- Aligned Node upload timeout with the WSS pipeline, and bounded concurrent JSON-RPC processing.
+- Updated architecture docs, local tests and runtime resource manifests. **No installer or server deployment in this change.**
+
+
 ## 0.4.14 - 2026-10-12
 
 ### Fixed

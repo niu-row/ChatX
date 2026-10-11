@@ -1,36 +1,28 @@
 # ChatX
 
-ChatX 是一个 Windows / macOS 桌面桥接程序，用来把 ChatGPT 的 Secure MCP Tunnel 连接到本机的 Desktop Commander MCP。
+ChatX 是一个 Windows / macOS 桌面桥接程序，将 ChatGPT 的 MCP 请求安全转发到本机 Desktop Commander。推荐**原生 WSS Relay + HTTPS OAuth**；仍保留 OpenAI Secure MCP Tunnel 和旧 SSH 反向转发作为兼容方式。Android Monitor 使用独立的 Relay 控制通道。
 
-当前架构：
+当前推荐链路：
 
 ```text
-ChatGPT
-   ↓
-Custom MCP Connector
-   ↓
-OpenAI Secure MCP Tunnel
-   ↓
-ChatX Desktop
-   ↓
-tunnel-client
-   ↓ stdio
-Desktop Commander
-   ↓
-本机文件 / 搜索 / 编辑 / 进程 / Shell
+ChatGPT → HTTPS/OAuth → Nginx 443 → Relay Server
+                                   ↓ WSS v2
+ChatX Desktop → 本机 Node OAuth/MCP Bridge → stdio Desktop Commander
+                                   ↓
+                       本机文件 / 搜索 / 编辑 / 进程 / Shell
 ```
 
-ChatX 不自行实现 Filesystem、Git 或 Shell 工具。文件读写、搜索、编辑和命令执行仍由 Desktop Commander 提供；ChatX 负责桌面 UI、运行组件打包、Tunnel 配置与管理、HTTPS MCP 协议桥接、SSH 反向转发、诊断和日志。
+ChatX 不自行实现 Filesystem、Git 或 Shell 工具；权限模型完全沿用 Desktop Commander。模块边界、唯一连接状态来源、OAuth 数据契约和兼容策略见 [架构说明](docs/architecture.md)。
 
 ChatX 通过启动器关闭 Desktop Commander 的聊天内文件预览和配置编辑模板：工具列表不包含 UI 关联元数据，资源与资源模板列表为空，旧 UI 资源地址不可读取。26 个 MCP 工具及其返回结果保持不变。适配在启动时生效，不修改锁定的上游 MCPB 内容。
 
-## 0.3.0 运行组件
+## 运行组件
 
 Windows x64 和 macOS Apple Silicon（M1/M2/M3/M4）构建固定打包：
 
 - OpenAI `tunnel-client`
 - Node.js
-- Desktop Commander 0.2.48 的官方 GitHub Release MCPB
+- Desktop Commander 0.2.52 的官方 GitHub Release MCPB
 - MCPB 内随包提供的当前平台 `ripgrep`
 
 Desktop Commander 通过 stdio 启动，不要求最终用户安装 Node、npm、ripgrep 或 Desktop Commander。
@@ -38,7 +30,7 @@ Desktop Commander 通过 stdio 启动，不要求最终用户安装 Node、npm�
 构建时 `scripts/prepare-desktop-bundle.mjs` 会：
 
 1. 校验 `runtime-lock.json` 中锁定的 Node 与 tunnel-client 版本/SHA-256。
-2. 校验 Desktop Commander 0.2.48 GitHub Release 的 tag、asset 名称、URL、文件大小和 SHA-256。
+2. 校验 Desktop Commander 0.2.52 GitHub Release 的 tag、asset 名称、URL、文件大小和 SHA-256。
 3. 优先使用 `DESKTOP_COMMANDER_MCPB_PATH` 指定的本地 MCPB；未指定时从锁定的上游 GitHub Release URL 下载。
 4. 在解包前校验整个 MCPB 的 SHA-256，再验证包内 `manifest.json`、`package.json` 和 `dist/index.js`。
 5. 使用 MCPB 内已经固定的生产 `node_modules`，不在 ChatX 构建阶段重新解析 Desktop Commander 的 npm 传递依赖。
@@ -55,7 +47,7 @@ ChatX 的“连接”页提供 **HTTPS MCP** 与 **Secure MCP Tunnel** 两种互
 网络结构：
 
 ```text
-ChatGPT --HTTPS/OAuth--> https://newrow.fun/mcp
+ChatGPT --HTTPS/OAuth--> https://relay.example.com/mcp
   --> 公网服务器 Nginx (443) --> Relay Server (127.0.0.1:8787)
   --> 原生 WSS (/v1/ws/mcp) --> ChatX 本机 127.0.0.1:3000
   --> 独立的 stdio Desktop Commander
@@ -63,12 +55,12 @@ ChatGPT --HTTPS/OAuth--> https://newrow.fun/mcp
 
 ### 推荐：原生 WSS Relay（无 SSH 运行时依赖）
 
-**新增一键部署向导**：在「连接 → HTTPS MCP」展开「服务器一键部署」，填写域名、SSH 服务器与 Desktop ID，先预检后点击部署。它会自动上传相同版本源码、编译、备份和验证；部署后不再使用 SSH。服务器初次需要已经配置好 Nginx HTTPS 与 Rust，详见 [服务器部署说明](deploy/oneclick/README.md)。WSS v2 用二进制分块代替 Base64，兼容旧 v1，且不会更改 Desktop Commander 权限模型。
+**服务器部署向导**：在「连接 → HTTPS MCP」展开「服务器一键部署」，填写域名和 SSH 服务器。首次安装可以在向导内生成并填入稳定的本机 Desktop ID，**不要求已经注册 Relay**；预检后才允许部署。部署器上传本版本源码、编译、备份和验证；运行时 WSS 不需要 SSH。首次仍需准备 Nginx HTTPS、Rust 和密钥 SSH。详见 [部署说明](deploy/oneclick/README.md)。WSS v2 二进制分块兼容 v1，Desktop Commander 权限模型保持不变。
 
 新的 HTTPS MCP「传输方式」可选「原生 WSS Relay」。已有 SSH 配置缺少 `transport` 字段时仍按 SSH 加载，**不会因升级自动切断旧链路**。准备好公网网关后，在连接页主动切换 WSS。该模式仍使用原有独立 HTTPS OAuth 主密钥、授权记录和本机 `127.0.0.1:3000` Bridge。
 
 ```text
-ChatGPT -- HTTPS/OAuth --> newrow.fun:443 /mcp
+ChatGPT -- HTTPS/OAuth --> relay.example.com:443 /mcp
        -- Nginx --> relay-server:8787 -- (MCP 请求关联/响应分块)
        -- WSS /v1/ws/mcp --> ChatX Desktop -- localhost:3000 --> Desktop Commander
 ```
@@ -78,7 +70,7 @@ ChatGPT -- HTTPS/OAuth --> newrow.fun:443 /mcp
 1. 使用该仓库新版 `relay-server` 编译并更新现有 Relay 服务，**保留原来的 Relay registry 和环境变量**，勿重置 Android Monitor 注册信息。设置 `CHATX_MCP_DESKTOP_ID=d_...` 为目标桌面已注册的 Desktop ID；不设置时公网 MCP 接口保持不可用（503），不能默认为任意在线 Desktop。
 2. 检查 Relay 仍只监听服务器回环 `CHATX_RELAY_BIND=127.0.0.1:8787`（如自定义则同步更改 Nginx 代理端口）。将域名 HTTPS server 的旧 `deploy/nginx/chatx-https-mcp.conf` **替换**为 `deploy/nginx/chatx-https-mcp-wss.conf`，切勿同时 include 两套 `/mcp` location；执行 `nginx -t` 通过后 reload。公网只需要 HTTPS 443，新增的 `/v1/ws/mcp` 必须支持 WebSocket Upgrade。
 3. 桌面端必须先完成该 HTTPS 域名的 Relay Desktop 注册（注册凭据使用系统密钥保护存储），但运行 WSS MCP **不要求 Android Monitor 处于开启状态**。在 HTTPS MCP 页面选择「原生 WSS Relay」，启动连接即可；不需要 SSH 主机、用户、密钥或远端端口。
-4. 等 WSS 连接建立后，检查公网 `GET /.well-known/oauth-authorization-server` 应返回 200 和正确 issuer，未经授权的 `POST /mcp` 应返回 401 且携带 OAuth challenge。断线会返回 503（离线），超时返回 504；不应继续返回 502 的旧 SSH upstream 错误。ChatGPT 端 `https://newrow.fun/mcp` 和现有 OAuth 授权可保持不变。
+4. 等 WSS 连接建立后，检查公网 `GET /.well-known/oauth-authorization-server` 应返回 200 和正确 issuer，未经授权的 `POST /mcp` 应返回 401 且携带 OAuth challenge。断线会返回 503（离线），超时返回 504；不应继续返回 502 的旧 SSH upstream 错误。ChatGPT 端 `https://relay.example.com/mcp` 和现有 OAuth 授权可保持不变。
 
 安全约束：WSS 握手必须携带**已注册的 Desktop Token**；网关只接受显式 `CHATX_MCP_DESKTOP_ID` 对应的 Desktop，不能跨 Desktop 路由，也不能代理任意 URL、`/healthz` 或 Relay 管理接口。本地 MCP 仍只监听 loopback。WSS v2 请求 64 MiB、响应 128 MiB、并发 64；旧 v1 仍保持 5 MiB/16 MiB。Relay 网关终止 TLS 并能访问透传的 HTTP 请求数据（包含 OAuth 登录/Token 请求），**服务器必须由可信管理员运维**；不要将 Relay 部署到不可信服务商或与不可信租户共享。若已泄露 Desktop Token，应重新注册并撤销旧凭据。
 
@@ -98,9 +90,9 @@ ChatX 桌面端使用 Tauri 官方 single-instance 插件限制 Windows/macOS �
 
 由旧版本发出的无授权 ID 令牌获得一次固定的 7 天迁移期；旧 Refresh Token 首次续期会转换为新的一次性令牌；网络丢包后的 30 秒内可幂等重试，超过窗口或后继令牌继续轮换后再使用旧令牌会被视为重放。迁移期后需重新 OAuth 授权才能继续连接；可通过授权管理中的“旧版迁移授权”提前撤销。升级后如需“不限时间”，先在 ChatX 保存该选项，再于 ChatGPT 重新执行 OAuth。
 
-在 ChatGPT 支持的自定义 MCP/应用配置里使用 **`https://newrow.fun/mcp`**，选择 OAuth。授权页面需输入 ChatX 显示的密码。桥接端提供 OAuth discovery、动态客户端注册、authorization-code + PKCE (S256)、短期 Bearer Token 和 refresh token。登录页面仅允许 ChatGPT/OpenAI 的 HTTPS 回调域名，未经授权的 `/mcp` 请求返回 401。工具仍有读写文件和本机命令执行权限；请将授权密码视为敏感凭据，且只为可信的 ChatGPT 客户端授权。
+在 ChatGPT 支持的自定义 MCP/应用配置里使用 **`https://relay.example.com/mcp`**，选择 OAuth。授权页面需输入 ChatX 显示的密码。桥接端提供 OAuth discovery、动态客户端注册、authorization-code + PKCE (S256)、短期 Bearer Token 和 refresh token。登录页面仅允许 ChatGPT/OpenAI 的 HTTPS 回调域名，未经授权的 `/mcp` 请求返回 401。工具仍有读写文件和本机命令执行权限；请将授权密码视为敏感凭据，且只为可信的 ChatGPT 客户端授权。
 
-HTTPS 连接状态会在后台定期验证公网 OAuth 元数据（HTTP 200）与未经授权的 MCP 访问（HTTP 401），而不只是检查 SSH 进程是否存在。公网 OAuth 授权入口采用每 IP 限流和较高的全局安全上限，避免少量分布式无效请求耗尽低额度并阻断正常授权；在 WSS v2 下 Node.js 与 Nginx 的 MCP 请求上限均为 64 MiB，WSS 响应上限 128 MiB（v1 仍采用旧限制）。“设置 → 连接策略”分别提供 Tunnel 与 HTTPS 的断线自动重连开关。HTTPS 关闭自动重连后仍可手动启动一次 Bridge / SSH；启动 ChatX 时会恢复上次已选择的连接模式。设置页按连接策略、安全与授权、网络与代理、手机与 Relay 及 macOS 系统选项分组；手机配对继续保留在“手机连接”，运行日志归到“诊断”。首页“停止连接”会优先持久化两种传输的独立手动停止标记，断开旧 Tunnel 与 HTTPS MCP，再事务化保存停止意图；即使主设置文件保存失败，下次启动也会由停止标记阻止自动重连，并向用户提示保存故障。再次手动连接成功后才清除对应标记。HTTPS MCP 与 Tunnel 的手动连接启停共用生命周期操作锁，避免停止与启动互相覆盖。停用连接不代表撤销 OAuth 授权。本机健康检查使用每次启动随机生成的实例标识，避免端口被旧进程占用时误报就绪。
+HTTPS 连接状态由 Rust 统一计算，Windows 侧栏与 Android Monitor 共用同一健康判定；探测结果超过 45 秒即视为过期，旧状态不得保持绿色。后台定期验证公网 OAuth 元数据（HTTP 200）与未经授权的 MCP 访问（HTTP 401），而不只是检查传输连接是否存在。公网 OAuth 授权入口采用每 IP 限流和较高的全局安全上限，避免少量分布式无效请求耗尽低额度并阻断正常授权；在 WSS v2 下 Node.js 与 Nginx 的 MCP 请求上限均为 64 MiB，WSS 响应上限 128 MiB（v1 仍采用旧限制）。“设置 → 连接策略”分别提供 Tunnel 与 HTTPS 的断线自动重连开关。HTTPS 关闭自动重连后仍可手动启动一次 Bridge / SSH；启动 ChatX 时会恢复上次已选择的连接模式。设置页按连接策略、安全与授权、网络与代理、手机与 Relay 及 macOS 系统选项分组；手机配对继续保留在“手机连接”，运行日志归到“诊断”。首页“停止连接”会优先持久化两种传输的独立手动停止标记，断开旧 Tunnel 与 HTTPS MCP，再事务化保存停止意图；即使主设置文件保存失败，下次启动也会由停止标记阻止自动重连，并向用户提示保存故障。再次手动连接成功后才清除对应标记。HTTPS MCP 与 Tunnel 的手动连接启停共用生命周期操作锁，避免停止与启动互相覆盖。停用连接不代表撤销 OAuth 授权。本机健康检查使用每次启动随机生成的实例标识，避免端口被旧进程占用时误报就绪。
 
 调用记录及实时状态分别读取两套 Desktop Commander 工作目录，并按时间合并、标注来源；历史记录读取限制为每个传输最近 2 MiB 的 JSONL 数据，统计只涵盖这个窗口。状态汇总优先展示仍存活、快照有效的进行中调用，避免另一条较新的空闲快照覆盖活跃调用；Android Monitor 保留旧 `tunnel`/`mcp` 字段，另提供只读 `connections.activeMode`、`connections.tunnel`、`connections.httpsMcp` 以表示唯一选中的链路，并按来源标注工具调用；新版 Android 的首页和通知使用此数据，旧版桌面缺少新字段时自动兼容。手机仍经 Monitor Direct HTTPS / Relay 获取状态，不直接连接高权限 MCP/OAuth 接口。
 
@@ -181,7 +173,7 @@ Tunnel 健康状态同时参考本地 runtime `ready/health` 和 control-plane p
 
 当前 Desktop / Android Monitor 使用 pairing schema 3 和 wire protocol v1。Desktop 在 Relay Hello 中上报自身能力，Relay 仅向手机发布端到端实际可用的能力；Android 只有看到 `control.refresh_snapshot` / `control.reconnect_tunnel` 后才发送对应控制消息。设备远程撤销使用 `revoke.sync`：Relay 必须等 Desktop 本地撤销确认后才删除 Relay registry 并向手机返回成功。缺少 capability 的旧 Desktop / Relay 会被视为 legacy：立即刷新回退到 HTTPS Snapshot，Tunnel 重连或同步撤销会明确报告不支持，而不是依赖超时猜测。
 
-当前仓库版本组合为 Desktop 0.4.11、Android Monitor 0.3.6；两者版本号独立演进，兼容性以 pairing schema、wire protocol 和 capability 为准。
+当前桌面源码版本为 0.4.14（后续改动尚未打包），Android Monitor 0.3.6；两者版本号独立演进，兼容性以 pairing schema、wire protocol 和 capability 为准。
 
 ## 开发
 
@@ -244,7 +236,7 @@ npm run desktop:verify
 如果已经下载官方 MCPB，或构建环境不应重复访问网络，可以指定本地文件；文件仍必须与 `runtime-lock.json` 中的大小和 SHA-256 完全匹配：
 
 ```powershell
-$env:DESKTOP_COMMANDER_MCPB_PATH = "C:\path\to\desktop-commander-0.2.48.mcpb"
+$env:DESKTOP_COMMANDER_MCPB_PATH = "C:\path\to\desktop-commander-0.2.52.mcpb"
 npm run desktop:verify
 ```
 

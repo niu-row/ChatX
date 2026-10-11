@@ -10,6 +10,8 @@ const port = Number(process.env.CHATX_MCP_PORT || 3000);
 const password = process.env.CHATX_MCP_LOGIN_PASSWORD || '';
 const signingKey = process.env.CHATX_MCP_SIGNING_KEY || '';
 const instanceNonce = process.env.CHATX_MCP_INSTANCE_NONCE || '';
+const appVersion = /^\d+\.\d+\.\d+$/.test(process.env.CHATX_MCP_APP_VERSION || '')
+  ? process.env.CHATX_MCP_APP_VERSION : 'unknown';
 const launcher = process.env.CHATX_MCP_LAUNCHER;
 const home = process.env.CHATX_MCP_HOME;
 const entry = process.env.CHATX_MCP_ENTRY;
@@ -20,6 +22,11 @@ const pending = new Map();
 const codes = new Map();
 const attempts = new Map();
 const rateBuckets = new Map();
+// WSS can multiplex 64 streams, but MCP JSON-RPC still materializes bodies
+// and results in the Node SDK. Bound simultaneous JSON processing so eight
+// 64 MiB requests cannot grow into sixty-four buffered 64 MiB requests.
+const MAX_ACTIVE_MCP_REQUESTS = 8;
+let activeMcpRequests = 0;
 let authStore;
 let client;
 let transport;
@@ -327,6 +334,11 @@ async function handleMcp(req, res) {
   if (req.method === 'GET') return text(res, 405, 'SSE not supported', { Allow: 'POST' });
   if (req.method === 'DELETE') return text(res, 405, 'Stateless MCP has no sessions', { Allow: 'POST' });
   if (req.method !== 'POST') return text(res, 405, 'Method Not Allowed', { Allow: 'POST' });
+  if (activeMcpRequests >= MAX_ACTIVE_MCP_REQUESTS) {
+    return text(res, 429, 'MCP Bridge busy', { 'Retry-After': '1' });
+  }
+  activeMcpRequests++;
+  try {
   const incomingOrigin = req.headers.origin;
   if (incomingOrigin && ![issuer, 'https://chatgpt.com', 'https://chat.openai.com'].includes(incomingOrigin)) {
     return text(res, 403, 'Invalid origin');
@@ -347,7 +359,7 @@ async function handleMcp(req, res) {
         result = { protocolVersion: ['2025-11-25', '2025-06-18', '2025-03-26'].includes(params.protocolVersion)
           ? params.protocolVersion : '2025-06-18',
         capabilities: { tools: { listChanged: false } },
-        serverInfo: { name: 'ChatX HTTPS Desktop Commander', version: '0.4.11' },
+        serverInfo: { name: 'ChatX HTTPS Desktop Commander', version: appVersion },
         instructions: 'Access to local desktop files and command execution. Confirm impactful operations.' };
         break;
       case 'ping': result = {}; break;
@@ -374,11 +386,14 @@ async function handleMcp(req, res) {
       ? 'Desktop Commander unavailable or failed' : String(error.message) } });
     if (code === -32603) console.error('MCP backend request failed:', error.message);
   }
+  } finally {
+    activeMcpRequests--;
+  }
 }
 const server = http.createServer(async (req, res) => {
   try {
     const hostname = (req.headers.host || '').split(':')[0].toLowerCase();
-    if (!['127.0.0.1', 'localhost', 'newrow.fun'].includes(hostname) &&
+    if (!['127.0.0.1', 'localhost'].includes(hostname) &&
         hostname !== new URL(issuer).hostname) return text(res, 403, 'Invalid host');
     const url = new URL(req.url || '/', issuer);
     if (url.pathname === '/healthz' && req.method === 'GET') {
@@ -418,7 +433,9 @@ const server = http.createServer(async (req, res) => {
     else res.end();
   }
 });
-server.requestTimeout = 120_000;
+// The WSS relay allows 605s for a request; keep the local upload deadline
+// aligned with the 600s desktop HTTP client (including slow 64 MiB uploads).
+server.requestTimeout = 600_000;
 server.headersTimeout = 20_000;
 server.listen(port, '127.0.0.1', () => {
   console.log(`ChatX HTTPS MCP local bridge ready: 127.0.0.1:${port}`);

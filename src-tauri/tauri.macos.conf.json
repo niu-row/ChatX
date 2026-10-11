@@ -10,6 +10,7 @@
       "resources/desktop-commander-launcher.mjs": "desktop-commander-launcher.mjs",
       "resources/desktop-host-environment.mjs": "desktop-host-environment.mjs",
       "resources/https-mcp-bridge.mjs": "https-mcp-bridge.mjs",
+      "resources/https-mcp-authorizations-admin.mjs": "https-mcp-authorizations-admin.mjs",
       "resources/https-mcp-parent-watch.mjs": "https-mcp-parent-watch.mjs",
       "resources/relay-deploy.mjs": "relay-deploy.mjs",
       "resources/relay-deploy-install.sh": "relay-deploy-install.sh",

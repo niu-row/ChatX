@@ -10,11 +10,11 @@ ChatX「连接 → HTTPS MCP → 服务器一键部署」支持**先预检、再
 
 ## 首次准备
 
-- Linux + systemd、python3、tar、curl、OpenSSL、Rust stable/Cargo。
+- Linux + systemd、python3、tar、curl、OpenSSL、Rust stable/Cargo。离线或需要私有 Rust 镜像时，可在服务器侧显式设置 `CHATX_RELAY_CARGO_CONFIG=/absolute/path/to/config.toml`；不设置则使用 Cargo 标准配置，不依赖历史构建目录。
 - 自己已有 Nginx HTTPS 443 网站及有效证书。支持宝塔的 Nginx 网站；不会替你购买域名或申请证书。
 - root SSH 密钥登录，或具备免交互 sudo -n 的 SSH 用户。程序不收集 SSH 密码。
 - 首次连接新服务器，请先人工核对主机公钥指纹并建立 known_hosts；程序强制 StrictHostKeyChecking=yes。
-- Desktop ID 会从本机现有 Relay 连接自动读取（没有时需要先有本机 identity）；初次部署新服务器后，在「设置 → 手机及 Relay」填写同一域名并点击「注册此电脑」，安装过程生成的 setup token 会预配至本机。
+- 向导调用 `prepare_relay_deploy_desktop_id` 获取或创建**稳定本机 Desktop ID**，无需预先注册 Relay。初次部署新服务器后，在「设置 → 手机及 Relay」填写同一域名并点击「注册此电脑」，安装生成的 setup token 会预配到本机。
 
 ## 界面操作
 
@@ -45,7 +45,7 @@ relay.env、mcp.conf、site 文件，再运行 nginx -t / nginx reload / systemc
 - v2 二进制帧：1 字节类型、16 字节请求标识、最长 64 KiB 原始数据。双向分块，不再对每块进行 Base64 编解码。
 - v2 单请求上限 64 MiB，响应 128 MiB，并发最多 64。每个流有独立有界队列；溢出只终止对应请求，不阻塞同一 WSS 上的其他工具调用与心跳。无 Content-Length 的超限上传返回 413。
 - 桌面 HTTP 请求总超时 600 秒，Relay 等待头/响应空闲不超过 605 秒，Nginx MCP 代理空闲超时 630 秒；超过时会失败，而不是无限占用连接。
-- Bridge 解析 MCP JSON-RPC 时仍需缓冲和解析完整 JSON；这里的优化针对 WSS 转发层，并非端到端零拷贝。
+- Bridge 解析 MCP JSON-RPC 时仍需缓冲和解析完整 JSON；为限制内存风险，最多同时处理 8 个 Node JSON 请求，超过时返回 429（带 Retry-After）。这不是端到端零拷贝。
 - OAuth 凭据仍留在桌面，Relay 不持有签发密钥；服务器却可接触透传的 HTTP 内容，须由可信管理员维护。重注册 Desktop 会更换 Token 并立即关闭旧 MCP WSS 会话，转发前也会复核凭据版本。
 
 ## 日志、诊断、更新

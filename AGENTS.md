@@ -4,7 +4,7 @@ This file captures repository-specific operating rules for coding agents working
 
 ## Repository context
 
-ChatX is a Tauri desktop bridge between ChatGPT Secure MCP Tunnel and bundled Desktop Commander.
+ChatX is a Tauri desktop bridge to bundled Desktop Commander via native HTTPS/WSS Relay (preferred) or legacy Secure MCP Tunnel. Android Monitor has a separate encrypted Relay/control channel.
 The repository also contains an Android monitor app.
 
 Primary areas:

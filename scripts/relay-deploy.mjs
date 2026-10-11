@@ -85,7 +85,7 @@ try {
   if (!checkHost(host) || !checkHost(domain) ||
       !/^[a-z_][a-z0-9_-]{0,31}$/.test(user) ||
       !Number.isInteger(port) || port < 1 || port > 65535 ||
-      !/^d_[a-f0-9]{32}$/.test(desktopId)) throw new Error('Invalid deploy parameters');
+      !/^d_[a-fA-F0-9]{16,78}$/.test(desktopId)) throw new Error('Invalid deploy parameters');
   if (keyPath && (!path.isAbsolute(keyPath) || !fs.existsSync(keyPath)))
     throw new Error('SSH private key path must be an existing absolute path');
   const installer = path.join(root, 'relay-deploy-install.sh');

@@ -395,7 +395,14 @@ run('Relay source archive', 'tar', ['-czf', serverArchive, '-C', root,
   'deploy/nginx/chatx-https-mcp-wss.conf',
   'deploy/nginx/chatx-relay-base.conf']);
 
-// The HTTPS MCP bridge runs with the bundled Node and must not depend on npm being installed.
+// The HTTPS MCP bridge and its local-only OAuth administration utility use
+// the same authorization store module, bundled without end-user npm.
+await esbuild({
+  entryPoints: [path.join(root, 'scripts', 'https-mcp-authorizations-admin.mjs')],
+  outfile: path.join(resourceDir, 'https-mcp-authorizations-admin.mjs'),
+  bundle: true, platform: 'node', target: 'node20', format: 'esm',
+  logLevel: 'warning',
+});
 await esbuild({
   entryPoints: [path.join(root, 'scripts', 'https-mcp-bridge.mjs')],
   outfile: path.join(resourceDir, 'https-mcp-bridge.mjs'),

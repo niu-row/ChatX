@@ -1,7 +1,8 @@
-// Optional HTTPS MCP mode: local stdio bridge + an SSH reverse forward.
+// Optional HTTPS MCP mode: local stdio bridge + WSS Relay or legacy SSH.
 // It is independent of the legacy OpenAI Secure MCP Tunnel.
 use crate::{
     app_state::AppState, load_settings, push_log, runtime_paths,
+    connection_health::{self, HttpsConnectionHealth},
     connection_intent::{self, Transport},
     secrets::{ensure_https_oauth_master_key, rotate_https_oauth_master_key},
     settings::{update_settings, HttpsMcpSettings}, state_dir,
@@ -10,7 +11,7 @@ use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use std::{
     fs::{self, OpenOptions},
-    io::{self, Write},
+    io,
     path::Path,
     process::{Child, Command, Stdio},
     sync::{atomic::{AtomicBool, Ordering}, Arc, Mutex},
@@ -83,7 +84,7 @@ fn validate(settings: &HttpsMcpSettings) -> Result<(), String> {
     Ok(())
 }
 
-fn validate_authorization_lifetime(hours: Option<u32>) -> Result<(), String> {
+pub(super) fn validate_authorization_lifetime(hours: Option<u32>) -> Result<(), String> {
     if matches!(hours, Some(0 | 87601..)) {
         return Err("OAuth 授权期限必须是 1～87600 小时，或选择不限时间".into());
     }
@@ -149,6 +150,7 @@ fn start_bridge(
         .env("CHATX_MCP_LOGIN_PASSWORD", password)
         .env("CHATX_MCP_SIGNING_KEY", signing)
         .env("CHATX_MCP_INSTANCE_NONCE", instance_nonce)
+        .env("CHATX_MCP_APP_VERSION", crate::APP_VERSION)
         .env("CHATX_MCP_LAUNCHER", &paths.launcher)
         .env("CHATX_MCP_ENTRY", &paths.desktop_commander)
         .env("CHATX_MCP_NODE", &paths.node)
@@ -427,11 +429,18 @@ pub(super) fn local_bridge_alive(state: &AppState) -> bool {
     state.https_mcp.status.lock().is_ok_and(|status| status.local_ready)
 }
 
-pub(super) fn monitor_public_connection(state: &AppState) -> (bool, bool, bool, u64, u32) {
-    state.https_mcp.status.lock().map(|status| (
-        status.local_ready, status.transport_connected, status.remote_ready,
-        status.last_public_probe_at, status.restarts,
-    )).unwrap_or_default()
+pub(super) fn monitor_public_connection(
+    app: &tauri::AppHandle, settings: &HttpsMcpSettings, state: &AppState,
+) -> (HttpsConnectionHealth, u64, u32) {
+    let snapshot = state.https_mcp.status.lock()
+        .map(|value| value.clone()).unwrap_or_default();
+    let allowed = connection_intent::restore_allowed(app, Transport::HttpsMcp)
+        .unwrap_or(false);
+    let health = connection_health::https_connection_health(
+        settings.enabled, allowed, snapshot.local_ready, snapshot.transport_connected,
+        snapshot.remote_ready, snapshot.last_public_probe_at, crate::timestamp_ms(),
+    );
+    (health, snapshot.last_public_probe_at, snapshot.restarts)
 }
 
 fn start_inner(app: &tauri::AppHandle, state: &AppState, settings: HttpsMcpSettings)
@@ -504,20 +513,22 @@ pub(super) fn restore(app: &tauri::AppHandle, state: &AppState) {
 
 pub(super) fn status_summary(app: &tauri::AppHandle, settings: &HttpsMcpSettings, state: &AppState) -> Value {
     let snapshot = state.https_mcp.status.lock().map(|v| v.clone()).unwrap_or_default();
-    let restore_allowed = connection_intent::restore_allowed(app, Transport::HttpsMcp).unwrap_or(false);
+    let (health, _, _) = monitor_public_connection(app, settings, state);
     json!({
-        "enabled": settings.enabled && restore_allowed,
+        "enabled": health.enabled,
+        "connected": health.connected,
+        "state": health.state,
         "autoReconnect": settings.auto_reconnect,
-        "manualStopBlocked": settings.enabled && !restore_allowed,
+        "manualStopBlocked": health.manual_stop_blocked,
         "baseUrl": settings.base_url,
         "endpoint": format!("{}/mcp", settings.base_url.trim_end_matches('/')),
         "sshHost": settings.ssh_host, "sshUser": settings.ssh_user, "sshPort": settings.ssh_port,
         "localPort": settings.local_port, "remotePort": settings.remote_port,
         "authorizationTtlHours": settings.authorization_ttl_hours,
         "transport": settings.transport,
-        "localReady": snapshot.local_ready, "sshConnected": snapshot.ssh_connected,
-        "transportConnected": snapshot.transport_connected,
-        "remoteReady": snapshot.remote_ready,
+        "localReady": health.local_ready, "sshConnected": snapshot.ssh_connected,
+        "transportConnected": health.transport_connected,
+        "remoteReady": health.remote_ready,
         "lastPublicProbeAt": snapshot.last_public_probe_at,
         "remoteLastError": snapshot.remote_last_error,
         "restarts": snapshot.restarts, "lastError": snapshot.last_error,
@@ -625,136 +636,6 @@ pub(super) fn set_https_mcp_auto_reconnect(
     Ok(get_https_mcp_status(app, state))
 }
 
-fn authorizations_directory(app: &tauri::AppHandle) -> Result<std::path::PathBuf, String> {
-    Ok(state_dir(app)?.join("https-oauth-authorizations"))
-}
-
-#[tauri::command]
-pub(super) fn set_https_mcp_authorization_lifetime(
-    app: tauri::AppHandle, ttl_hours: Option<u32>,
-) -> Result<Value, String> {
-    validate_authorization_lifetime(ttl_hours)?;
-    update_settings(&app, |settings| {
-        settings.https_mcp.authorization_ttl_hours = ttl_hours;
-        Ok(())
-    })?;
-    Ok(json!({ "authorizationTtlHours": ttl_hours }))
-}
-
-fn list_authorizations(app: &tauri::AppHandle) -> Result<Value, String> {
-    let base = authorizations_directory(app)?;
-    let revoked = base.join("revoked");
-    let current_generation = match fs::read_to_string(base.join("revoked-all.json")) {
-        Ok(text) => {
-            let marker: Value = serde_json::from_str(&text)
-                .map_err(|e| format!("OAuth 全部撤销记录损坏：{e}"))?;
-            Some(marker["generation"].as_str().ok_or("OAuth 撤销代际缺失")?.to_string())
-        }
-        Err(error) if error.kind() == io::ErrorKind::NotFound => None,
-        Err(error) => return Err(format!("读取 OAuth 撤销记录失败：{error}")),
-    };
-    let mut grants = Vec::<Value>::new();
-    let grant_dir = base.join("grants");
-    match fs::read_dir(&grant_dir) {
-        Ok(entries) => {
-            for entry in entries {
-                let entry = entry.map_err(|e| e.to_string())?;
-                if entry.path().extension().and_then(|v| v.to_str()) != Some("json") { continue; }
-                let text = fs::read_to_string(entry.path()).map_err(|e| e.to_string())?;
-                let row: Value = serde_json::from_str(&text)
-                    .map_err(|e| format!("OAuth 授权记录损坏：{e}"))?;
-                let id = row["id"].as_str().unwrap_or("");
-                if !valid_grant_id(id) { return Err("OAuth 授权记录 ID 无效".into()); }
-                grants.push(json!({
-                    "id": id, "clientTag": row["clientHash"].as_str().unwrap_or(""),
-                    "issuedAt": row["issuedAt"], "expiresAt": row["expiresAt"],
-                    "revoked": revoked.join(id).exists() || match &current_generation {
-                        Some(generation) => row["revocationGeneration"].as_str() != Some(generation),
-                        None => false,
-                    }
-                }));
-            }
-        }
-        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
-        Err(error) => return Err(format!("读取 OAuth 授权目录失败：{error}")),
-    }
-    let legacy_path = base.join("legacy.json");
-    if legacy_path.exists() {
-        let legacy: Value = serde_json::from_str(
-            &fs::read_to_string(legacy_path).map_err(|e| e.to_string())?
-        ).map_err(|e| format!("OAuth 旧授权迁移记录损坏：{e}"))?;
-        grants.push(json!({
-            "id": "legacy", "clientTag": "旧版授权（需重新授权以选择有效期）",
-            "issuedAt": 0, "expiresAt": legacy["expiresAt"],
-            "revoked": current_generation.is_some() || revoked.join("legacy").exists()
-        }));
-    }
-    grants.sort_by(|left, right| {
-        right["issuedAt"].as_i64().cmp(&left["issuedAt"].as_i64())
-    });
-    Ok(json!({ "grants": grants }))
-}
-
-fn valid_grant_id(value: &str) -> bool {
-    value.len() == 64 && value.bytes().all(|b| b.is_ascii_hexdigit() &&
-        !b.is_ascii_uppercase())
-}
-
-#[tauri::command]
-pub(super) fn get_https_mcp_authorizations(
-    app: tauri::AppHandle,
-) -> Result<Value, String> {
-    list_authorizations(&app)
-}
-
-#[tauri::command]
-pub(super) fn revoke_https_mcp_authorization(
-    app: tauri::AppHandle, grant_id: String,
-) -> Result<Value, String> {
-    if grant_id != "legacy" && !valid_grant_id(&grant_id) {
-        return Err("OAuth 授权 ID 无效".into());
-    }
-    let base = authorizations_directory(&app)?;
-    let source = if grant_id == "legacy" { base.join("legacy.json") }
-        else { base.join("grants").join(format!("{grant_id}.json")) };
-    if !source.is_file() { return Err("指定的 OAuth 授权不存在".into()); }
-    let revoked_dir = base.join("revoked");
-    fs::create_dir_all(&revoked_dir).map_err(|e| e.to_string())?;
-    fs::write(revoked_dir.join(&grant_id), b"revoked")
-        .map_err(|e| format!("撤销 OAuth 授权失败：{e}"))?;
-    list_authorizations(&app)
-}
-
-#[tauri::command]
-pub(super) fn revoke_all_https_mcp_authorizations(
-    app: tauri::AppHandle,
-) -> Result<Value, String> {
-    let base_dir = authorizations_directory(&app)?;
-    fs::create_dir_all(&base_dir).map_err(|e| e.to_string())?;
-    // Revoke pending authorization codes as well as existing grants. New
-    // authorizations approved after this timestamp remain possible.
-    let cutoff = json!({
-        "revokedAtMs": crate::timestamp_ms(),
-        "generation": crate::monitor_server::generate_monitor_token()?
-    });
-    let marker = base_dir.join("revoked-all.json");
-    let pending = base_dir.join(format!(
-        "revoked-all.{}.tmp", cutoff["generation"].as_str().unwrap_or("pending")
-    ));
-    let saved = (|| -> Result<(), String> {
-        let mut output = OpenOptions::new().write(true).create_new(true)
-            .open(&pending).map_err(|e| e.to_string())?;
-        output.write_all(cutoff.to_string().as_bytes()).map_err(|e| e.to_string())?;
-        output.sync_all().map_err(|e| e.to_string())?;
-        fs::rename(&pending, &marker).map_err(|e| e.to_string())
-    })();
-    if saved.is_err() { let _ = fs::remove_file(&pending); }
-    saved.map_err(|e| format!("保存 OAuth 全部撤销标记失败：{e}"))?;
-    // Do not enumerate grants: a consent issued after this marker must stay valid.
-    // activeGrant() checks this generation on every access and refresh.
-    list_authorizations(&app)
-}
-
 #[tauri::command]
 pub(super) fn rotate_https_mcp_login_password(
     app: tauri::AppHandle, state: State<'_, AppState>,
@@ -765,7 +646,7 @@ pub(super) fn rotate_https_mcp_login_password(
     // Fail closed: terminate the active remote bridge before changing secrets.
     stop_inner(state.inner());
     // Invalidate grants/codes before installing the new signing key.
-    revoke_all_https_mcp_authorizations(app.clone())?;
+    crate::https_mcp_authorizations::revoke_all_https_mcp_authorizations(app.clone())?;
     let master = rotate_https_oauth_master_key(&app)?;
     let settings = load_settings(&app).https_mcp;
     if settings.enabled && connection_intent::restore_allowed(&app, Transport::HttpsMcp)? {
