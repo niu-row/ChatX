@@ -1,15 +1,16 @@
 use super::{
-    desktop_commander_home, mcp_command, monitor_activity_path, push_log,
+    desktop_commander_home, mcp_command, push_log,
     runtime_paths, secret_path, timestamp_ms, APP_VERSION,
 };
 use crate::{
     app_state::{AppState, RuntimePaths},
-    monitor,
+    connection_intent::{self, Transport},
+    mcp_sources, monitor,
     secrets::{
         clear_runtime_key, key_storage, load_runtime_key, protect_secret,
         runtime_key_saved,
     },
-    settings::{load_settings, save_settings},
+    settings::{load_settings, update_settings},
     tunnel_recovery::{
         reconnect_capability, recovery_status, set_recovery_status,
         update_runtime_snapshot,
@@ -33,10 +34,18 @@ pub(super) fn get_status(app: tauri::AppHandle, state: State<'_, AppState>) -> R
     let settings = load_settings(&app);
     let secret_saved = runtime_key_saved(&app);
     let now_ms = timestamp_ms();
-    let activity = monitor_activity_path(&app).ok()
-        .and_then(|path| monitor::read_activity_snapshot(&path));
-    let mcp_monitor = monitor::evaluate_activity(activity.as_ref(), now_ms);
+    let activities = mcp_sources::activities(&app, state.inner(), now_ms).unwrap_or_default();
+    let mcp_monitor = monitor::evaluate_activity(mcp_sources::primary_activity(&activities), now_ms);
+    let mcp_transports = mcp_sources::monitor_statuses(&activities, now_ms);
     let recovery = recovery_status(state.inner());
+    let tray_stop_error = state.tray_stop_error.lock()
+        .map(|value| value.clone()).unwrap_or_default();
+    let https_mcp_status = crate::https_mcp::status_summary(&app, &settings.https_mcp, state.inner());
+    let active_mcp_mode = match crate::settings::active_mcp_mode(&settings) {
+        "https" if https_mcp_status["enabled"].as_bool() == Some(true) => "https",
+        "tunnel" if state.desired_connected.load(Ordering::SeqCst) => "tunnel",
+        _ => "none",
+    };
     let (reconnect_available, reconnect_unavailable_reason) =
         reconnect_capability(&app, state.inner(), &settings);
     match runtime_paths(&app) {
@@ -66,6 +75,7 @@ pub(super) fn get_status(app: tauri::AppHandle, state: State<'_, AppState>) -> R
                 "tunnelId":settings.tunnel_id,
                 "rememberKey":settings.remember_key,
                 "autoReconnect":settings.auto_reconnect,
+                "activeMcpMode":active_mcp_mode,
                 "desiredConnected":state.desired_connected.load(Ordering::SeqCst),
                 "reconnecting":state.reconnecting.load(Ordering::SeqCst),
                 "reconnectAttempt":state.reconnect_attempt.load(Ordering::SeqCst),
@@ -86,6 +96,9 @@ pub(super) fn get_status(app: tauri::AppHandle, state: State<'_, AppState>) -> R
                 "desktopCommander":desktop_commander,
                 "mcpCommand":mcp_command(&paths, &dc_home),
                 "mcpMonitor":mcp_monitor,
+                "mcpTransports":mcp_transports,
+                "trayStopError":tray_stop_error,
+                "httpsMcp":https_mcp_status,
                 "logs":logs
             }))
         }
@@ -95,6 +108,7 @@ pub(super) fn get_status(app: tauri::AppHandle, state: State<'_, AppState>) -> R
             "tunnelId":settings.tunnel_id,
             "rememberKey":settings.remember_key,
             "autoReconnect":settings.auto_reconnect,
+            "activeMcpMode":active_mcp_mode,
             "desiredConnected":state.desired_connected.load(Ordering::SeqCst),
             "reconnecting":state.reconnecting.load(Ordering::SeqCst),
             "reconnectAttempt":state.reconnect_attempt.load(Ordering::SeqCst),
@@ -111,6 +125,9 @@ pub(super) fn get_status(app: tauri::AppHandle, state: State<'_, AppState>) -> R
             "runtimeHealth":"unavailable",
             "lastError":error,
             "mcpMonitor":mcp_monitor,
+            "mcpTransports":mcp_transports,
+            "trayStopError":tray_stop_error,
+            "httpsMcp":https_mcp_status,
             "logs":state.logs.lock().map(|v| v.clone()).unwrap_or_default()
         }))
     }
@@ -118,9 +135,10 @@ pub(super) fn get_status(app: tauri::AppHandle, state: State<'_, AppState>) -> R
 
 #[tauri::command]
 pub(super) fn set_auto_reconnect(app: tauri::AppHandle, state: State<'_, AppState>, enabled: bool) -> Result<Value, String> {
-    let mut settings = load_settings(&app);
-    settings.auto_reconnect = enabled;
-    save_settings(&app, &settings)?;
+    update_settings(&app, |settings| {
+        settings.auto_reconnect = enabled;
+        Ok(())
+    })?;
     if !enabled {
         state.reconnecting.store(false, Ordering::SeqCst);
         state.reconnect_attempt.store(0, Ordering::SeqCst);
@@ -146,9 +164,28 @@ pub(super) fn cancel_connection_intent(state: &AppState) {
 }
 
 pub(super) fn stop_requested(app: &tauri::AppHandle, state: &AppState) -> Result<(), String> {
-    let mut settings = load_settings(app);
-    settings.connection_intent = false;
-    save_settings(app, &settings)?;
+    let _connection = state.connection_operation.lock()
+        .map_err(|_| "连接操作锁已损坏".to_string())?;
+    let marker = connection_intent::mark_stopped(app, Transport::Tunnel);
+    let settings = load_settings(app);
+    let stopped = stop_tunnel_without_saving(app, state, &settings);
+    let saved = update_settings(app, |settings| {
+        settings.connection_intent = false;
+        Ok(())
+    });
+    if let Err(error) = &saved {
+        push_log(state, format!("Tunnel 已要求停止，但保存停止状态失败：{error}"));
+    }
+    stopped?;
+    saved?;
+    marker
+}
+
+pub(super) fn stop_tunnel_without_saving(
+    app: &tauri::AppHandle,
+    state: &AppState,
+    settings: &crate::settings::Settings,
+) -> Result<(), String> {
     cancel_connection_intent(state);
     let _operation = state.runtime_operation.lock().map_err(|_| "Tunnel 操作锁已损坏。".to_string())?;
     stop_runtime(app, Some(state))?;
@@ -165,6 +202,44 @@ pub(super) fn stop_requested(app: &tauri::AppHandle, state: &AppState) -> Result
     Ok(())
 }
 
+/// Stop both transports after one settings write, so concurrent UI calls cannot
+/// restore the other transport's connection intent from a stale settings copy.
+pub(super) fn stop_all_requested(app: &tauri::AppHandle, state: &AppState) -> Result<(), String> {
+    let _connection = state.connection_operation.lock()
+        .map_err(|_| "连接操作锁已损坏".to_string())?;
+    // Persist an independent stop marker *before* closing processes, so an
+    // interrupted settings write cannot re-enable them on the next launch.
+    let https_marker = connection_intent::mark_stopped(app, Transport::HttpsMcp);
+    let tunnel_marker = connection_intent::mark_stopped(app, Transport::Tunnel);
+    // An I/O error must not prevent disconnecting the remote command interface.
+    crate::https_mcp::stop_on_exit(state);
+    let settings = load_settings(app);
+    let stopped = stop_tunnel_without_saving(app, state, &settings);
+    let saved = update_settings(app, |settings| {
+        settings.connection_intent = false;
+        settings.https_mcp.enabled = false;
+        Ok(())
+    });
+    if let Err(error) = &saved {
+        push_log(state, format!("连接已停止，但保存停止状态失败：{error}"));
+    }
+    stopped?;
+    saved?;
+    https_marker?;
+    tunnel_marker?;
+    if let Ok(mut pending) = state.tray_stop_error.lock() { *pending = None; }
+    push_log(state, "已停止全部 MCP 连接");
+    Ok(())
+}
+
+#[tauri::command]
+pub(super) fn stop_all_connections(
+    app: tauri::AppHandle, state: State<'_, AppState>,
+) -> Result<Value, String> {
+    stop_all_requested(&app, state.inner())?;
+    get_status(app, state)
+}
+
 #[tauri::command]
 pub(super) fn connect_tunnel(
     app: tauri::AppHandle,
@@ -178,6 +253,19 @@ pub(super) fn connect_tunnel(
         return Err("Tunnel ID 应以 tunnel_ 开头。".into());
     }
     let key = load_runtime_key(&app, &runtime_key)?;
+    let _connection = state.connection_operation.lock()
+        .map_err(|_| "连接操作锁已损坏".to_string())?;
+    if state.quitting.load(Ordering::SeqCst) { return Err("ChatX 正在退出，拒绝连接 Tunnel".into()); }
+    // The user chose Tunnel. Stop the HTTPS bridge and its SSH forward
+    // before starting the Tunnel runtime; preserve a durable stop marker so
+    // the HTTPS transport cannot silently resume after an interrupted save.
+    connection_intent::mark_stopped(&app, Transport::HttpsMcp)?;
+    crate::https_mcp::stop_on_exit(state.inner());
+    update_settings(&app, |settings| {
+        settings.https_mcp.enabled = false;
+        settings.connection_intent = false;
+        Ok(())
+    })?;
     let previous_settings = load_settings(&app);
 
     state.desired_connected.store(false, Ordering::SeqCst);
@@ -201,11 +289,14 @@ pub(super) fn connect_tunnel(
     }
 
     state.desired_connected.store(true, Ordering::SeqCst);
-    let mut next_settings = previous_settings.clone();
-    next_settings.tunnel_id = tunnel_id;
-    next_settings.remember_key = remember_key;
-    next_settings.connection_intent = true;
-    if let Err(error) = save_settings(&app, &next_settings) {
+    let next_settings = update_settings(&app, |settings| {
+        settings.tunnel_id = tunnel_id.clone();
+        settings.remember_key = remember_key;
+        settings.connection_intent = true;
+        settings.https_mcp.enabled = false;
+        Ok(())
+    });
+    if let Err(error) = &next_settings {
         cancel_connection_intent(state.inner());
         let runtime_rollback = stop_runtime(
             &app,
@@ -221,6 +312,7 @@ pub(super) fn connect_tunnel(
         };
     }
 
+    let next_settings = next_settings?;
     let secret_result = if remember_key {
         secret_path(&app)
             .and_then(|path| protect_secret(&key, &path))
@@ -228,10 +320,12 @@ pub(super) fn connect_tunnel(
         clear_runtime_key(&app)
     };
     if let Err(error) = secret_result {
-        let settings_restore = save_settings(
-            &app,
-            &previous_settings,
-        );
+        let settings_restore = update_settings(&app, |settings| {
+            settings.tunnel_id.clone_from(&previous_settings.tunnel_id);
+            settings.remember_key = previous_settings.remember_key;
+            settings.connection_intent = previous_settings.connection_intent;
+            Ok(())
+        }).map(|_| ());
         cancel_connection_intent(state.inner());
         let runtime_rollback = stop_runtime(
             &app,
@@ -253,6 +347,20 @@ pub(super) fn connect_tunnel(
         };
     }
 
+    if let Err(error) = connection_intent::clear_stopped(&app, Transport::Tunnel) {
+        cancel_connection_intent(state.inner());
+        let mut details = vec![error];
+        if let Err(stop_error) = stop_runtime(&app, Some(state.inner())) {
+            details.push(format!("停止未完成的 Tunnel 失败：{stop_error}"));
+        }
+        if let Err(settings_error) = update_settings(&app, |settings| {
+            settings.connection_intent = false;
+            Ok(())
+        }) {
+            details.push(format!("恢复停止状态失败：{settings_error}"));
+        }
+        return Err(details.join("；"));
+    }
     if let Ok(mut cache) = state.permission_results.lock() {
         *cache = None;
     }
@@ -271,6 +379,7 @@ pub(super) fn connect_tunnel(
             if observation.active { "" } else { "等待 Tunnel Ready。" },
         );
     }
+    drop(_connection);
     get_status(app, state)
 }
 
@@ -284,9 +393,10 @@ pub(super) fn stop_tunnel(app: tauri::AppHandle, state: State<'_, AppState>) -> 
 pub(super) fn clear_saved_key(app: tauri::AppHandle, state: State<'_, AppState>) -> Result<Value, String> {
     clear_runtime_key(&app)?;
     if let Ok(mut cache) = state.permission_results.lock() { *cache = None; }
-    let mut settings = load_settings(&app);
-    settings.remember_key = false;
-    save_settings(&app, &settings)?;
+    update_settings(&app, |settings| {
+        settings.remember_key = false;
+        Ok(())
+    })?;
     push_log(&state, "已清除保存的 Runtime Key");
     get_status(app, state)
 }

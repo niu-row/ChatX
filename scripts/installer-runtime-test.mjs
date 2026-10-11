@@ -6,6 +6,27 @@ const resourceDir = process.env.CHATX_RUNTIME_RESOURCE_DIR?.trim()
   ? path.resolve(process.env.CHATX_RUNTIME_RESOURCE_DIR.trim())
   : path.resolve('src-tauri', 'resources');
 const executable = (name) => process.platform === 'win32' ? `${name}.exe` : name;
+// Packaging must include all top-level JS dependencies, not merely files in
+// the build-time resources directory. The launcher imports this helper at
+// runtime; omitting it passes source smoke tests but breaks installed apps.
+for (const platformName of ['windows', 'macos']) {
+  const config = JSON.parse(fs.readFileSync(
+    path.resolve('src-tauri', `tauri.${platformName}.conf.json`), 'utf8',
+  ));
+  const resources = config.bundle?.resources ?? {};
+  for (const name of [
+    'desktop-commander-launcher.mjs',
+    'desktop-host-environment.mjs',
+    'https-mcp-bridge.mjs',
+    'https-mcp-parent-watch.mjs',
+    'runtime-manifest.json',
+  ]) {
+    if (resources[`resources/${name}`] !== name) {
+      throw new Error(`${platformName} bundle missing top-level runtime module: ${name}`);
+    }
+  }
+}
+
 const required = [
   executable('node'),
   executable('tunnel-client'),

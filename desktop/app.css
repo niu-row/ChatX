@@ -56,3 +56,93 @@ html,body{height:100%;overflow:hidden}.shell{height:100vh;min-height:0;overflow:
 .network-note{margin:12px 24px 0;line-height:1.55}
 @media(max-width:1000px){.network-form,.network-form.relay-form{grid-template-columns:1fr 1fr}.network-facts{grid-template-columns:1fr}}
 @media(max-width:700px){.network-form,.network-form.relay-form{grid-template-columns:1fr}}
+
+/* HTTPS MCP connection panel */
+.https-mcp-card{margin-bottom:18px;padding:0 24px 22px}
+.https-mcp-card>.section-head{padding:0;margin:0 0 18px}
+.https-mcp-card .muted{line-height:1.55}
+.https-mcp-fields{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:0 14px}
+.https-mcp-card input{width:100%;border:1px solid #cbd5e1;border-radius:9px;padding:10px 12px;font:inherit}
+.https-mcp-card .mono-block{margin:16px 0}
+.https-mcp-authorization-manager{margin-top:20px;padding-top:18px;border-top:1px solid #e2e8f0}
+.https-mcp-authorization-manager h3{margin:0 0 10px}
+.call-source{font-size:12px;opacity:.7;white-space:nowrap}
+.https-mcp-auth-options{display:flex;align-items:flex-end;gap:12px;flex-wrap:wrap}
+.https-mcp-auth-options label{min-width:180px;flex:1}
+.https-mcp-card select{width:100%;border:1px solid #cbd5e1;border-radius:9px;padding:10px;font:inherit}
+.https-mcp-authorization-manager .actions{margin-top:12px}
+@media(max-width:1000px){.https-mcp-fields{grid-template-columns:1fr 1fr}}
+@media(max-width:700px){.https-mcp-fields{grid-template-columns:1fr}}
+
+/* Mutually exclusive MCP transport selector. Switching the view is inert. */
+.connection-mode-picker{padding:0 24px 19px;margin-bottom:18px}
+.connection-mode-picker>.section-head{padding:20px 0 8px}
+.connection-mode-picker>.muted{margin:0 0 14px;line-height:1.55}
+.connection-mode-options{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px}
+.connection-mode-option{display:flex;flex-direction:column;align-items:flex-start;gap:4px;text-align:left;border:1px solid #d9e0ea;background:#f8fafc;color:#334155;padding:14px 16px;min-height:68px}
+.connection-mode-option small{font-size:12px;font-weight:400;color:#64748b}
+.connection-mode-option.active{background:#eef2ff;border-color:#64748b;color:#0f172a}
+.connection-mode-option:focus-visible{outline:3px solid #cbd5e1;outline-offset:2px}
+.connection-mode-panel[hidden]{display:none!important}
+@media(max-width:700px){.connection-mode-options{grid-template-columns:1fr}.connection-mode-picker{padding:0 18px 18px}}
+
+/* Navigation hierarchy: six primary destinations, settings own subnavigation. */
+.page[data-page-panel=diagnostics]>.card+.card{margin-top:16px}
+.settings-layout{display:grid;gap:16px;min-height:0}
+.settings-tabs{position:sticky;top:0;z-index:4;display:flex;align-items:center;gap:7px;flex-wrap:wrap;padding:10px 0 12px;background:#f5f7fb;border-bottom:1px solid #e2e8f0}
+.settings-tab{background:transparent;border:1px solid transparent;color:#475569;font-size:13px;font-weight:600;padding:9px 12px;white-space:nowrap}
+.settings-tab:hover{background:#e9eef6}
+.settings-tab.active{background:#fff;border-color:#d9e0ea;color:#0f172a;box-shadow:0 1px 2px rgba(15,23,42,.06)}
+.settings-tab:focus-visible{outline:3px solid #93c5fd;outline-offset:2px}
+.settings-panel{min-width:0;display:grid;gap:16px;padding-bottom:12px}
+.settings-panel[hidden],.platform-macos-only[hidden]{display:none!important}
+.settings-panel>.card{margin:0!important}
+.settings-description{margin:16px 24px;color:#475569;font-size:13px;line-height:1.65}
+.settings-panel>.settings-description{margin:0 2px}
+.oauth-settings-card,.security-credentials{padding-bottom:23px}
+.oauth-settings-card>.section-head,.security-credentials>.section-head{padding:22px 24px 0}
+.oauth-settings-card>.https-mcp-authorization-manager{margin:0 24px;padding:16px 0 0;border:0}
+.https-mcp-authorization-manager h3{display:none}
+.oauth-settings-card .https-mcp-auth-options{align-items:end}
+.oauth-settings-card .https-mcp-auth-options label{display:grid;gap:7px;font-size:13px;font-weight:600}
+.oauth-settings-card select,.oauth-settings-card input,.security-credentials input{width:100%;min-width:0;padding:10px 12px;border-radius:9px;border:1px solid #cbd5e1;background:#fff;color:#172033;font:inherit}
+.oauth-settings-card select:focus,.oauth-settings-card input:focus,.security-credentials input:focus{outline:3px solid #dbeafe;outline-offset:1px}
+.oauth-settings-card #httpsMcpAuthorizationList{min-height:44px;margin:7px 0 4px}
+.oauth-settings-card .actions{display:flex;gap:10px;flex-wrap:wrap}
+.secret-control{display:flex;align-items:end;gap:12px;margin:12px 24px 18px;flex-wrap:wrap}
+.secret-control label{flex:1 1 250px;display:grid;gap:7px;font-size:13px;font-weight:600}
+.secret-control button{flex:0 0 auto}
+.danger-zone{margin:0 24px;border:1px solid #fbd5d1;border-radius:12px;padding:16px;background:#fffafa}
+.danger-zone strong{display:block;font-size:14px;margin-bottom:7px}
+.danger-zone p{margin-bottom:12px;line-height:1.6}
+.connection-advanced{border:1px solid #e2e8f0;border-radius:10px;margin:2px 0 16px;padding:0 14px;background:#f8fafc}
+.connection-advanced summary{padding:13px 2px;cursor:pointer;font-size:13px;font-weight:600;color:#334155}
+.connection-advanced summary:focus-visible{outline:2px solid #64748b;outline-offset:2px}
+.connection-advanced>.muted{margin-bottom:13px}
+.connection-advanced .https-mcp-fields{grid-template-columns:repeat(3,minmax(0,1fr))}
+.https-mcp-card>.actions{margin:12px 0}
+.call-record-summary{grid-template-columns:minmax(115px,150px) minmax(130px,1fr) minmax(120px,180px) auto auto}
+.call-record .call-source{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+@media(max-width:1080px){.call-record-summary{grid-template-columns:minmax(130px,1fr) minmax(110px,150px) auto}.call-record-summary .call-time{grid-column:1}.call-record-summary code{grid-column:1}.call-record-summary .call-source{grid-column:2;grid-row:1}.call-record-summary .call-status{grid-column:3;grid-row:1}.call-record-summary .call-duration{grid-column:3;grid-row:2}}
+@media(max-width:900px){.settings-tabs{gap:5px}.settings-tab{padding:8px 9px;font-size:12px}.call-record-summary{grid-template-columns:minmax(0,1fr) auto;gap:8px}.call-record-summary .call-time{grid-column:1;grid-row:1}.call-record-summary code{grid-column:1;grid-row:2}.call-record-summary .call-source{grid-column:1;grid-row:3}.call-record-summary .call-status{grid-column:2;grid-row:1}.call-record-summary .call-duration{grid-column:2;grid-row:2}}
+@media(max-width:700px){.settings-tabs{display:grid;grid-template-columns:repeat(2,minmax(0,1fr))}.settings-tab{text-align:center;white-space:normal}.oauth-settings-card .https-mcp-auth-options{display:grid;grid-template-columns:1fr}.oauth-settings-card .https-mcp-auth-options label{min-width:0}.secret-control{display:grid;grid-template-columns:1fr}.connection-advanced .https-mcp-fields{grid-template-columns:1fr}}
+
+/* Hidden inputs and inactive cards must stay hidden despite form-grid rules. */
+[hidden]{display:none!important}
+
+/* Small-window hierarchy: mode choice and main action remain above the fold. */
+.connection-mode-picker{padding:0 18px 14px;margin-bottom:12px}
+.connection-mode-picker>.section-head{padding:13px 0 5px}
+.connection-mode-picker>.section-head h2{font-size:19px}
+.connection-mode-picker>.muted{margin:0 0 9px;line-height:1.35}
+.connection-mode-option{min-height:54px;padding:9px 12px;gap:2px}
+.connection-mode-option small{font-size:11px}
+.connection-mode-options{gap:9px}
+.https-mcp-card{padding:0 20px 19px}
+.https-mcp-card>.section-head{margin:0 0 10px}
+.https-mcp-card>.section-head h2{font-size:20px}
+.connection-primary-actions{margin:10px 0 16px}
+.https-mcp-card>.muted{margin-bottom:10px}
+.https-mcp-card .mono-block{margin:11px 0}
+@media(max-width:1100px){.network-facts{grid-template-columns:repeat(2,minmax(0,1fr))}}
+@media(max-width:700px){.network-facts{grid-template-columns:1fr}}

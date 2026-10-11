@@ -2,10 +2,24 @@ use super::{relay, state_dir, system_proxy_url};
 use crate::secrets::runtime_key_saved;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use std::fs;
+use std::{
+    fs::{self, OpenOptions}, io::Write, path::Path,
+    sync::{Mutex, OnceLock, atomic::{AtomicU64, Ordering}},
+};
+
+static SETTINGS_WRITE_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+static TEMP_SEQUENCE: AtomicU64 = AtomicU64::new(1);
 
 fn settings_path(app: &tauri::AppHandle) -> Result<std::path::PathBuf, String> {
     Ok(state_dir(app)?.join("settings.json"))
+}
+
+/// At most one ChatGPT-facing MCP transport may be selected. Existing
+/// settings with both intents set migrate deterministically to HTTPS MCP.
+pub(super) fn active_mcp_mode(settings: &Settings) -> &'static str {
+    if settings.https_mcp.enabled { "https" }
+    else if settings.connection_intent { "tunnel" }
+    else { "none" }
 }
 
 fn default_auto_reconnect() -> bool {
@@ -41,6 +55,36 @@ impl Default for ProxySettings {
     }
 }
 
+fn default_ssh_port() -> u16 { 22 }
+fn default_local_mcp_port() -> u16 { 3000 }
+fn default_reverse_mcp_port() -> u16 { 18080 }
+fn default_https_auth_ttl_hours() -> Option<u32> { Some(7 * 24) }
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub(super) struct HttpsMcpSettings {
+    #[serde(default)] pub(super) enabled: bool,
+    #[serde(default = "default_auto_reconnect")] pub(super) auto_reconnect: bool,
+    #[serde(default)] pub(super) base_url: String,
+    #[serde(default)] pub(super) ssh_host: String,
+    #[serde(default)] pub(super) ssh_user: String,
+    #[serde(default = "default_ssh_port")] pub(super) ssh_port: u16,
+    #[serde(default = "default_local_mcp_port")] pub(super) local_port: u16,
+    #[serde(default = "default_reverse_mcp_port")] pub(super) remote_port: u16,
+    // None = explicitly unlimited; a missing setting migrates to seven days.
+    #[serde(default = "default_https_auth_ttl_hours")]
+    pub(super) authorization_ttl_hours: Option<u32>,
+}
+
+impl Default for HttpsMcpSettings {
+    fn default() -> Self {
+        Self { enabled: false, auto_reconnect: true, base_url: String::new(), ssh_host: String::new(),
+            ssh_user: String::new(), ssh_port: default_ssh_port(),
+            local_port: default_local_mcp_port(), remote_port: default_reverse_mcp_port(),
+            authorization_ttl_hours: default_https_auth_ttl_hours() }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub(super) struct Settings {
@@ -58,6 +102,8 @@ pub(super) struct Settings {
     pub(super) proxy: ProxySettings,
     #[serde(default)]
     pub(super) relay: relay::RelaySettings,
+    #[serde(default)]
+    pub(super) https_mcp: HttpsMcpSettings,
 }
 
 impl Default for Settings {
@@ -71,38 +117,33 @@ impl Default for Settings {
             monitor_port: default_monitor_port(),
             proxy: ProxySettings::default(),
             relay: relay::RelaySettings::default(),
+            https_mcp: HttpsMcpSettings::default(),
         }
     }
 }
 
 fn normalize_settings(
-    app: &tauri::AppHandle,
+    _app: &tauri::AppHandle,
     mut settings: Settings,
 ) -> Settings {
-    let mut changed = false;
     if !matches!(
         settings.proxy.mode.as_str(),
         "direct" | "system" | "manual"
     ) {
         settings.proxy = ProxySettings::default();
-        changed = true;
     } else if settings.proxy.mode == "system"
         && settings.proxy.applied_url.trim().is_empty()
     {
         if let Ok(Some(url)) = system_proxy_url() {
             settings.proxy.applied_url = url;
-            changed = true;
         }
     }
     if settings.relay.enabled
         && settings.relay.base_url.trim().is_empty()
     {
         settings.relay.enabled = false;
-        changed = true;
     }
-    if changed {
-        let _ = save_settings(app, &settings);
-    }
+    // Reading settings must not write to disk: mutations are serialized separately.
     settings
 }
 
@@ -161,8 +202,9 @@ pub(super) fn load_settings_checked(
         monitor_port: default_monitor_port(),
         proxy: ProxySettings::default(),
         relay: relay::RelaySettings::default(),
+        https_mcp: HttpsMcpSettings::default(),
     };
-    let _ = save_settings(app, &migrated);
+    // Persisted on the next update_settings() transaction; do not write during a read.
     Ok(migrated)
 }
 
@@ -170,15 +212,103 @@ pub(super) fn load_settings(app: &tauri::AppHandle) -> Settings {
     load_settings_checked(app).unwrap_or_default()
 }
 
-pub(super) fn save_settings(
-    app: &tauri::AppHandle,
-    settings: &Settings,
-) -> Result<(), String> {
-    let path = settings_path(app)?;
-    let temp = path.with_extension("json.tmp");
+fn write_settings_file(path: &Path, settings: &Settings) -> Result<(), String> {
     let text = serde_json::to_string_pretty(settings).map_err(|e| e.to_string())?;
-    fs::write(&temp, format!("{text}\n"))
-        .map_err(|e| format!("保存设置失败：{e}"))?;
-    fs::rename(&temp, &path)
-        .map_err(|e| format!("更新设置失败：{e}"))
+    let parent = path.parent().ok_or("设置文件路径无效")?;
+    fs::create_dir_all(parent).map_err(|e| format!("创建设置目录失败：{e}"))?;
+    let file_name = path.file_name().and_then(|v| v.to_str()).unwrap_or("settings.json");
+    let temp_name = format!(
+        "{file_name}.tmp.{}.{}", std::process::id(), TEMP_SEQUENCE.fetch_add(1, Ordering::Relaxed)
+    );
+    let temp = parent.join(temp_name);
+    let result = (|| -> Result<(), String> {
+        let mut output = OpenOptions::new().write(true).create_new(true)
+            .open(&temp).map_err(|e| format!("创建设置临时文件失败：{e}"))?;
+        output.write_all(format!("{text}\n").as_bytes())
+            .map_err(|e| format!("写入设置失败：{e}"))?;
+        output.sync_all().map_err(|e| format!("同步设置文件失败：{e}"))?;
+        fs::rename(&temp, path).map_err(|e| format!("更新设置失败：{e}"))
+    })();
+    if result.is_err() { let _ = fs::remove_file(&temp); }
+    result
+}
+
+pub(super) fn update_settings(
+    app: &tauri::AppHandle,
+    update: impl FnOnce(&mut Settings) -> Result<(), String>,
+) -> Result<Settings, String> {
+    let _guard = SETTINGS_WRITE_LOCK.get_or_init(|| Mutex::new(())).lock()
+        .map_err(|_| "设置操作锁已损坏".to_string())?;
+    let mut settings = load_settings_checked(app)?;
+    update(&mut settings)?;
+    write_settings_file(&settings_path(app)?, &settings)?;
+    Ok(settings)
+}
+
+#[cfg(test)]
+mod settings_file_tests {
+    use super::*;
+    #[test]
+    fn mutually_exclusive_mode_prefers_https_when_legacy_flags_overlap() {
+        let mut settings = Settings::default();
+        assert_eq!(active_mcp_mode(&settings), "none");
+        settings.connection_intent = true;
+        assert_eq!(active_mcp_mode(&settings), "tunnel");
+        settings.https_mcp.enabled = true;
+        assert_eq!(active_mcp_mode(&settings), "https");
+        settings.connection_intent = false;
+        assert_eq!(active_mcp_mode(&settings), "https");
+        settings.https_mcp.enabled = false;
+        assert_eq!(active_mcp_mode(&settings), "none");
+    }
+    #[test]
+    fn concurrent_transactions_preserve_both_fields() {
+        let dir = std::env::temp_dir().join(format!(
+            "chatx-settings-concurrency-{}-{}",
+            std::process::id(), TEMP_SEQUENCE.fetch_add(1, Ordering::Relaxed)
+        ));
+        let path = dir.join("settings.json");
+        write_settings_file(&path, &Settings::default()).unwrap();
+        let mut handles = Vec::new();
+        for index in 0..20 {
+            let path = path.clone();
+            handles.push(std::thread::spawn(move || {
+                let _guard = SETTINGS_WRITE_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap();
+                let mut settings: Settings =
+                    serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+                if index % 2 == 0 {
+                    settings.monitor_port += 1;
+                } else {
+                    settings.https_mcp.remote_port += 1;
+                }
+                write_settings_file(&path, &settings).unwrap();
+            }));
+        }
+        for handle in handles { handle.join().unwrap(); }
+        let settings: Settings = serde_json::from_str(
+            &fs::read_to_string(&path).unwrap()
+        ).unwrap();
+        assert_eq!(settings.monitor_port, default_monitor_port() + 10);
+        assert_eq!(settings.https_mcp.remote_port, default_reverse_mcp_port() + 10);
+        assert_eq!(fs::read_dir(&dir).unwrap().count(), 1);
+        fs::remove_dir_all(dir).unwrap();
+    }
+    #[test]
+    fn atomic_settings_file_roundtrip_and_unique_temps() {
+        let dir = std::env::temp_dir().join(format!(
+            "chatx-settings-{}-{}", std::process::id(), TEMP_SEQUENCE.fetch_add(1, Ordering::Relaxed)
+        ));
+        let path = dir.join("settings.json");
+        let mut value = Settings::default();
+        value.https_mcp.authorization_ttl_hours = None;
+        write_settings_file(&path, &value).unwrap();
+        let first: Settings = serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(first.https_mcp.authorization_ttl_hours, None);
+        value.monitor_port = 18654;
+        write_settings_file(&path, &value).unwrap();
+        let second: Settings = serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(second.monitor_port, 18654);
+        assert_eq!(fs::read_dir(&dir).unwrap().count(), 1);
+        fs::remove_dir_all(dir).unwrap();
+    }
 }

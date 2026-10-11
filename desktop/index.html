@@ -17,11 +17,9 @@
         <button class="nav active" data-page="overview">概览</button>
         <button class="nav" data-page="connection">连接</button>
         <button class="nav" data-page="diagnostics">诊断</button>
-        <button class="nav" data-page="permissions">权限中心</button>
         <button class="nav" data-page="calls">调用记录</button>
         <button class="nav" data-page="monitor">手机连接</button>
         <button class="nav" data-page="settings">设置</button>
-        <button class="nav" data-page="logs">运行日志</button>
       </nav>
       <div class="sidebar-status">
         <span id="sidebarDot" class="dot warn"></span>
@@ -51,9 +49,9 @@
         </div>
 
         <div class="facts">
-          <article class="card fact"><span>Secure MCP Tunnel</span><strong id="tunnelFact">—</strong><small id="tunnelVersion">—</small></article>
+          <article class="card fact"><span id="transportFactLabel">Secure MCP Tunnel</span><strong id="tunnelFact">—</strong><small id="tunnelVersion">—</small></article>
           <article class="card fact"><span>Desktop Commander</span><strong id="dcFact">—</strong><small id="dcVersion">—</small></article>
-          <article class="card fact"><span>Runtime Key</span><strong id="keyFact">—</strong><small id="keyStorageHint">安全存储 / 本次输入</small></article>
+          <article class="card fact"><span id="keyFactLabel">Runtime Key</span><strong id="keyFact">—</strong><small id="keyStorageHint">安全存储 / 本次输入</small></article>
         </div>
 
         <div class="card mcp-live-card">
@@ -61,6 +59,7 @@
             <div><span class="eyebrow">LIVE MCP</span><h3>当前执行</h3></div>
             <span id="mcpLiveStatus" class="setting-status off">IDLE</span>
           </div>
+          <p id="mcpTransportStatuses" class="muted">Secure Tunnel：未记录 · HTTPS MCP：未记录</p>
           <div id="mcpLiveCalls" class="mcp-live-calls"><p class="muted">当前没有正在执行的 MCP 指令。</p></div>
         </div>
 
@@ -68,7 +67,7 @@
           <h3>当前链路</h3>
           <div class="flow">
             <div><b>ChatGPT</b><span>Connector</span></div><i>→</i>
-            <div><b>Secure MCP Tunnel</b><span>OpenAI</span></div><i>→</i>
+            <div><b id="overviewTransportName">Secure MCP Tunnel</b><span id="overviewTransportDescription">OpenAI</span></div><i>→</i>
             <div><b>Desktop Commander</b><span>stdio MCP</span></div><i>→</i>
             <div><b>本机</b><span>Files / Shell / Process</span></div>
           </div>
@@ -77,10 +76,48 @@
       </section>
 
       <section class="page" data-page-panel="connection">
+        <div class="card connection-mode-picker">
+          <div class="section-head"><div><span class="eyebrow">唯一活动链路</span><h2>选择连接方式</h2></div><span id="activeConnectionMode" class="setting-status off">未连接</span></div>
+          <p class="muted">切换视图不会断线；点击“启动”后会自动停止另一条 MCP 链路。</p>
+          <div class="connection-mode-options" role="group" aria-label="MCP 连接方式">
+            <button type="button" data-connection-choice="https" class="connection-mode-option" aria-pressed="true">HTTPS MCP <small>自有域名 · OAuth</small></button>
+            <button type="button" data-connection-choice="tunnel" class="connection-mode-option" aria-pressed="false">Secure Tunnel <small>OpenAI Tunnel</small></button>
+          </div>
+        </div>
+        <div id="httpsConnectionPanel" class="connection-mode-panel">
+        <div class="card form-card https-mcp-card">
+          <div class="section-head"><div><span class="eyebrow">HTTPS MCP · SSH REVERSE TUNNEL</span><h2>通过自有域名连接 ChatGPT</h2></div><span id="httpsMcpStatus" class="setting-status off">未启动</span></div>
+          <p class="muted">通过 SSH 转发本机 MCP，由 Nginx 提供 HTTPS 与 OAuth。启动时会先关闭 Tunnel。</p>
+          <div class="actions connection-primary-actions">
+            <button id="startHttpsMcp" class="primary">启动 HTTPS MCP</button>
+            <button id="stopHttpsMcp" class="secondary">停止 HTTPS MCP</button>
+          </div>
+          <div class="https-mcp-fields">
+            <label>HTTPS 站点地址<input id="httpsMcpUrl" type="url" autocomplete="off" placeholder="https://newrow.fun"></label>
+            <label>SSH 服务器<input id="httpsMcpHost" autocomplete="off" placeholder="服务器地址"></label>
+            <label>SSH 用户<input id="httpsMcpUser" autocomplete="off" placeholder="受限 SSH 用户"></label>
+          </div>
+          <details class="connection-advanced">
+            <summary>高级设置 · SSH 与转发端口</summary>
+            <p class="muted">仅在端口不同于默认配置时修改。</p>
+            <div class="https-mcp-fields">
+              <label>SSH 端口<input id="httpsMcpSshPort" type="number" value="22" min="1" max="65535"></label>
+              <label>本机 MCP 端口<input id="httpsMcpLocalPort" type="number" value="3000" min="1024" max="65535"></label>
+              <label>远端回环端口<input id="httpsMcpRemotePort" type="number" value="18080" min="1024" max="65535"></label>
+            </div>
+          </details>
+          <p id="httpsMcpEndpoint" class="mono-block">https://newrow.fun/mcp</p>
+          <p id="httpsMcpHint" class="muted">公网服务器须提供 HTTPS /mcp 与 OAuth 路径。授权密码和授权管理请前往“设置 → 安全与授权”。</p>
+          <div class="actions"><button id="openHttpsSecurity" class="ghost" type="button">管理 OAuth 授权 →</button></div>
+
+        </div>
+        </div>
+        <div id="tunnelConnectionPanel" class="connection-mode-panel" hidden>
         <div class="grid two">
           <div class="card form-card">
             <span class="eyebrow">OPENAI SECURE MCP TUNNEL</span>
             <h2>连接 ChatGPT</h2>
+            <p class="muted">启动本模式会先停止 HTTPS MCP 的本机 Bridge 与 SSH 反向转发。</p>
             <label>Tunnel ID<input id="tunnelId" autocomplete="off" placeholder="tunnel_..."></label>
             <label>Runtime API Key<input id="runtimeKey" type="password" autocomplete="off" placeholder="已保存时可留空"></label>
             <label class="check"><input id="rememberKey" type="checkbox" checked><span id="rememberKeyText">安全保存 Runtime Key</span></label>
@@ -105,12 +142,18 @@
             </div>
           </div>
         </div>
+        </div>
       </section>
 
       <section class="page" data-page-panel="diagnostics">
         <div class="card">
           <div class="section-head"><div><span class="eyebrow">DIAGNOSTICS</span><h2>运行环境检查</h2></div><button id="runDiagnostics" class="primary">开始诊断</button></div>
           <div id="diagnostics" class="diagnostics"><p class="muted">点击“开始诊断”检查 Tunnel、Node、Desktop Commander 和本地 runtime。</p></div>
+        </div>
+<div class="card">
+          <div class="section-head"><div><span class="eyebrow">RUNTIME LOG</span><h2>ChatX 运行日志</h2></div><div class="actions"><button id="openLogs" class="ghost">打开数据目录</button><button id="copyLogs" class="ghost">复制</button></div></div>
+          <pre id="logs">尚无日志。</pre>
+          <p class="muted">这里只记录 ChatX/Tunnel 生命周期。MCP 工具执行由 Desktop Commander 直接处理。</p>
         </div>
       </section>
 
@@ -137,53 +180,142 @@
         </div>
       </section>
 
-      <section class="page" data-page-panel="monitor">
-        <div class="card settings-card monitor-card">
+      <section class="page" data-page-panel="settings">
+        <div class="settings-layout">
+          <div class="settings-tabs" role="tablist" aria-label="设置分类">
+            <button class="settings-tab active" data-settings-tab="connection" role="tab" aria-selected="true" type="button">连接策略</button>
+            <button class="settings-tab" data-settings-tab="security" role="tab" aria-selected="false" type="button">安全与授权</button>
+            <button class="settings-tab" data-settings-tab="network" role="tab" aria-selected="false" type="button">网络与代理</button>
+            <button class="settings-tab" data-settings-tab="relay" role="tab" aria-selected="false" type="button">手机与 Relay</button>
+            <button class="settings-tab platform-macos-only" data-settings-tab="system" role="tab" aria-selected="false" type="button" hidden>系统</button>
+          </div>
+          <div class="settings-panel" data-settings-panel="connection" role="tabpanel">
+            <div class="card settings-card">
           <div class="section-head">
-            <div><span class="eyebrow">MOBILE CONNECTION</span><h2>手机连接</h2></div>
-            <span id="monitorStatus" class="setting-status">正在读取…</span>
+            <div><span class="eyebrow">CONNECTIVITY</span><h2>Tunnel 连接</h2></div>
+            <span id="reconnectStatus" class="setting-status">正在读取…</span>
           </div>
           <div class="setting-row">
             <div class="setting-copy">
-              <strong>Direct HTTPS Monitor</strong>
-              <p>手机通过 LAN 或 IPv6 Direct 的短连接 HTTPS 读取状态；不可直连时自动切换到服务器 Relay。</p>
-              <small>所有 Snapshot 均使用设备独立密钥进行 AES-256-GCM 端到端加密，Direct 与 Relay 使用同一协议。</small>
+              <strong>断线自动重连</strong>
+              <p>连接意外掉线后，ChatX 会在后台检测并自动重新启动 Secure MCP Tunnel；窗口隐藏到托盘后也会继续工作。</p>
+              <small>连续失败时使用 2 / 5 / 10 / 20 / 30 秒退避。手动“停止连接”会立即取消后续重连。</small>
             </div>
-            <label class="switch" title="手机监控">
-              <input id="monitorEnabled" type="checkbox" aria-label="手机监控">
+            <label class="switch" title="断线自动重连">
+              <input id="autoReconnect" type="checkbox" aria-label="断线自动重连">
               <span class="switch-ui"></span>
             </label>
           </div>
-          <div class="monitor-controls">
-            <label>监听端口<input id="monitorPort" type="number" min="1024" max="65535" value="18432"></label>
-            <button id="saveMonitor" class="secondary">应用设置</button>
-          </div>
-          <div class="monitor-facts">
-            <article><span>监听地址</span><code id="monitorBind">—</code></article>
-            <article><span>TLS 指纹 SHA-256</span><code id="monitorFingerprint">—</code></article>
-            <article><span>协议 / 加密</span><strong id="monitorProtocol">HTTPS · E2EE</strong></article>
-          </div>
-          <div class="monitor-actions">
-            <button id="createMonitorPairing" class="primary">添加手机</button>
-          </div>
-          <div class="monitor-devices-wrap">
-            <div class="section-head compact">
-              <div><strong>已配对设备</strong><small>每台设备拥有独立 Direct / Relay 凭据与 E2EE Key，可单独删除。</small></div>
+        </div>
+            <div class="card settings-card">
+              <div class="section-head"><div><span class="eyebrow">HTTPS MCP</span><h2>HTTPS 连接</h2></div><span id="httpsReconnectStatus" class="setting-status">正在读取…</span></div>
+              <div class="setting-row">
+                <div class="setting-copy">
+                  <strong>断线自动重连</strong>
+                  <p>HTTPS Bridge 或 SSH 转发断开后自动恢复；关闭后只在手动启动时尝试连接。应用重启仍会恢复已选模式。</p>
+                  <small>此选项独立于 Tunnel 的自动重连，两条 MCP 链路始终互斥。</small>
+                </div>
+                <label class="switch" title="HTTPS 断线自动重连"><input id="httpsAutoReconnect" type="checkbox" aria-label="HTTPS 断线自动重连"><span class="switch-ui"></span></label>
+              </div>
             </div>
-            <div id="monitorDevices" class="monitor-devices"><p class="muted">暂无已配对设备。</p></div>
           </div>
-          <div id="monitorPairing" class="monitor-pairing" hidden>
-            <div class="section-head compact">
-              <div><strong>添加手机</strong><small>扫码后自动选择 LAN / IPv6 Direct / 服务器 Relay 路径。</small></div>
-              <button id="copyMonitorPairing" class="ghost">复制</button>
+          <div class="settings-panel" data-settings-panel="security" role="tabpanel" hidden>
+            <div class="card settings-card oauth-settings-card">
+              <div class="section-head"><div><span class="eyebrow">OAUTH ACCESS</span><h2>授权管理</h2></div></div>
+              <div class="https-mcp-authorization-manager">
+            <h3>OAuth 授权管理</h3>
+            <p class="muted">以下有效期仅应用于新授权。已存在的授权不会因修改默认期限而自动延长。</p>
+            <div class="https-mcp-auth-options">
+              <label>新授权有效期
+                <select id="httpsMcpAuthorizationDuration">
+                  <option value="1">1 小时</option>
+                  <option value="24">1 天</option>
+                  <option value="168" selected>7 天（默认）</option>
+                  <option value="720">30 天</option>
+                  <option value="custom">自定义</option>
+                  <option value="unlimited">不限时间</option>
+                </select>
+              </label>
+              <label id="httpsMcpCustomHoursWrap" hidden>自定义小时数（1～87600）
+                <input id="httpsMcpCustomHours" type="number" min="1" max="87600" value="168">
+              </label>
+              <button id="saveHttpsMcpAuthorizationDuration" class="secondary">保存授权期限</button>
             </div>
-            <div id="monitorPairingQr" class="monitor-pairing-qr"></div>
-            <pre id="monitorPairingPayload"></pre>
-            <p class="muted">二维码中的一次性配对码 5 分钟后过期，并且成功使用一次后立即失效。</p>
+            <p id="httpsMcpUnlimitedWarning" class="muted" hidden>注意：「不限时间」意味着授权不会自动到期，ChatGPT 可持续读取、修改文件和执行命令，直到主动撤销。访问令牌仍为短期令牌。</p>
+            <p class="muted">停止 HTTPS MCP 只是暂时关闭入口，不会撤销令牌；如需取消远程访问权限，请撤销授权。</p>
+            <p class="muted">已授权应用（撤销后已有 Access Token 和 Refresh Token 立即失效）：</p>
+            <select id="httpsMcpAuthorizationList" aria-label="已授权应用"></select>
+            <div class="actions">
+              <button id="revokeHttpsMcpAuthorization" class="ghost danger">撤销所选授权</button>
+              <button id="revokeAllHttpsMcpAuthorizations" class="ghost danger">撤销全部授权</button>
+            </div>
+            <p id="httpsMcpAuthorizationSummary" class="muted">暂无授权记录。升级前的旧授权会有 7 天迁移期。</p>
+          </div>
+            </div>
+            <div class="card settings-card security-credentials">
+          <div class="section-head"><div><span class="eyebrow">LOCAL OAUTH</span><h2>授权密码</h2></div></div>
+          <p class="settings-description">此密码仅用于 ChatGPT 在 OAuth 页面授权。它与手机配对凭据相互独立，不会保存在普通设置中。</p>
+          <div class="secret-control">
+            <label>OAuth 授权密码（默认隐藏）<input id="httpsMcpPassword" type="password" readonly autocomplete="off" placeholder="点击查看密码"></label>
+            <button id="revealHttpsPassword" class="secondary" type="button">查看 OAuth 授权密码</button>
+          </div>
+          <div class="danger-zone">
+            <strong>危险操作</strong><p class="muted">重新生成密码将撤销全部现有 OAuth 授权。若 HTTPS 正在使用，还将重新启动该连接。</p>
+            <button id="rotateHttpsPassword" class="ghost danger" type="button">重新生成 OAuth 授权密码</button>
           </div>
         </div>
-
-        <div class="card settings-card relay-card">
+            <div class="card permission-card platform-macos-only">
+          <div class="section-head">
+            <div><span class="eyebrow">PRIVACY & ACCESS</span><h2>权限中心</h2></div>
+            <button id="authorizeAllPermissions" class="primary">一次触发全部授权</button>
+          </div>
+          <p class="permission-intro">集中触发 ChatX / Desktop Commander 常用的 macOS 文件夹与钥匙串权限。macOS 仍可能按安全类别依次显示系统确认，但授权会集中在这里完成，而不是等到实际调用时再临时弹出。</p>
+          <div id="permissionList" class="permission-list"><p class="muted">正在读取权限信息…</p></div>
+          <div class="permission-manual">
+            <div>
+              <strong>完全磁盘访问</strong>
+              <p id="fullDiskAccessHint">macOS 不允许应用静默授予该权限；需要在系统设置中手动打开。</p>
+            </div>
+            <button id="openFullDiskAccess" class="ghost">打开系统设置</button>
+          </div>
+        </div>
+          </div>
+          <div class="settings-panel" data-settings-panel="network" role="tabpanel" hidden>
+            <div class="card settings-card network-card">
+          <div class="section-head">
+            <div><span class="eyebrow">TUNNEL NETWORK</span><h2>Tunnel 网络</h2></div>
+            <span id="networkStatus" class="setting-status">正在读取…</span>
+          </div>
+          <div class="network-form">
+            <label>代理模式
+              <select id="proxyMode">
+                <option value="direct">Direct · 直连</option>
+                <option value="system">System · macOS / Windows 系统代理</option>
+                <option value="manual">Manual · 手动代理</option>
+              </select>
+            </label>
+            <label class="network-grow">手动代理地址
+              <input id="proxyUrl" type="text" placeholder="http://127.0.0.1:7890">
+            </label>
+          </div>
+          <div class="network-facts">
+            <article><span>系统代理</span><code id="systemProxyFact">—</code></article>
+            <article><span>配置有效代理</span><code id="effectiveProxyFact">—</code></article>
+            <article><span>Runtime 实际路由</span><code id="runtimeProxyFact">—</code></article>
+            <article><span>Control Plane</span><strong id="controlPlaneFact">—</strong></article>
+          </div>
+          <p id="controlPlaneReason" class="network-detail muted">尚无 Control Plane 诊断信息。</p>
+          <div class="network-actions">
+            <button id="testNetwork" class="secondary">测试网络</button>
+            <button id="saveNetwork" class="primary">应用网络设置</button>
+            <span id="networkTestResult" class="muted"></span>
+          </div>
+          <p class="network-note muted">Direct 会显式清除 Tunnel 进程继承的 HTTP/SOCKS 代理变量；System 会在“应用网络设置”时重新读取当前系统显式代理并重启正在运行的 Tunnel；Manual 直接把代理地址注入 tunnel-client。PAC 自动代理暂不支持。TUN 模式仍由系统路由层接管。</p>
+        </div>
+          </div>
+          <div class="settings-panel" data-settings-panel="relay" role="tabpanel" hidden>
+            <p class="settings-description">这里管理手机监控使用的公网 Relay。手机配对和设备移除继续在“手机连接”页面进行。</p>
+            <div class="card settings-card relay-card">
           <div class="section-head">
             <div><span class="eyebrow">CHATX RELAY</span><h2>公网连接</h2></div>
             <span id="relayStatus" class="setting-status">正在读取…</span>
@@ -219,78 +351,9 @@
             <span id="relayTestResult" class="muted"></span>
           </div>
         </div>
-      </section>
-
-      <section class="page" data-page-panel="permissions">
-        <div class="card permission-card">
-          <div class="section-head">
-            <div><span class="eyebrow">PRIVACY & ACCESS</span><h2>权限中心</h2></div>
-            <button id="authorizeAllPermissions" class="primary">一次触发全部授权</button>
           </div>
-          <p class="permission-intro">集中触发 ChatX / Desktop Commander 常用的 macOS 文件夹与钥匙串权限。macOS 仍可能按安全类别依次显示系统确认，但授权会集中在这里完成，而不是等到实际调用时再临时弹出。</p>
-          <div id="permissionList" class="permission-list"><p class="muted">正在读取权限信息…</p></div>
-          <div class="permission-manual">
-            <div>
-              <strong>完全磁盘访问</strong>
-              <p id="fullDiskAccessHint">macOS 不允许应用静默授予该权限；需要在系统设置中手动打开。</p>
-            </div>
-            <button id="openFullDiskAccess" class="ghost">打开系统设置</button>
-          </div>
-        </div>
-      </section>
-
-      <section class="page" data-page-panel="settings">
-        <div class="card settings-card">
-          <div class="section-head">
-            <div><span class="eyebrow">CONNECTIVITY</span><h2>Tunnel 连接</h2></div>
-            <span id="reconnectStatus" class="setting-status">正在读取…</span>
-          </div>
-          <div class="setting-row">
-            <div class="setting-copy">
-              <strong>断线自动重连</strong>
-              <p>连接意外掉线后，ChatX 会在后台检测并自动重新启动 Secure MCP Tunnel；窗口隐藏到托盘后也会继续工作。</p>
-              <small>连续失败时使用 2 / 5 / 10 / 20 / 30 秒退避。手动“停止连接”会立即取消后续重连。</small>
-            </div>
-            <label class="switch" title="断线自动重连">
-              <input id="autoReconnect" type="checkbox" aria-label="断线自动重连">
-              <span class="switch-ui"></span>
-            </label>
-          </div>
-        </div>
-
-        <div class="card settings-card network-card">
-          <div class="section-head">
-            <div><span class="eyebrow">TUNNEL NETWORK</span><h2>Tunnel 网络</h2></div>
-            <span id="networkStatus" class="setting-status">正在读取…</span>
-          </div>
-          <div class="network-form">
-            <label>代理模式
-              <select id="proxyMode">
-                <option value="direct">Direct · 直连</option>
-                <option value="system">System · macOS / Windows 系统代理</option>
-                <option value="manual">Manual · 手动代理</option>
-              </select>
-            </label>
-            <label class="network-grow">手动代理地址
-              <input id="proxyUrl" type="text" placeholder="http://127.0.0.1:7890">
-            </label>
-          </div>
-          <div class="network-facts">
-            <article><span>系统代理</span><code id="systemProxyFact">—</code></article>
-            <article><span>配置有效代理</span><code id="effectiveProxyFact">—</code></article>
-            <article><span>Runtime 实际路由</span><code id="runtimeProxyFact">—</code></article>
-            <article><span>Control Plane</span><strong id="controlPlaneFact">—</strong></article>
-          </div>
-          <p id="controlPlaneReason" class="network-detail muted">尚无 Control Plane 诊断信息。</p>
-          <div class="network-actions">
-            <button id="testNetwork" class="secondary">测试网络</button>
-            <button id="saveNetwork" class="primary">应用网络设置</button>
-            <span id="networkTestResult" class="muted"></span>
-          </div>
-          <p class="network-note muted">Direct 会显式清除 Tunnel 进程继承的 HTTP/SOCKS 代理变量；System 会在“应用网络设置”时重新读取当前系统显式代理并重启正在运行的 Tunnel；Manual 直接把代理地址注入 tunnel-client。PAC 自动代理暂不支持。TUN 模式仍由系统路由层接管。</p>
-        </div>
-
-        <div class="card settings-card">
+          <div class="settings-panel" data-settings-panel="system" role="tabpanel" hidden>
+            <div class="card settings-card platform-macos-only">
           <div class="section-head">
             <div><span class="eyebrow">POWER</span><h2>电源与合盖</h2></div>
             <span id="clamshellStatus" class="setting-status">正在读取…</span>
@@ -298,7 +361,7 @@
           <div class="setting-row">
             <div class="setting-copy">
               <strong>合盖后保持运行</strong>
-              <p>开启后，macOS 将禁止系统睡眠；合上 MacBook 屏幕后，ChatX Tunnel 和本机任务仍可继续运行。</p>
+              <p>开启后，macOS 将禁止系统睡眠；合上 MacBook 屏幕后，ChatX MCP 连接和本机任务仍可继续运行。</p>
               <small>需要管理员授权。由 ChatX 开启时，退出或异常终止后会自动恢复原来的睡眠状态；合盖放入包中可能导致过热或快速耗电。</small>
             </div>
             <label class="switch" title="合盖后保持运行">
@@ -307,21 +370,72 @@
             </label>
           </div>
         </div>
-      </section>
-
-      <section class="page" data-page-panel="logs">
-        <div class="card">
-          <div class="section-head"><div><span class="eyebrow">RUNTIME LOG</span><h2>ChatX 运行日志</h2></div><div class="actions"><button id="openLogs" class="ghost">打开数据目录</button><button id="copyLogs" class="ghost">复制</button></div></div>
-          <pre id="logs">尚无日志。</pre>
-          <p class="muted">这里只记录 ChatX/Tunnel 生命周期。MCP 工具执行由 Desktop Commander 直接处理。</p>
+          </div>
         </div>
       </section>
+
+      <section class="page" data-page-panel="monitor">
+        <div class="card settings-card monitor-card">
+          <div class="section-head">
+            <div><span class="eyebrow">MOBILE CONNECTION</span><h2>手机连接</h2></div>
+            <span id="monitorStatus" class="setting-status">正在读取…</span>
+          </div>
+          <div class="setting-row">
+            <div class="setting-copy">
+              <strong>Direct HTTPS Monitor</strong>
+              <p>手机通过 LAN 或 IPv6 Direct 的短连接 HTTPS 读取状态；不可直连时自动切换到服务器 Relay。</p>
+              <small>所有 Snapshot 均使用设备独立密钥进行 AES-256-GCM 端到端加密，Direct 与 Relay 使用同一协议。</small>
+            </div>
+            <label class="switch" title="手机监控">
+              <input id="monitorEnabled" type="checkbox" aria-label="手机监控">
+              <span class="switch-ui"></span>
+            </label>
+          </div>
+          <div class="monitor-controls">
+            <label>监听端口<input id="monitorPort" type="number" min="1024" max="65535" value="18432"></label>
+            <button id="saveMonitor" class="secondary">应用设置</button>
+          </div>
+          <div class="monitor-facts">
+            <article><span>监听地址</span><code id="monitorBind">—</code></article>
+            <article><span>TLS 指纹 SHA-256</span><code id="monitorFingerprint">—</code></article>
+            <article><span>协议 / 加密</span><strong id="monitorProtocol">HTTPS · E2EE</strong></article>
+          </div>
+          <div class="monitor-actions">
+            <button id="createMonitorPairing" class="primary">添加手机</button>
+            <button id="openRelaySettings" class="ghost" type="button">配置公网 Relay →</button>
+          </div>
+          <div class="monitor-devices-wrap">
+            <div class="section-head compact">
+              <div><strong>已配对设备</strong><small>每台设备拥有独立 Direct / Relay 凭据与 E2EE Key，可单独删除。</small></div>
+            </div>
+            <div id="monitorDevices" class="monitor-devices"><p class="muted">暂无已配对设备。</p></div>
+          </div>
+          <div id="monitorPairing" class="monitor-pairing" hidden>
+            <div class="section-head compact">
+              <div><strong>添加手机</strong><small>扫码后自动选择 LAN / IPv6 Direct / 服务器 Relay 路径。</small></div>
+              <button id="copyMonitorPairing" class="ghost">复制</button>
+            </div>
+            <div id="monitorPairingQr" class="monitor-pairing-qr"></div>
+            <pre id="monitorPairingPayload"></pre>
+            <p class="muted">二维码中的一次性配对码 5 分钟后过期，并且成功使用一次后立即失效。</p>
+          </div>
+        </div>
+
+
+      </section>
+
+
+
+
+
+
     </main>
   </div>
   <script src="./api.js"></script>
   <script src="./state.js"></script>
   <script src="./pages/calls.js"></script>
   <script src="./pages/network.js"></script>
+  <script src="./pages/https-mcp.js"></script>
   <script src="./pages/permissions.js"></script>
   <script src="./pages/power.js"></script>
   <script src="./pages/monitor.js"></script>

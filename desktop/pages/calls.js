@@ -107,6 +107,9 @@
         time.textContent = timeLabel(item.timestamp);
         const tool = document.createElement('code');
         tool.textContent = String(item.toolName || 'unknown');
+        const source = document.createElement('span');
+        source.className = 'call-source';
+        source.textContent = String(item.source || 'Secure MCP Tunnel');
         const status = document.createElement('span');
         status.className =
           `call-status ${item.success === false ? 'bad' : 'ok'}`;
@@ -117,7 +120,7 @@
         duration.textContent = Number.isFinite(Number(item.duration))
           ? `${Number(item.duration)} ms`
           : '—';
-        summary.append(time, tool, status, duration);
+        summary.append(time, tool, source, status, duration);
         const detail = document.createElement('div');
         detail.className = 'call-record-detail';
         appendDetail(detail, '参数', item.arguments ?? {});

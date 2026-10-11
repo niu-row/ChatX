@@ -9,6 +9,7 @@ const connectionCommands = read('src-tauri/src/connection_commands.rs');
 const networkCommands = read('src-tauri/src/network_commands.rs');
 const settingsSource = read('src-tauri/src/settings.rs');
 const tunnelRuntime = read('src-tauri/src/tunnel_runtime.rs');
+const httpsMcp = read('src-tauri/src/https_mcp.rs');
 const launcher = read('scripts/desktop-commander-launcher.mjs');
 const installer = read('scripts/build-installer.mjs');
 const tauri = json('src-tauri/tauri.conf.json');
@@ -31,6 +32,8 @@ assertResources(windows, [
   'resources/node.exe',
   'resources/tunnel-client.exe',
   'resources/desktop-commander-launcher.mjs',
+  'resources/https-mcp-bridge.mjs',
+  'resources/https-mcp-parent-watch.mjs',
   'resources/runtime-manifest.json',
   'resources/DesktopCommander-LICENSE.txt',
   'resources/desktop-commander',
@@ -41,6 +44,8 @@ assertResources(macos, [
   'resources/cloudflared',
   'resources/cloudflared-manifest.json',
   'resources/desktop-commander-launcher.mjs',
+  'resources/https-mcp-bridge.mjs',
+  'resources/https-mcp-parent-watch.mjs',
   'resources/runtime-manifest.json',
   'resources/DesktopCommander-LICENSE.txt',
   'resources/desktop-commander',
@@ -61,6 +66,12 @@ assert.match(tunnelRuntime, /env:CHATX_TUNNEL_RUNTIME_KEY/);
 assert.doesNotMatch(tunnelRuntime, /--runtime-api-key\s+\{?runtime/i);
 assert.match(launcher, /delete process\.env\.CHATX_TUNNEL_RUNTIME_KEY/);
 assert.match(launcher, /DESKTOP_COMMANDER_DISABLE_TELEMETRY/);
+
+// Windows child startup must stay silent and keep the primary thread
+// suspended until the job assignment is complete.
+const windowsJob = read('src-tauri/src/windows_process_job.rs');
+assert.match(windowsJob, /CREATE_NO_WINDOW\s*\|\s*CREATE_SUSPENDED/);
+assert.match(httpsMcp, /KillOnCloseJob::spawn\(command\)/);
 
 const getStatus = connectionCommands.match(/fn get_status\b[\s\S]*?\n}/)?.[0] ?? '';
 assert.ok(getStatus, 'get_status must remain defined');

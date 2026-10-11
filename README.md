@@ -20,7 +20,7 @@ Desktop Commander
 本机文件 / 搜索 / 编辑 / 进程 / Shell
 ```
 
-ChatX 不再实现自己的 Filesystem、Git、Shell 或 MCP HTTP Server。文件读写、搜索、编辑和命令执行由 Desktop Commander 提供；ChatX 只负责桌面 UI、运行组件打包、Tunnel 配置、启动/停止、诊断和日志。
+ChatX 不自行实现 Filesystem、Git 或 Shell 工具。文件读写、搜索、编辑和命令执行仍由 Desktop Commander 提供；ChatX 负责桌面 UI、运行组件打包、Tunnel 配置与管理、HTTPS MCP 协议桥接、SSH 反向转发、诊断和日志。
 
 ChatX 通过启动器关闭 Desktop Commander 的聊天内文件预览和配置编辑模板：工具列表不包含 UI 关联元数据，资源与资源模板列表为空，旧 UI 资源地址不可读取。26 个 MCP 工具及其返回结果保持不变。适配在启动时生效，不修改锁定的上游 MCPB 内容。
 
@@ -47,6 +47,42 @@ Desktop Commander 通过 stdio 启动，不要求最终用户安装 Node、npm�
 8. 生成 `runtime-manifest.json`，记录 GitHub Release provenance、bundle manifest hash 和 ripgrep hash。
 
 因此 Desktop Commander 的运行依赖树由锁定的 GitHub Release MCPB 二进制整体确定，而不是由每次构建时的 `npm install` 结果决定。
+
+## 可选的 HTTPS MCP + SSH 反向隧道（不依赖 OpenAI Tunnel）
+
+ChatX 的“连接”页提供 **HTTPS MCP** 与 **Secure MCP Tunnel** 两种互斥模式。选择模式卡片只切换视图，点击启动才停止旧链路并启用新链路；启动与停止控制位于连接页，OAuth 授权由“设置 → 安全与授权”集中管理。与原 Secure MCP Tunnel **运行互斥**（旧模式仍保留）。启动任一链路会先停止另一条的服务并关闭其保存的连接意图；视图切换本身不会断线。升级时如果旧配置同时启用两条，则优先保留 HTTPS MCP，先停掉 Tunnel，自动重连不得将其重新开启。HTTPS 模式不需要 Tunnel ID、Runtime API Key 或 Tunnel 与 ChatGPT 工作空间的组织关联，但 ChatGPT 端仍须允许添加自定义 MCP 应用。
+
+网络结构：
+
+```text
+ChatGPT --HTTPS/OAuth--> https://newrow.fun/mcp
+  --> 公网服务器 Nginx --127.0.0.1:18080--> SSH -R
+  --> ChatX 本机 127.0.0.1:3000 --> 独立的 stdio Desktop Commander
+```
+
+### 在已配置公网域名的服务器部署
+
+该项目自带 Nginx include 参考：`deploy/nginx/chatx-https-mcp.conf`。实际服务器必须先拥有有效 HTTPS 证书、正常的 443 站点，以及支持本机反向代理的 Nginx。将 include 文件放入域名所在 server 的 include 目录，执行 `nginx -t` 通过后再 reload。Nginx 不直接暴露 SSH 转发端口；`18080` 始终只监听远端 `127.0.0.1`，本机 MCP 只监听 `127.0.0.1:3000`。
+
+务必使用**受限专用 SSH 用户**而非长期使用 root。该用户的公钥应仅有 `restrict,port-forwarding,permitlisten="127.0.0.1:18080"` 等受限权限，并拒绝 shell 操作。ChatX 的 SSH 连接使用已有 `known_hosts`、非交互密钥、`StrictHostKeyChecking=yes`、`ExitOnForwardFailure=yes` 与 keepalive；拒绝未知主机密钥并自动重连。Windows 下 HTTPS MCP 的 Node.js Bridge 和 SSH 反向隧道均以 `CREATE_NO_WINDOW` 启动，不会弹出黑色控制台窗口；二者使用 `CREATE_SUSPENDED` 先挂起启动、绑定 `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE` 的 Windows Job Object 后再恢复执行，避免子进程归属竞态；ChatX 意外退出时连同 Desktop Commander 子进程终止。macOS 使用独立监护脚本监测 GUI 父进程，父进程消失或被管理的进程先退出时，先向对应进程组发送 `SIGTERM`，1.5 秒后仍会发送 `SIGKILL` 兜底，不会因进程组主进程提前退出而跳过清理。日志仍保存于 ChatX state 目录。
+
+ChatX 桌面端使用 Tauri 官方 single-instance 插件限制 Windows/macOS 同时运行的实例数。再次启动会唤起现有主窗口（即使该窗口此前已被回收），而不是创建第二套 MCP/SSH 后台连接。
+
+打开新 ChatX 安装包，进入“连接”页，输入域名（仅 `https://域名`）、SSH 主机/用户名/端口和本机/远程转发端口，然后点击“启动 HTTPS MCP”。设置保存在 ChatX 原有 `settings.json` 中；下次启动时自动恢复此模式。启动后显示的 OAuth 授权密码由独立的 HTTPS OAuth 主密钥派生，通过 Windows DPAPI 或 macOS Keychain 保存，不会写入明文设置，也不会传递给 Desktop Commander 子进程。升级时会一次性迁移原有密钥以保持短期兼容；之后可点击“重新生成 OAuth 授权密码”，该操作不会改变 Android Monitor 密钥，但会撤销全部 HTTPS OAuth 授权并重启 HTTPS MCP。
+
+“设置 → 安全与授权”中的 OAuth 授权管理支持 1 小时、1 天、7 天（默认）、30 天、自定义小时数（最长 10 年）以及**不限时间**。该设置仅作用于新完成的 OAuth 授权，不会延长旧授权。有限期授权使用绝对截止时间，令牌刷新不会重置授权有效期；不限时间的授权没有总截止时间，但每次刷新均轮换 Refresh Token 并把最新令牌 ID 哈希持久化；在 30 秒幂等重试窗口内提交同一刷新令牌，会返回相同的后继令牌，避免网络响应丢失导致误撤销；重试窗口外的旧令牌重放、或在后继令牌再次轮换后重放，会撤销该授权。每个 Access Token 仍为最多 1 小时。每项授权会保存本机授权记录，点击“撤销所选授权”或“撤销全部授权”可立即禁止其后续 Access/Refresh 请求。“撤销全部授权”同时会使此前已批准但未交换令牌的 OAuth 授权码、以及尚未确认的授权表单失效。授权记录仅保存随机授权 ID、创建/到期时间、客户端哈希及当前 Refresh Token 的标识哈希，不保存 Bearer Token 明文。选择不限时间将长期保留本机文件读写及命令执行权限，应仅授予可信客户端。
+
+由旧版本发出的无授权 ID 令牌获得一次固定的 7 天迁移期；旧 Refresh Token 首次续期会转换为新的一次性令牌；网络丢包后的 30 秒内可幂等重试，超过窗口或后继令牌继续轮换后再使用旧令牌会被视为重放。迁移期后需重新 OAuth 授权才能继续连接；可通过授权管理中的“旧版迁移授权”提前撤销。升级后如需“不限时间”，先在 ChatX 保存该选项，再于 ChatGPT 重新执行 OAuth。
+
+在 ChatGPT 支持的自定义 MCP/应用配置里使用 **`https://newrow.fun/mcp`**，选择 OAuth。授权页面需输入 ChatX 显示的密码。桥接端提供 OAuth discovery、动态客户端注册、authorization-code + PKCE (S256)、短期 Bearer Token 和 refresh token。登录页面仅允许 ChatGPT/OpenAI 的 HTTPS 回调域名，未经授权的 `/mcp` 请求返回 401。工具仍有读写文件和本机命令执行权限；请将授权密码视为敏感凭据，且只为可信的 ChatGPT 客户端授权。
+
+HTTPS 连接状态会在后台定期验证公网 OAuth 元数据（HTTP 200）与未经授权的 MCP 访问（HTTP 401），而不只是检查 SSH 进程是否存在。公网 OAuth 授权入口采用每 IP 限流和较高的全局安全上限，避免少量分布式无效请求耗尽低额度并阻断正常授权；Node.js 与 Nginx 的 MCP 请求上限均为 5 MiB。“设置 → 连接策略”分别提供 Tunnel 与 HTTPS 的断线自动重连开关。HTTPS 关闭自动重连后仍可手动启动一次 Bridge / SSH；启动 ChatX 时会恢复上次已选择的连接模式。设置页按连接策略、安全与授权、网络与代理、手机与 Relay 及 macOS 系统选项分组；手机配对继续保留在“手机连接”，运行日志归到“诊断”。首页“停止连接”会优先持久化两种传输的独立手动停止标记，断开旧 Tunnel 与 HTTPS MCP，再事务化保存停止意图；即使主设置文件保存失败，下次启动也会由停止标记阻止自动重连，并向用户提示保存故障。再次手动连接成功后才清除对应标记。HTTPS MCP 与 Tunnel 的手动连接启停共用生命周期操作锁，避免停止与启动互相覆盖。停用连接不代表撤销 OAuth 授权。本机健康检查使用每次启动随机生成的实例标识，避免端口被旧进程占用时误报就绪。
+
+调用记录及实时状态分别读取两套 Desktop Commander 工作目录，并按时间合并、标注来源；历史记录读取限制为每个传输最近 2 MiB 的 JSONL 数据，统计只涵盖这个窗口。状态汇总优先展示仍存活、快照有效的进行中调用，避免另一条较新的空闲快照覆盖活跃调用；Android Monitor 保留旧 `tunnel`/`mcp` 字段，另提供只读 `connections.activeMode`、`connections.tunnel`、`connections.httpsMcp` 以表示唯一选中的链路，并按来源标注工具调用；新版 Android 的首页和通知使用此数据，旧版桌面缺少新字段时自动兼容。手机仍经 Monitor Direct HTTPS / Relay 获取状态，不直接连接高权限 MCP/OAuth 接口。
+
+**排障**：先检查连接页中的“本地 MCP/SSH 状态”，再查 ChatX state 目录中的 `https-mcp-bridge.log` 与 `https-mcp-ssh.log`。如果公网 `/mcp` 返回 502，通常是 ChatX/SSH 尚未连接到服务器的 `18080`；如果返回 401，证明 OAuth 保护已生效；如果连接状态仍然显示“启动中”，排查 SSH 免密登录或服务器端转发端口占用。保留原 Secure MCP Tunnel 作为回退方式。
+
+本机验证命令：`npm test`（OAuth 模拟 MCP）和 `npm run test:runtime`（真实 bundled Desktop Commander，含 HTTPS Bridge）。完整验证使用 `npm run test:local-full`。Windows 测试安装包可通过 `npm run desktop:installer` 构建；正式发布仍要求代码签名。
 
 ## 使用
 

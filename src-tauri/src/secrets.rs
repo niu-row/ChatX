@@ -1,10 +1,15 @@
 use super::{monitor_crypto, relay, secret_path};
 #[cfg(windows)]
+use super::state_dir;
+use std::sync::{Mutex, OnceLock};
+static HTTPS_SECRET_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+#[cfg(windows)]
 use super::{command_output, monitor_master_secret_path, output_text, relay_secret_path};
 #[cfg(target_os = "macos")]
 use super::{
     KEYCHAIN_SERVICE, MONITOR_MASTER_KEYCHAIN_ACCOUNT, MONITOR_MASTER_KEYCHAIN_SERVICE,
     RELAY_KEYCHAIN_ACCOUNT, RELAY_KEYCHAIN_SERVICE, RUNTIME_ALIAS,
+    HTTPS_OAUTH_KEYCHAIN_SERVICE, HTTPS_OAUTH_KEYCHAIN_ACCOUNT,
 };
 use std::{fs, path::Path};
 #[cfg(windows)]
@@ -163,6 +168,75 @@ pub(super) fn ensure_monitor_master_key(app: &tauri::AppHandle) -> Result<[u8; 3
             Ok(key)
         }
     }
+}
+
+#[cfg(windows)]
+fn load_https_oauth_master_key(app: &tauri::AppHandle) -> Result<Option<[u8; 32]>, String> {
+    let path = state_dir(app)?.join("https-oauth-master-key.dpapi");
+    if !path.is_file() { return Ok(None); }
+    let value = unprotect_secret(&path)
+        .map_err(|e| format!("安全读取 HTTPS OAuth 密钥失败：{e}"))?;
+    monitor_crypto::decode_master_key(&value).map(Some)
+        .map_err(|e| format!("HTTPS OAuth 密钥已损坏，禁止自动轮换：{e}"))
+}
+
+#[cfg(target_os = "macos")]
+fn load_https_oauth_master_key(_app: &tauri::AppHandle) -> Result<Option<[u8; 32]>, String> {
+    match security_framework::passwords::get_generic_password(
+        HTTPS_OAUTH_KEYCHAIN_SERVICE, HTTPS_OAUTH_KEYCHAIN_ACCOUNT,
+    ) {
+        Ok(bytes) => {
+            let value = String::from_utf8(bytes).map_err(|_| "HTTPS OAuth Keychain 数据编码无效")?;
+            monitor_crypto::decode_master_key(&value).map(Some)
+        }
+        Err(error) if error.code() == -25300 => Ok(None),
+        Err(error) => Err(format!("读取 HTTPS OAuth Keychain 失败：{error}")),
+    }
+}
+
+#[cfg(not(any(windows, target_os = "macos")))]
+fn load_https_oauth_master_key(_app: &tauri::AppHandle) -> Result<Option<[u8; 32]>, String> {
+    Err("平台不支持持久化 HTTPS OAuth 密钥".into())
+}
+
+#[cfg(windows)]
+fn save_https_oauth_master_key(app: &tauri::AppHandle, key: &[u8; 32]) -> Result<(), String> {
+    let path = state_dir(app)?.join("https-oauth-master-key.dpapi");
+    protect_secret(&monitor_crypto::encode_master_key(key), &path)
+        .map_err(|e| format!("保存 HTTPS OAuth 密钥失败：{e}"))
+}
+
+#[cfg(target_os = "macos")]
+fn save_https_oauth_master_key(_app: &tauri::AppHandle, key: &[u8; 32]) -> Result<(), String> {
+    security_framework::passwords::set_generic_password(
+        HTTPS_OAUTH_KEYCHAIN_SERVICE, HTTPS_OAUTH_KEYCHAIN_ACCOUNT,
+        monitor_crypto::encode_master_key(key).as_bytes(),
+    ).map_err(|e| format!("保存 HTTPS OAuth Keychain 密钥失败：{e}"))
+}
+
+#[cfg(not(any(windows, target_os = "macos")))]
+fn save_https_oauth_master_key(_app: &tauri::AppHandle, _key: &[u8; 32]) -> Result<(), String> {
+    Err("平台不支持持久化 HTTPS OAuth 密钥".into())
+}
+
+pub(super) fn ensure_https_oauth_master_key(app: &tauri::AppHandle) -> Result<[u8; 32], String> {
+    let _guard = HTTPS_SECRET_LOCK.get_or_init(|| Mutex::new(())).lock()
+        .map_err(|_| "HTTPS OAuth 密钥操作锁损坏".to_string())?;
+    if let Some(key) = load_https_oauth_master_key(app)? { return Ok(key); }
+    // One-time compatibility migration: copy the old derivation seed into a
+    // distinct DPAPI/Keychain secret, preserving existing ChatGPT sessions.
+    // Subsequent password rotations never change Android Monitor credentials.
+    let legacy = ensure_monitor_master_key(app)?;
+    save_https_oauth_master_key(app, &legacy)?;
+    Ok(legacy)
+}
+
+pub(super) fn rotate_https_oauth_master_key(app: &tauri::AppHandle) -> Result<[u8; 32], String> {
+    let _guard = HTTPS_SECRET_LOCK.get_or_init(|| Mutex::new(())).lock()
+        .map_err(|_| "HTTPS OAuth 密钥操作锁损坏".to_string())?;
+    let key = monitor_crypto::generate_master_key()?;
+    save_https_oauth_master_key(app, &key)?;
+    Ok(key)
 }
 
 #[cfg(windows)]

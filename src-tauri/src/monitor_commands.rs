@@ -1,7 +1,7 @@
 use super::{monitor_manager, stop_relay_client};
 use crate::{
     app_state::AppState,
-    settings::{load_settings, save_settings},
+    settings::{load_settings, update_settings},
 };
 use serde_json::Value;
 use tauri::State;
@@ -40,12 +40,22 @@ pub(super) fn set_monitor_enabled(
         monitor_manager::stop_monitor_service(state.inner())?;
     }
 
-    save_settings(&app, &settings)?;
+    update_settings(&app, |current| {
+        current.monitor_enabled = settings.monitor_enabled;
+        current.monitor_port = settings.monitor_port;
+        current.relay.enabled = settings.relay.enabled;
+        Ok(())
+    })?;
     if enabled {
         if let Err(error) =
             monitor_manager::start_monitor_service(&app, state.inner())
         {
-            let _ = save_settings(&app, &previous);
+            let _ = update_settings(&app, |current| {
+                current.monitor_enabled = previous.monitor_enabled;
+                current.monitor_port = previous.monitor_port;
+                current.relay.enabled = previous.relay.enabled;
+                Ok(())
+            });
             if previous.monitor_enabled {
                 let _ = monitor_manager::start_monitor_service(
                     &app,

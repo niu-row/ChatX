@@ -5,6 +5,7 @@ import path from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { createRequire } from 'node:module';
 import { pathToFileURL } from 'node:url';
+import { build as esbuild } from 'esbuild';
 import { realHome } from './toolchain-env.mjs';
 
 const root = process.cwd();
@@ -377,7 +378,18 @@ fs.rmSync(resourceDir, {
 });
 fs.mkdirSync(resourceDir, { recursive: true });
 fs.copyFileSync(launcherSource, path.join(resourceDir, 'desktop-commander-launcher.mjs'));
+fs.copyFileSync(path.join(root, 'scripts', 'https-mcp-parent-watch.mjs'),
+  path.join(resourceDir, 'https-mcp-parent-watch.mjs'));
 fs.copyFileSync(hostEnvironmentSource, path.join(resourceDir, 'desktop-host-environment.mjs'));
+
+// The HTTPS MCP bridge runs with the bundled Node and must not depend on npm being installed.
+await esbuild({
+  entryPoints: [path.join(root, 'scripts', 'https-mcp-bridge.mjs')],
+  outfile: path.join(resourceDir, 'https-mcp-bridge.mjs'),
+  bundle: true, platform: 'node', target: 'node20', format: 'esm',
+  banner: { js: "import { createRequire } from 'node:module'; const require = createRequire(import.meta.url);" },
+  packages: 'bundle', logLevel: 'warning',
+});
 
 const nodeMetadata = await prepareNodeRuntime();
 const tunnelMetadata = await prepareTunnelClientRuntime();

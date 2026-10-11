@@ -1,4 +1,4 @@
-use super::{monitor, monitor_control, monitor_manager, relay};
+use super::{https_mcp, monitor, monitor_control, monitor_manager, relay};
 use serde_json::Value;
 use std::{
     path::PathBuf,
@@ -28,6 +28,7 @@ impl Default for TunnelRecoveryStatus {
 #[derive(Default)]
 pub(super) struct AppState {
     pub(super) logs: Mutex<Vec<String>>,
+    pub(super) tray_stop_error: Mutex<Option<String>>,
     pub(super) quitting: AtomicBool,
     pub(super) desired_connected: AtomicBool,
     pub(super) reconnecting: AtomicBool,
@@ -36,10 +37,13 @@ pub(super) struct AppState {
     pub(super) runtime_snapshot: Mutex<monitor::TunnelSnapshot>,
     pub(super) relay_status: Arc<Mutex<relay::RelayStatus>>,
     pub(super) relay_client: Mutex<Option<relay::RelayClientHandle>>,
+    pub(super) https_mcp: https_mcp::HttpsState,
     pub(super) monitor: monitor_manager::State,
     pub(super) monitor_control: monitor_control::State,
     pub(super) session_runtime_key: Mutex<Option<String>>,
     pub(super) runtime_operation: Mutex<()>,
+    // Serialize manual start/stop/reconfigure across both remote transports.
+    pub(super) connection_operation: Mutex<()>,
     pub(super) permission_results: Mutex<Option<Value>>,
     pub(super) main_window_generation: AtomicU64,
 }
@@ -51,4 +55,27 @@ pub(super) struct RuntimePaths {
     pub(super) node: PathBuf,
     pub(super) launcher: PathBuf,
     pub(super) desktop_commander: PathBuf,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::{sync::mpsc, thread, time::Duration};
+
+    #[test]
+    fn manual_connection_operations_share_one_lock() {
+        let state = Arc::new(AppState::default());
+        let first = state.connection_operation.lock().unwrap();
+        let clone = Arc::clone(&state);
+        let (tx, rx) = mpsc::channel();
+        let worker = thread::spawn(move || {
+            let _second = clone.connection_operation.lock().unwrap();
+            tx.send(()).unwrap();
+        });
+        assert!(rx.recv_timeout(Duration::from_millis(100)).is_err(),
+            "The second connection operation must wait");
+        drop(first);
+        rx.recv_timeout(Duration::from_secs(2)).expect("Connection lock must be released");
+        worker.join().unwrap();
+    }
 }

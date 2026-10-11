@@ -11,23 +11,19 @@
     ageLabel,
   }) => {
     let busy = false;
-    let dirty = false;
+    let proxyDirty = false;
+    let relayDirty = false;
 
-    function markDirty() {
-      dirty = true;
-    }
+    const markProxyDirty = () => { proxyDirty = true; };
+    const markRelayDirty = () => { relayDirty = true; };
 
-    function collectPayload() {
-      return {
-        proxy: {
-          mode: $('proxyMode').value,
-          url: $('proxyUrl').value.trim(),
-        },
-        relay: {
-          enabled: $('relayEnabled').checked,
-          baseUrl: $('relayBaseUrl').value.trim(),
-        },
-      };
+    function collectPayload(section) {
+      if (section === 'proxy') {
+        return { proxy: { mode: $('proxyMode').value,
+          url: $('proxyUrl').value.trim() } };
+      }
+      return { relay: { enabled: $('relayEnabled').checked,
+        baseUrl: $('relayBaseUrl').value.trim() } };
     }
 
     function controlPlaneTone(value) {
@@ -46,9 +42,11 @@
       const relayState = relay.status || {};
       const tunnel = payload?.tunnel || {};
 
-      if (!dirty) {
+      if (!proxyDirty) {
         $('proxyMode').value = proxy.mode || 'direct';
         $('proxyUrl').value = proxy.url || '';
+      }
+      if (!relayDirty) {
         $('relayEnabled').checked = Boolean(relay.enabled);
         $('relayBaseUrl').value = relay.baseUrl || '';
       }
@@ -184,9 +182,9 @@
       try {
         const result = await invoke(
           'set_network_settings',
-          { payload: collectPayload() },
+          { payload: collectPayload('proxy') },
         );
-        dirty = false;
+        proxyDirty = false;
         render(result);
         $('networkTestResult').textContent =
           'Tunnel 网络设置已应用。';
@@ -207,9 +205,9 @@
       try {
         const result = await invoke(
           'set_network_settings',
-          { payload: collectPayload() },
+          { payload: collectPayload('relay') },
         );
-        dirty = false;
+        relayDirty = false;
         render(result);
         $('relayTestResult').textContent =
           result?.relay?.registered
@@ -234,9 +232,9 @@
       try {
         const saved = await invoke(
           'set_network_settings',
-          { payload: collectPayload() },
+          { payload: collectPayload('relay') },
         );
-        dirty = false;
+        relayDirty = false;
         render(saved);
         const result = await invoke(
           'register_relay_desktop',
@@ -261,7 +259,7 @@
       try {
         const result = await invoke(
           'test_network_settings',
-          { payload: collectPayload() },
+          { payload: collectPayload('proxy') },
         );
         const proxy = result?.proxy || {};
         $('networkTestResult').textContent =
@@ -283,7 +281,7 @@
       try {
         const result = await invoke(
           'test_network_settings',
-          { payload: collectPayload() },
+          { payload: collectPayload('relay') },
         );
         const relay = result?.relay || {};
         $('relayTestResult').textContent = relay.ok
@@ -299,7 +297,7 @@
     }
 
     function proxyModeChanged() {
-      dirty = true;
+      proxyDirty = true;
       $('proxyUrl').disabled =
         $('proxyMode').value !== 'manual';
     }
@@ -311,7 +309,8 @@
       registerRelay,
       testNetwork,
       testRelay,
-      markDirty,
+      markProxyDirty,
+      markRelayDirty,
       proxyModeChanged,
     });
   };

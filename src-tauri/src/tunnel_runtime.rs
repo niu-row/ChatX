@@ -4,6 +4,7 @@ use super::{
     runtime_paths, state_dir, timestamp_ms, AppState, RuntimePaths, RUNTIME_ALIAS,
 };
 use crate::settings::{load_settings_checked, Settings};
+use crate::connection_intent::{self, Transport};
 use crate::tunnel_recovery::{
     ensure_runtime_start_intent, reconnect_delay_secs, restore_desired_connection_intent,
     set_recovery_status, update_runtime_snapshot,
@@ -122,7 +123,7 @@ pub(super) fn restore_persisted_connection_state(
     app: &tauri::AppHandle,
     state: &AppState,
 ) {
-    let settings = match load_settings_checked(app) {
+    let mut settings = match load_settings_checked(app) {
         Ok(settings) => settings,
         Err(error) => {
             let fallback = Settings::default();
@@ -160,6 +161,34 @@ pub(super) fn restore_persisted_connection_state(
         }
     };
 
+    if settings.https_mcp.enabled && settings.connection_intent {
+        // Legacy versions could persist both intents. HTTPS takes precedence
+        // during the one-time transition to mutually exclusive transports.
+        settings.connection_intent = false;
+        if let Err(error) = connection_intent::mark_stopped(app, Transport::Tunnel) {
+            push_log(state, format!("迁移双链路设置时记录 Tunnel 停止标记失败：{error}"));
+        }
+        if let Err(error) = crate::settings::update_settings(app, |current| {
+            if current.https_mcp.enabled { current.connection_intent = false; }
+            Ok(())
+        }) {
+            push_log(state, format!("迁移互斥连接设置失败（本次仍仅恢复 HTTPS）：{error}"));
+        }
+        push_log(state, "检测到旧版双链路连接意图，已优先保留 HTTPS MCP、关闭 Tunnel");
+    }
+    if settings.connection_intent {
+        match connection_intent::restore_allowed(app, Transport::Tunnel) {
+            Ok(true) => {}
+            Ok(false) => {
+                settings.connection_intent = false;
+                push_log(state, "检测到手动停止标记，不自动恢复 Tunnel");
+            }
+            Err(error) => {
+                settings.connection_intent = false;
+                push_log(state, format!("无法验证 Tunnel 停止标记，拒绝自动重连：{error}"));
+            }
+        }
+    }
     restore_desired_connection_intent(state, &settings);
     let Ok(paths) = runtime_paths(app) else {
         return;
@@ -267,6 +296,13 @@ pub(super) fn start_reconnect_monitor(app: tauri::AppHandle) {
                 break;
             }
             let settings = load_settings(&app);
+            // Fail closed if a stale Tunnel intent survived a mode switch.
+            if settings.https_mcp.enabled {
+                if state.desired_connected.swap(false, Ordering::SeqCst) {
+                    push_log(&state, "HTTPS MCP 已选择，停止 Tunnel 自动重连");
+                }
+                state.reconnecting.store(false, Ordering::SeqCst);
+            }
             let desired_connected =
                 state.desired_connected.load(Ordering::SeqCst);
             let paths = match runtime_paths(&app) {
@@ -407,14 +443,31 @@ pub(super) fn start_reconnect_monitor(app: tauri::AppHandle) {
                 continue;
             }
 
-            match start_runtime_connection(
-                &app,
-                state.inner(),
-                &settings.tunnel_id,
-                &key,
-                true,
-                true,
-            ) {
+            // Auto-reconnect must take the same cross-transport lifecycle
+            // lock as manual start/stop, otherwise it could bring Tunnel back
+            // after HTTPS MCP completed a mode switch.
+            let reconnect_result = {
+                let guard = state.connection_operation.lock();
+                match guard {
+                    Err(_) => Err("连接操作锁不可用，拒绝 Tunnel 自动重连".to_string()),
+                    Ok(_guard) => {
+                        let latest = load_settings(&app);
+                        if !state.desired_connected.load(Ordering::SeqCst)
+                            || state.quitting.load(Ordering::SeqCst)
+                            || latest.https_mcp.enabled
+                            || !latest.auto_reconnect
+                        {
+                            Err("已停止 Tunnel 或切换至 HTTPS MCP，不执行自动重连".into())
+                        } else {
+                            start_runtime_connection(
+                                &app, state.inner(), &latest.tunnel_id,
+                                &key, true, true,
+                            )
+                        }
+                    }
+                }
+            };
+            match reconnect_result {
                 Ok(())
                     if state
                         .desired_connected

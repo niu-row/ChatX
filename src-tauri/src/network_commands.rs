@@ -12,7 +12,7 @@ use crate::{
         ensure_monitor_master_key, load_runtime_key, read_relay_credentials,
         save_relay_credentials,
     },
-    settings::{load_settings, save_settings, Settings},
+    settings::{load_settings, update_settings, Settings},
     tunnel_recovery::update_runtime_snapshot,
     tunnel_runtime::start_runtime_connection,
     tunnel_status::runtime_status,
@@ -231,38 +231,41 @@ fn network_settings_from_payload(
     payload: &Value,
 ) -> Result<Settings, String> {
     let mut next = current.clone();
-    let proxy = payload.get("proxy").unwrap_or(&Value::Null);
-    if let Some(mode) = proxy.get("mode").and_then(Value::as_str) {
-        next.proxy.mode = mode.trim().to_ascii_lowercase();
-    }
-    if let Some(url) = proxy.get("url").and_then(Value::as_str) {
-        next.proxy.url = url.trim().to_string();
-    }
-    if !matches!(next.proxy.mode.as_str(), "direct" | "system" | "manual") {
-        return Err("Tunnel 代理模式仅支持 direct、system 或 manual。".into());
-    }
-    match next.proxy.mode.as_str() {
-        "direct" => next.proxy.applied_url.clear(),
-        "manual" => {
-            next.proxy.url = validate_proxy_url(&next.proxy.url)?;
-            next.proxy.applied_url = next.proxy.url.clone();
+    if let Some(proxy) = payload.get("proxy") {
+        if !proxy.is_object() { return Err("代理设置格式无效。".into()); }
+        if let Some(mode) = proxy.get("mode").and_then(Value::as_str) {
+            next.proxy.mode = mode.trim().to_ascii_lowercase();
         }
-        "system" => {
-            next.proxy.applied_url = system_proxy_url()?.unwrap_or_default();
+        if let Some(url) = proxy.get("url").and_then(Value::as_str) {
+            next.proxy.url = url.trim().to_string();
         }
-        _ => unreachable!("proxy mode validated above"),
+        if !matches!(next.proxy.mode.as_str(), "direct" | "system" | "manual") {
+            return Err("Tunnel 代理模式仅支持 direct、system 或 manual。".into());
+        }
+        match next.proxy.mode.as_str() {
+            "direct" => next.proxy.applied_url.clear(),
+            "manual" => {
+                next.proxy.url = validate_proxy_url(&next.proxy.url)?;
+                next.proxy.applied_url = next.proxy.url.clone();
+            }
+            "system" => {
+                next.proxy.applied_url = system_proxy_url()?.unwrap_or_default();
+            }
+            _ => unreachable!("proxy mode validated above"),
+        }
     }
-
-    let relay_payload = payload.get("relay").unwrap_or(&Value::Null);
-    if let Some(enabled) = relay_payload.get("enabled").and_then(Value::as_bool) {
-        next.relay.enabled = enabled;
-    }
-    if let Some(base_url) = relay_payload.get("baseUrl").and_then(Value::as_str) {
-        next.relay.base_url = base_url.trim().to_string();
-    }
-    relay::validate(&next.relay)?;
-    if next.relay.enabled && !next.monitor_enabled {
-        return Err("启用 ChatX Relay 前请先开启手机监控。".into());
+    if let Some(relay_payload) = payload.get("relay") {
+        if !relay_payload.is_object() { return Err("Relay 设置格式无效。".into()); }
+        if let Some(enabled) = relay_payload.get("enabled").and_then(Value::as_bool) {
+            next.relay.enabled = enabled;
+        }
+        if let Some(base_url) = relay_payload.get("baseUrl").and_then(Value::as_str) {
+            next.relay.base_url = base_url.trim().to_string();
+        }
+        relay::validate(&next.relay)?;
+        if next.relay.enabled && !next.monitor_enabled {
+            return Err("启用 ChatX Relay 前请先开启手机监控。".into());
+        }
     }
     Ok(next)
 }
@@ -353,24 +356,33 @@ pub(super) fn test_network_settings(
 ) -> Result<Value, String> {
     let current = load_settings(&app);
     let candidate = network_settings_from_payload(&current, &payload)?;
-    let effective = effective_proxy_url(&candidate)?;
-    let proxy_check = if let Some(url) = effective.as_ref() {
-        let (host, port) = proxy_host_port(url)
-            .ok_or_else(|| "无法解析代理 host:port。".to_string())?;
-        json!({
-            "mode": candidate.proxy.mode,
-            "target": format!("{host}:{port}"),
-            "ok": tcp_probe(&host, port)
-        })
-    } else {
-        json!({
-            "mode": candidate.proxy.mode,
-            "target": "api.openai.com:443",
-            "ok": tcp_probe("api.openai.com", 443)
-        })
-    };
+    if payload.get("proxy").is_none() && payload.get("relay").is_none() {
+        return Err("没有指定需要测试的网络设置。".into());
+    }
+    // Test only the selected settings area: probing the unrelated route can
+    // stall a quick proxy check on an unreachable Relay (or vice versa).
+    let proxy_check = if payload.get("proxy").is_some() {
+        let effective = effective_proxy_url(&candidate)?;
+        if let Some(url) = effective.as_ref() {
+            let (host, port) = proxy_host_port(url)
+                .ok_or_else(|| "无法解析代理 host:port。".to_string())?;
+            json!({
+                "mode": candidate.proxy.mode,
+                "target": format!("{host}:{port}"),
+                "ok": tcp_probe(&host, port)
+            })
+        } else {
+            json!({
+                "mode": candidate.proxy.mode,
+                "target": "api.openai.com:443",
+                "ok": tcp_probe("api.openai.com", 443)
+            })
+        }
+    } else { json!({"skipped":true}) };
 
-    let relay_check = if candidate.relay.base_url.trim().is_empty() {
+    let relay_check = if payload.get("relay").is_none() {
+        json!({"skipped":true})
+    } else if candidate.relay.base_url.trim().is_empty() {
         json!({"ok": false, "target": Value::Null, "error": "尚未配置 Relay URL"})
     } else {
         match relay::health(&candidate.relay) {
@@ -401,7 +413,11 @@ fn rollback_network_settings(
     restore_relay: bool,
 ) -> Vec<String> {
     let mut errors = Vec::new();
-    if let Err(error) = save_settings(app, previous) {
+    if let Err(error) = update_settings(app, |current| {
+        current.proxy.clone_from(&previous.proxy);
+        current.relay.clone_from(&previous.relay);
+        Ok(())
+    }) {
         errors.push(format!("恢复原设置失败：{error}"));
         return errors;
     }
@@ -461,6 +477,14 @@ pub(super) fn set_network_settings(
     state: State<'_, AppState>,
     payload: Value,
 ) -> Result<Value, String> {
+    // Proxy updates may restart Tunnel; serialize against MCP mode switches.
+    let _connection = state.connection_operation.lock()
+        .map_err(|_| "连接操作锁已损坏".to_string())?;
+    let update_proxy = payload.get("proxy").is_some();
+    let update_relay = payload.get("relay").is_some();
+    if !update_proxy && !update_relay {
+        return Err("没有指定需要保存的网络设置。".into());
+    }
     let previous = load_settings(&app);
     let next = network_settings_from_payload(&previous, &payload)?;
     let wants_connection = state.desired_connected.load(Ordering::SeqCst);
@@ -477,7 +501,11 @@ pub(super) fn set_network_settings(
         None
     };
 
-    save_settings(&app, &next)?;
+    update_settings(&app, |current| {
+        if update_proxy { current.proxy.clone_from(&next.proxy); }
+        if update_relay { current.relay.clone_from(&next.relay); }
+        Ok(())
+    })?;
 
     if proxy_changed && wants_connection {
         let key = reconnect_key.as_deref().unwrap_or("");
@@ -536,4 +564,33 @@ pub(super) fn set_network_settings(
         ),
     );
     Ok(network_settings_payload(&app, state.inner()))
+}
+
+#[cfg(test)]
+mod partial_network_settings_tests {
+    use super::*;
+
+    #[test]
+    fn saving_relay_does_not_recalculate_unsaved_proxy_and_vice_versa() {
+        let mut original = Settings::default();
+        original.monitor_enabled = true;
+        original.proxy.mode = "manual".into();
+        original.proxy.url = "http://127.0.0.1:7890".into();
+        original.proxy.applied_url = original.proxy.url.clone();
+        let relay_only = network_settings_from_payload(
+            &original,
+            &json!({"relay":{"enabled":true,"baseUrl":"https://relay.example.com"}}),
+        ).unwrap();
+        assert_eq!(relay_only.proxy, original.proxy);
+        assert!(relay_only.relay.enabled);
+        assert_eq!(relay_only.relay.base_url, "https://relay.example.com");
+
+        let proxy_only = network_settings_from_payload(
+            &relay_only,
+            &json!({"proxy":{"mode":"direct","url":""}}),
+        ).unwrap();
+        assert_eq!(proxy_only.relay, relay_only.relay);
+        assert_eq!(proxy_only.proxy.mode, "direct");
+        assert_eq!(proxy_only.proxy.applied_url, "");
+    }
 }

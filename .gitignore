@@ -11,6 +11,7 @@ src-tauri/gen/schemas/
 .tools/
 .chatx-local-signing.json
 release/
+release-local/
 
 android-monitor/.gradle/
 android-monitor/.idea/

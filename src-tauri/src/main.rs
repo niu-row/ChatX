@@ -3,7 +3,10 @@
 mod app_state;
 mod call_history;
 mod connection_commands;
+mod connection_intent;
 mod diagnostics_commands;
+mod https_mcp;
+mod mcp_sources;
 mod monitor;
 mod monitor_commands;
 mod monitor_control;
@@ -21,15 +24,24 @@ mod settings;
 mod tunnel_recovery;
 mod tunnel_runtime;
 mod tunnel_status;
+#[cfg(windows)]
+mod windows_process_job;
 
 use app_state::{AppState, RuntimePaths, TunnelRecoveryStatus};
 use call_history::{clear_call_history, get_call_history};
 use connection_commands::{
     cancel_connection_intent, clear_saved_key, connect_tunnel, get_status,
-    set_auto_reconnect, stop_requested, stop_tunnel,
+    set_auto_reconnect, stop_all_connections, stop_tunnel,
 };
 use diagnostics_commands::{
     get_mcp_live_status, open_external, open_logs, run_diagnostics,
+};
+use https_mcp::{
+    get_https_mcp_authorizations, get_https_mcp_login_password, get_https_mcp_status,
+    revoke_all_https_mcp_authorizations, revoke_https_mcp_authorization,
+    rotate_https_mcp_login_password, set_https_mcp_authorization_lifetime,
+    set_https_mcp_auto_reconnect,
+    start_https_mcp, stop_https_mcp,
 };
 use monitor_commands::{
     create_monitor_pairing, get_monitor_info, revoke_monitor_device,
@@ -69,7 +81,7 @@ use std::{
 use tauri::{
     menu::{Menu, MenuItem},
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
-    Manager, WindowEvent,
+    Emitter, Manager, WindowEvent,
 };
 
 const RUNTIME_ALIAS: &str = "chatx-local";
@@ -80,6 +92,8 @@ const KEYCHAIN_SERVICE: &str = "com.chatgptx.local.runtime-key";
 const MONITOR_MASTER_KEYCHAIN_SERVICE: &str = "com.chatgptx.local.monitor-master-key";
 #[cfg(all(target_os = "macos", not(test)))]
 const RELAY_KEYCHAIN_SERVICE: &str = "com.chatgptx.local.relay-credentials";
+#[cfg(all(target_os = "macos", not(test)))]
+const HTTPS_OAUTH_KEYCHAIN_SERVICE: &str = "com.chatgptx.local.https-oauth";
 
 #[cfg(all(target_os = "macos", test))]
 const KEYCHAIN_SERVICE: &str = "com.chatgptx.local.runtime-key.tests";
@@ -87,11 +101,15 @@ const KEYCHAIN_SERVICE: &str = "com.chatgptx.local.runtime-key.tests";
 const MONITOR_MASTER_KEYCHAIN_SERVICE: &str = "com.chatgptx.local.monitor-master-key.tests";
 #[cfg(all(target_os = "macos", test))]
 const RELAY_KEYCHAIN_SERVICE: &str = "com.chatgptx.local.relay-credentials.tests";
+#[cfg(all(target_os = "macos", test))]
+const HTTPS_OAUTH_KEYCHAIN_SERVICE: &str = "com.chatgptx.local.https-oauth.tests";
 
 #[cfg(target_os = "macos")]
 const MONITOR_MASTER_KEYCHAIN_ACCOUNT: &str = "master";
 #[cfg(target_os = "macos")]
 const RELAY_KEYCHAIN_ACCOUNT: &str = "desktop";
+#[cfg(target_os = "macos")]
+const HTTPS_OAUTH_KEYCHAIN_ACCOUNT: &str = "master";
 
 const APP_VERSION: &str = env!("CARGO_PKG_VERSION");
 
@@ -418,12 +436,6 @@ fn secret_path(app: &tauri::AppHandle) -> Result<PathBuf, String> { Ok(state_dir
 fn monitor_master_secret_path(app: &tauri::AppHandle) -> Result<PathBuf, String> { Ok(state_dir(app)?.join("monitor-master-key.dpapi")) }
 #[cfg(windows)]
 fn relay_secret_path(app: &tauri::AppHandle) -> Result<PathBuf, String> { Ok(state_dir(app)?.join("relay-credentials.dpapi")) }
-fn call_history_path(app: &tauri::AppHandle) -> Result<PathBuf, String> {
-    Ok(desktop_commander_home(app)?.join(".claude-server-commander").join("tool-history.jsonl"))
-}
-fn monitor_activity_path(app: &tauri::AppHandle) -> Result<PathBuf, String> {
-    Ok(desktop_commander_home(app)?.join(".chatx-monitor").join("activity.json"))
-}
 
 
 fn runtime_binary_name(base: &str) -> String {
@@ -897,7 +909,9 @@ fn schedule_main_window_reclaim(app: tauri::AppHandle) {
 fn stop_on_exit(app: &tauri::AppHandle) {
     let state = app.state::<AppState>();
     state.quitting.store(true, Ordering::SeqCst);
+    let _connections = state.connection_operation.lock();
     stop_relay_client(state.inner());
+    https_mcp::stop_on_exit(state.inner());
     let _ = monitor_manager::stop_monitor_service(state.inner());
     // Exiting ChatX stops the local runtime but preserves the persisted
     // connection intent. Only an explicit Stop action clears that intent.
@@ -917,6 +931,12 @@ fn main() {
         .install_default()
         .expect("failed to install rustls ring crypto provider");
     let app = tauri::Builder::default()
+        // Register first: the second invocation activates the existing window
+        // instead of creating a second set of MCP/SSH processes.
+        .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
+            let handle = app.clone();
+            let _ = app.run_on_main_thread(move || show_main_window(&handle));
+        }))
         .manage(AppState::default())
         .setup(|app| {
             let show_item = MenuItem::with_id(app, "show", "打开 ChatX", true, None::<&str>)?;
@@ -927,7 +947,19 @@ fn main() {
                 .tooltip("ChatX").menu(&menu).show_menu_on_left_click(false)
                 .on_menu_event(|app, event| match event.id().as_ref() {
                     "show" => show_main_window(app),
-                    "stop" => { let state = app.state::<AppState>(); let _ = stop_requested(app, state.inner()); }
+                    "stop" => {
+                        let state = app.state::<AppState>();
+                        if let Err(error) = connection_commands::stop_all_requested(app, state.inner()) {
+                            let message = format!("停止连接未能完全完成：{error}");
+                            push_log(state.inner(), &message);
+                            if let Ok(mut pending) = state.tray_stop_error.lock() {
+                                *pending = Some(message.clone());
+                            }
+                            eprintln!("{message}");
+                            show_main_window(app);
+                            let _ = app.emit("chatx-stop-error", message);
+                        }
+                    }
                     "quit" => { stop_on_exit(app); app.exit(0); }
                     _ => {}
                 })
@@ -941,6 +973,7 @@ fn main() {
             let handle = app.handle().clone();
             let state = app.state::<AppState>();
             restore_persisted_connection_state(&handle, state.inner());
+            https_mcp::restore(&handle, state.inner());
             Ok(())
         })
         .on_window_event(|window, event| {
@@ -958,6 +991,10 @@ fn main() {
         })
         .invoke_handler(tauri::generate_handler![
             get_status, get_mcp_live_status, set_auto_reconnect,
+            get_https_mcp_status, start_https_mcp, stop_https_mcp, get_https_mcp_login_password,
+            get_https_mcp_authorizations, revoke_https_mcp_authorization,
+            revoke_all_https_mcp_authorizations, rotate_https_mcp_login_password,
+            set_https_mcp_authorization_lifetime, set_https_mcp_auto_reconnect,
             get_network_settings, set_network_settings, test_network_settings,
             register_relay_desktop,
             get_monitor_info, set_monitor_enabled, create_monitor_pairing,
@@ -965,7 +1002,7 @@ fn main() {
             get_permission_center, request_all_permissions, open_full_disk_access_settings,
             get_power_settings, set_clamshell_awake,
             get_call_history, clear_call_history,
-            connect_tunnel, stop_tunnel, clear_saved_key,
+            connect_tunnel, stop_tunnel, stop_all_connections, clear_saved_key,
             run_diagnostics, open_logs, open_external
         ])
         .build(tauri::generate_context!()).expect("failed to build ChatX desktop application");

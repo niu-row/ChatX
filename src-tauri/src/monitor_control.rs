@@ -103,6 +103,9 @@ fn trigger_tunnel_reconnect(
     state: &AppState,
 ) -> Result<String, String> {
     let settings = load_settings(app);
+    if settings.https_mcp.enabled {
+        return Err("当前使用 HTTPS MCP，手机不能唤起已关闭的 Tunnel".into());
+    }
     if !settings.connection_intent
         || !state.desired_connected.load(Ordering::SeqCst)
     {
@@ -160,19 +163,30 @@ fn trigger_tunnel_reconnect(
     let app = app.clone();
     thread::spawn(move || {
         let state = app.state::<AppState>();
-        let settings = load_settings(&app);
         push_log(
             state.inner(),
             "手机 Monitor 请求立即重连 Secure MCP Tunnel",
         );
-        let result = start_runtime_connection(
-            &app,
-            state.inner(),
-            &settings.tunnel_id,
-            &key,
-            false,
-            true,
-        );
+        // Remote reconnect must never race the desktop's manual mode
+        // switch. Re-check *after* acquiring the cross-transport mutex.
+        let result = match state.connection_operation.lock() {
+            Err(_) => Err("连接操作锁已损坏".to_string()),
+            Ok(_guard) => {
+                let current = load_settings(&app);
+                if state.quitting.load(Ordering::SeqCst)
+                    || current.https_mcp.enabled
+                    || !current.connection_intent
+                    || !state.desired_connected.load(Ordering::SeqCst)
+                {
+                    Err("已切换至 HTTPS MCP 或手动停止，取消手机触发的 Tunnel 重连".into())
+                } else {
+                    start_runtime_connection(
+                        &app, state.inner(), &current.tunnel_id,
+                        &key, false, true,
+                    )
+                }
+            }
+        };
         let recovered = match &result {
             Ok(()) => {
                 set_recovery_status(state.inner(), "verifying", 0, "");

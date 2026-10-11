@@ -1,11 +1,11 @@
 use super::{
     desktop_commander_home, effective_proxy_url, executable_version,
-    mcp_command, monitor_activity_path, probe_runtime_key_remote,
+    mcp_command, probe_runtime_key_remote,
     runtime_paths, state_dir, timestamp_ms, RuntimeKeyRemoteProbe,
 };
 use crate::{
     app_state::AppState,
-    monitor, monitor_status,
+    mcp_sources, monitor, monitor_status,
     secrets::{key_storage, load_runtime_key, runtime_key_saved},
     settings::load_settings,
     tunnel_status::runtime_status,
@@ -14,15 +14,22 @@ use serde_json::{json, Value};
 use tauri::State;
 
 #[tauri::command]
-pub(super) fn get_mcp_live_status(app: tauri::AppHandle) -> Result<Value, String> {
+pub(super) fn get_mcp_live_status(
+    app: tauri::AppHandle, state: State<'_, AppState>,
+) -> Result<Value, String> {
     let now_ms = timestamp_ms();
-    let activity = monitor_activity_path(&app).ok()
-        .and_then(|path| monitor::read_activity_snapshot(&path));
-    let status = monitor::evaluate_activity(activity.as_ref(), now_ms);
-    let in_flight_calls = monitor_status::in_flight_calls(activity.as_ref(), now_ms);
+    let sources = mcp_sources::activities(&app, state.inner(), now_ms)?;
+    let status = monitor::evaluate_activity(mcp_sources::primary_activity(&sources), now_ms);
+    let mut in_flight_calls = Vec::new();
+    for (source, activity) in &sources {
+        in_flight_calls.extend(monitor_status::in_flight_calls(activity.as_ref(), now_ms)
+            .into_iter().map(|value| mcp_sources::annotate(value, source)));
+    }
+    mcp_sources::sort_recent_by_time(&mut in_flight_calls, 20);
     Ok(json!({
         "serverTime": now_ms,
         "status": status,
+        "transports": mcp_sources::monitor_statuses(&sources, now_ms),
         "recentCalls": in_flight_calls
     }))
 }
@@ -62,8 +69,17 @@ pub(super) fn run_diagnostics(app: tauri::AppHandle, state: State<'_, AppState>)
     let now_ms = timestamp_ms();
     let probe_age = now_ms.saturating_sub(snapshot.last_probe_at);
     checks.push(json!({"name":"Tunnel probe freshness","ok":snapshot.last_probe_at > 0 && probe_age <= 12_000,"detail":format!("{} ms ago; health={}; failures={}", probe_age, snapshot.health, snapshot.consecutive_failures)}));
-    let remote_activity = monitor_activity_path(&app).ok()
-        .and_then(|path| monitor::read_activity_snapshot(&path));
+    let sources = mcp_sources::activities(&app, state.inner(), now_ms)?;
+    let remote_activity = mcp_sources::primary_activity(&sources);
+    for (source, snapshot) in &sources {
+        let last_request = snapshot.as_ref().and_then(|activity| activity.last_request_at);
+        checks.push(json!({
+            "name": format!("{source} MCP activity"),
+            "ok": last_request.is_some(),
+            "detail": last_request.map(|time| format!("last request {} ms ago", now_ms.saturating_sub(time)))
+                .unwrap_or_else(|| "not observed in this transport".into())
+        }));
+    }
     match remote_activity {
         Some(activity) => {
             let launcher_age = activity.launcher_started_at

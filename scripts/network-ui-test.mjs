@@ -72,28 +72,26 @@ const context = vm.createContext({
       }
       if (command === 'set_network_settings') {
         savedPayload = args.payload;
-        const enabled = Boolean(args.payload.relay.enabled);
+        const proxy = args.payload.proxy;
+        const relay = args.payload.relay;
         networkInfo = {
           ...networkInfo,
-          proxy: {
-            ...networkInfo.proxy, ...args.payload.proxy,
-            effectiveUrl: args.payload.proxy.url || null,
-          },
-          relay: {
-            ...networkInfo.relay, ...args.payload.relay,
-            registered: false,
-            credentialSaved: false,
+          proxy: proxy ? {
+            ...networkInfo.proxy, ...proxy, effectiveUrl: proxy.url || null,
+          } : networkInfo.proxy,
+          relay: relay ? {
+            ...networkInfo.relay, ...relay,
+            registered: false, credentialSaved: false,
             status: {
               ...networkInfo.relay.status,
-              enabled, configured: false, connected: false,
+              enabled: relay.enabled, configured: false, connected: false,
               desktopId: null, sessionId: null, lastHeartbeatAt: null,
             },
-          },
-          tunnel: {
+          } : networkInfo.relay,
+          tunnel: proxy ? {
             ...networkInfo.tunnel,
-            proxyMode: args.payload.proxy.mode,
-            proxySource: args.payload.proxy.url || '',
-          },
+            proxyMode: proxy.mode, proxySource: proxy.url || '',
+          } : networkInfo.tunnel,
         };
         return networkInfo;
       }
@@ -134,6 +132,7 @@ vm.runInContext(fs.readFileSync('desktop/api.js', 'utf8'), context);
 vm.runInContext(fs.readFileSync('desktop/state.js', 'utf8'), context);
 vm.runInContext(fs.readFileSync('desktop/pages/calls.js', 'utf8'), context);
 vm.runInContext(fs.readFileSync('desktop/pages/network.js', 'utf8'), context);
+vm.runInContext(fs.readFileSync('desktop/pages/https-mcp.js', 'utf8'), context);
 vm.runInContext(fs.readFileSync('desktop/pages/permissions.js', 'utf8'), context);
 vm.runInContext(fs.readFileSync('desktop/pages/power.js', 'utf8'), context);
 vm.runInContext(fs.readFileSync('desktop/pages/monitor.js', 'utf8'), context);
@@ -148,11 +147,14 @@ element('proxyMode').value = 'manual';
 element('proxyUrl').value = 'http://127.0.0.1:7890';
 element('relayEnabled').checked = true;
 element('relayBaseUrl').value = 'https://relay.example.com';
-vm.runInContext('networkPage.markDirty()', context);
+vm.runInContext('networkPage.markProxyDirty(); networkPage.markRelayDirty()', context);
 
 await vm.runInContext('saveRelaySettings()', context);
-assert.equal(savedPayload.proxy.mode, 'manual');
-assert.equal(savedPayload.proxy.url, 'http://127.0.0.1:7890');
+assert.equal(savedPayload.proxy, undefined,
+  'Saving Relay must not also submit unsaved Tunnel proxy changes');
+assert.equal(networkInfo.proxy.mode, 'direct');
+assert.equal(element('proxyMode').value, 'manual',
+  'Relay save must preserve unsaved proxy edits in the form');
 assert.equal(savedPayload.relay.enabled, true);
 assert.equal(savedPayload.relay.baseUrl, 'https://relay.example.com');
 assert.equal('setupToken' in savedPayload.relay, false);
@@ -167,11 +169,20 @@ assert.equal(element('relayRegistrationFact').textContent, '已注册 · 安全�
 assert.equal(element('registerRelay').textContent, '已注册');
 assert.match(element('relaySessionFact').textContent, /CONNECTED/);
 
+await vm.runInContext('saveNetworkSettings()', context);
+assert.equal(savedPayload.relay, undefined,
+  'Saving Tunnel proxy must not submit the Relay fields');
+assert.equal(savedPayload.proxy.mode, 'manual');
+assert.equal(savedPayload.proxy.url, 'http://127.0.0.1:7890');
+assert.equal(networkInfo.relay.registered, true,
+  'Proxy save must not reset the already registered Relay');
 await vm.runInContext('testNetworkSettings()', context);
+assert.equal(testedPayload.relay, undefined);
 assert.equal(testedPayload.proxy.mode, 'manual');
 assert.match(element('networkTestResult').textContent, /Tunnel OK/);
 
 await vm.runInContext('testRelaySettings()', context);
+assert.equal(testedPayload.proxy, undefined);
 assert.match(element('relayTestResult').textContent, /Relay OK/);
 
 deferNetworkRefresh = true;
