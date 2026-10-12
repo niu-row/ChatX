@@ -2,6 +2,10 @@
 
 ## Unreleased — source refactor (not packaged or deployed)
 
+- Fixed concurrent stateless HTTP MCP calls sharing an OAuth grant and JSON-RPC request ID. Each call now owns an independent cancellation target; ambiguous unscoped cancellation safely returns 409, while `Mcp-Session-Id` identifies an individual session.
+- Added active OAuth grant and access-token expiry checks during tool execution and before results are returned; grant and global revocation now cooperatively cancel in-flight tools. Non-cooperative tool side effects remain non-reversible.
+- Hardened connection mode switching: write both durable Stop markers before transport shutdown and settings persistence to prevent stale reconnect after interrupted or failed switches. Added targeted success, stop/write-failure, and marker-failure Rust tests.
+
 - Added a cross-transport Connection Coordinator for mode switching, durable stop intent, auto/Monitor reconnect serialization, and network settings changes.
 - Centralized Relay/Desktop WSS path/header forwarding policy, protocol versions, legacy limits and v1/v2 control message kinds in the existing relay-protocol crate.
 - Defined a typed HTTPS status DTO while preserving all existing JSON field names and Android compatibility aliases; health and diagnostics use the same snapshot.

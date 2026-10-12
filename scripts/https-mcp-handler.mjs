@@ -10,9 +10,16 @@ export function createMcpHandler({
   // also bounds buffered incoming body bytes across all active JSON requests.
   // This is not a cap on Desktop Commander output or V8 heap usage.
   const requestBudget = createMcpRequestBudget();
-  // Stateless MCP JSON-RPC IDs are unique only within an authorization. Never
-  // allow a different grant to cancel another grant's in-flight request.
+  // JSON-RPC IDs belong to independent client sessions. A single OAuth
+  // grant may have multiple simultaneous HTTP clients using the same ID.
+  // Keep all instances; an ambiguous explicit cancel never guesses a target.
   const activeOperations = new Map();
+  const RECHECK_AUTHORIZATION_MS = 250;
+  function sessionId(req) {
+    const value = req.headers['mcp-session-id'];
+    return typeof value === 'string' && /^[\x21-\x7e]{1,128}$/.test(value)
+      ? value : null;
+  }
   function operationKey(claim, id) {
     if (typeof id === 'string' && id.length > 0 && id.length <= 128) {
       return JSON.stringify([claim.gid ?? 'legacy', claim.sub ?? '', 'string', id]);
@@ -31,6 +38,12 @@ export function createMcpHandler({
         !authStore.activeGrant(claim.gid)) {
       return challenge(res);
     }
+    const grantStillValid = () => {
+      try {
+        return !!authStore.activeGrant(claim.gid) &&
+          Number.isSafeInteger(claim.exp) && claim.exp > Math.floor(Date.now() / 1000);
+      } catch { return false; } // Unreadable grant storage fails closed.
+    };
     if (req.method === 'GET') return text(res, 405, 'SSE not supported', { Allow: 'POST' });
     if (req.method === 'DELETE') return text(res, 405, 'Stateless MCP has no sessions', { Allow: 'POST' });
     if (req.method !== 'POST') return text(res, 405, 'Method Not Allowed', { Allow: 'POST' });
@@ -50,6 +63,8 @@ export function createMcpHandler({
     // Forward it through the MCP SDK so cooperative tools can stop early.
     const upstreamAbort = new AbortController();
     let registeredKey = null;
+    let registeredOperation = null;
+    let revocationWatch = null;
     let bodyDeadline = budget.controlCandidate
       ? setTimeout(() => req.destroy(), 10_000) : null;
     bodyDeadline?.unref();
@@ -94,7 +109,17 @@ export function createMcpHandler({
     if (!Object.hasOwn(request, 'id')) {
       if (request.method === 'notifications/cancelled') {
         const key = operationKey(claim, request.params?.requestId);
-        if (key) activeOperations.get(key)?.abort(
+        const group = key && activeOperations.get(key);
+        const session = sessionId(req);
+        const matches = group ? [...group].filter((operation) =>
+          session === null || operation.session === session) : [];
+        if (matches.length > 1) {
+          // Stateless clients do not always identify their session. With
+          // duplicate IDs it is safer to reject cancellation than to stop
+          // a different client's local file or shell operation.
+          return text(res, 409, 'Ambiguous MCP cancellation: session ID required');
+        }
+        if (matches.length === 1) matches[0].abort.abort(
           new Error('MCP client sent notifications/cancelled'));
       }
       res.writeHead(202); res.end(); return;
@@ -105,12 +130,32 @@ export function createMcpHandler({
     }
     if (request.method === 'tools/call' || request.method === 'tools/list') {
       registeredKey = operationKey(claim, request.id);
-      if (activeOperations.has(registeredKey)) {
-        return text(res, 409, 'Duplicate in-flight MCP request ID');
+      registeredOperation = { abort: upstreamAbort, session: sessionId(req) };
+      let group = activeOperations.get(registeredKey);
+      if (!group) {
+        group = new Set();
+        activeOperations.set(registeredKey, group);
       }
-      activeOperations.set(registeredKey, upstreamAbort);
+      group.add(registeredOperation);
+      const stillAuthorized = () => !upstreamAbort.signal.aborted && grantStillValid();
+      const recheck = () => {
+        if (!stillAuthorized()) upstreamAbort.abort(
+          new Error('MCP authorization revoked or expired'));
+      };
+      // OAuth management runs in another process. Poll the persisted grant
+      // during execution so admin revoke/revoke-all cancels in-flight work.
+      revocationWatch = setInterval(recheck, RECHECK_AUTHORIZATION_MS);
+      revocationWatch.unref();
+      upstreamAbort.signal.addEventListener('abort', () => {
+        if (revocationWatch) clearInterval(revocationWatch);
+      }, { once: true });
+      recheck();
     }
-    if (upstreamAbort.signal.aborted || res.destroyed) return;
+    if (res.destroyed) return;
+    if (upstreamAbort.signal.aborted) {
+      return json(res, 200, { jsonrpc: '2.0', id: request.id,
+        error: { code: -32800, message: 'MCP request cancelled' } });
+    }
     try {
       let result;
       const params = request.params || {};
@@ -143,8 +188,22 @@ export function createMcpHandler({
         }
         default: throw Object.assign(new Error('Method not found'), { code: -32601 });
       }
-      if (upstreamAbort.signal.aborted || res.destroyed) return;
+      if (registeredOperation && !grantStillValid()) {
+        upstreamAbort.abort(new Error('MCP authorization revoked or expired'));
+      }
+      if (res.destroyed) return;
+      if (upstreamAbort.signal.aborted) {
+        return json(res, 200, { jsonrpc: '2.0', id: request.id,
+          error: { code: -32800, message: 'MCP request cancelled' } });
+      }
       const payload = JSON.stringify({ jsonrpc: '2.0', id: request.id, result });
+      // Stringifying a large result can itself take time. Revalidate right
+      // before writing response headers as well as before serialization.
+      if (registeredOperation && !grantStillValid()) {
+        upstreamAbort.abort(new Error('MCP authorization revoked or expired'));
+        return json(res, 200, { jsonrpc: '2.0', id: request.id,
+          error: { code: -32800, message: 'MCP request cancelled' } });
+      }
       if (!budget.reserveResponse(Buffer.byteLength(payload))) {
         return json(res, 200, { jsonrpc: '2.0', id: request.id,
           error: { code: -32603, message: 'MCP response exceeds local buffering budget' } });
@@ -158,6 +217,9 @@ export function createMcpHandler({
       res.end(payload);
     } catch (error) {
       if (res.destroyed) return;
+      if (registeredOperation && !grantStillValid()) {
+        upstreamAbort.abort(new Error('MCP authorization revoked or expired'));
+      }
       if (upstreamAbort.signal.aborted) {
         return json(res, 200, { jsonrpc: '2.0', id: request.id,
           error: { code: -32800, message: 'MCP request cancelled' } });
@@ -169,8 +231,11 @@ export function createMcpHandler({
     }
     } finally {
       if (bodyDeadline) clearTimeout(bodyDeadline);
-      if (registeredKey && activeOperations.get(registeredKey) === upstreamAbort) {
-        activeOperations.delete(registeredKey);
+      if (revocationWatch) clearInterval(revocationWatch);
+      if (registeredKey && registeredOperation) {
+        const group = activeOperations.get(registeredKey);
+        group?.delete(registeredOperation);
+        if (group?.size === 0) activeOperations.delete(registeredKey);
       }
       res.off('close', disconnected);
       req.off('aborted', disconnected);

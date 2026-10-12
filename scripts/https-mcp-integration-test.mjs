@@ -6,6 +6,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import net from 'node:net';
+import http from 'node:http';
 import { spawn, spawnSync } from 'node:child_process';
 import { build } from 'esbuild';
 import { createShutdownCoordinator } from './https-mcp-parent-watch.mjs';
@@ -231,15 +232,25 @@ for await (const line of rl) {
     result = { tools: [{ name: 'echo', description: 'Echo fixture',
       inputSchema: { type: 'object', properties: { value: { type: 'string' } } } }] };
   } else if (req.method === 'tools/call') {
-    if (req.params.arguments?.value === '__cancel__') {
-      fs.writeFileSync(process.env.CHATX_TEST_CANCEL_STARTED, 'yes');
+    if (['__cancel__', '__revoke__'].includes(req.params.arguments?.value)) {
+      const count = fs.existsSync(process.env.CHATX_TEST_CANCEL_STARTED)
+        ? Number(fs.readFileSync(process.env.CHATX_TEST_CANCEL_STARTED, 'utf8')) : 0;
+      fs.writeFileSync(process.env.CHATX_TEST_CANCEL_STARTED, String(count + 1));
       const timer = setTimeout(() => {
         cancelable.delete(req.id);
         fs.writeFileSync(process.env.CHATX_TEST_CANCEL_FINISHED, 'yes');
         process.stdout.write(JSON.stringify({ jsonrpc: '2.0', id: req.id,
           result: { content: [{ type: 'text', text: 'uncanceled' }] } }) + '\\n');
-      }, 900);
+      }, req.params.arguments.value === '__revoke__' ? 3000 : 900);
       cancelable.set(req.id, timer);
+      continue;
+    }
+    if (req.params.arguments?.value?.startsWith('__independent__')) {
+      const value = req.params.arguments.value;
+      setTimeout(() => {
+        process.stdout.write(JSON.stringify({ jsonrpc: '2.0', id: req.id,
+          result: { content: [{ type: 'text', text: value }] } }) + '\\n');
+      }, 600);
       continue;
     }
     if (req.params.arguments?.value === '__hold__') {
@@ -468,6 +479,70 @@ for await (const line of rl) {
     'Explicit notification must propagate to cooperative stdio tools');
   await new Promise((resolve) => setTimeout(resolve, 930));
   assert.equal(fs.existsSync(cancellationFinished), false);
+
+  // Independent sessions under the SAME OAuth grant may reuse JSON-RPC ID.
+  // The gateway must not return 409 for their concurrent tool calls.
+  const concurrentWithSameId = (session, value) => request('/mcp', {
+    method: 'POST', headers: { ...authHeaders, 'mcp-session-id': session },
+    body: JSON.stringify({ jsonrpc: '2.0', id: 700, method: 'tools/call',
+      params: { name: 'echo', arguments: { value } } }),
+  });
+  const concurrentA = concurrentWithSameId('session-A', '__independent__A');
+  const concurrentB = concurrentWithSameId('session-B', '__independent__B');
+  await new Promise((resolve) => setTimeout(resolve, 100));
+  const ambiguous = await request('/mcp', { method: 'POST',
+    headers: authHeaders, body: JSON.stringify({ jsonrpc: '2.0',
+      method: 'notifications/cancelled', params: { requestId: 700 } }),
+  });
+  assert.equal(ambiguous.status, 409,
+    'An unscoped cancel must never choose between duplicate concurrent IDs');
+  const both = await Promise.all([concurrentA, concurrentB]);
+  assert.deepEqual(both.map((response) => response.status), [200, 200]);
+  const bodies = await Promise.all(both.map((response) => response.json()));
+  assert.deepEqual(bodies.map((response) => response.result.content[0].text),
+    ['__independent__A', '__independent__B']);
+  // Stateless clients can also omit MCP-Session-Id altogether. Duplicate IDs
+  // must still run independently even though an explicit cancel is ambiguous.
+  const withoutSession = await Promise.all(['__independent__C', '__independent__D']
+    .map((value) => request('/mcp', { method: 'POST', headers: authHeaders,
+      body: JSON.stringify({ jsonrpc: '2.0', id: 702, method: 'tools/call',
+        params: { name: 'echo', arguments: { value } } }),
+    })));
+  assert.deepEqual(withoutSession.map((response) => response.status), [200, 200]);
+  const withoutSessionBody = await Promise.all(withoutSession.map((res) => res.json()));
+  assert.deepEqual(withoutSessionBody.map((value) => value.result.content[0].text),
+    ['__independent__C', '__independent__D']);
+
+  // Supplying a matching MCP session header makes the cancel unambiguous.
+  for (const file of [cancellationStarted, cancellationNotified, cancellationFinished]) {
+    fs.rmSync(file, { force: true });
+  }
+  const sameIdCall = (session) => request('/mcp', {
+    method: 'POST', headers: { ...authHeaders, 'mcp-session-id': session },
+    body: JSON.stringify({ jsonrpc: '2.0', id: 701, method: 'tools/call',
+      params: { name: 'echo', arguments: { value: '__cancel__' } } }),
+  });
+  const sessionA = sameIdCall('session-A');
+  const sessionB = sameIdCall('session-B');
+  for (let i = 0; i < 70 &&
+       Number(fs.existsSync(cancellationStarted)
+         ? fs.readFileSync(cancellationStarted, 'utf8') : 0) < 2; i++) {
+    await new Promise((resolve) => setTimeout(resolve, 20));
+  }
+  assert.equal(Number(fs.readFileSync(cancellationStarted, 'utf8')), 2);
+  const scopedCancel = await request('/mcp', { method: 'POST',
+    headers: { ...authHeaders, 'mcp-session-id': 'session-A' },
+    body: JSON.stringify({ jsonrpc: '2.0', method: 'notifications/cancelled',
+      params: { requestId: 701 } }),
+  });
+  assert.equal(scopedCancel.status, 202);
+  const results = await Promise.all([sessionA, sessionB]);
+  assert.deepEqual(results.map((response) => response.status), [200, 200]);
+  const outcome = await Promise.all(results.map((response) => response.json()));
+  assert.equal(outcome[0].error?.code, -32800,
+    'A scoped cancel must only affect its own HTTP operation');
+  assert.equal(outcome[1].result?.content?.[0]?.text, 'uncanceled',
+    'A different session using the same JSON-RPC ID must keep executing');
 
   // Streaming transport supports 64 requests, but Node's JSON-RPC materializes
   // results. The local Bridge must refuse excess work instead of buffering
@@ -724,6 +799,105 @@ for await (const line of rl) {
       client_id: clientId, refresh_token: afterTokens.refresh_token })
   });
   assert.equal(afterRenew.status, 400, 'Second global revocation must reject refresh tokens');
+
+  // The admin CLI runs in a different process from the active Bridge.
+  // A persisted per-grant OR global revocation must cooperatively cancel
+  // existing stdio tool calls, not merely reject future HTTP requests.
+  const liveStore = authorizationStore({ directory: storeDir,
+    settingsPath: settingsFile, createLegacyIfMissing: false });
+  for (const action of ['revoke', 'revoke-all']) {
+    const runningGrant = liveStore.createGrant('in-flight-' + action, 168,
+      Date.now(), liveStore.revocationGeneration());
+    const payload = Buffer.from(JSON.stringify({
+      ...firstAccess, gid: runningGrant.id, sub: 'in-flight-' + action,
+      exp: Math.floor(Date.now() / 1000) + 3600,
+    })).toString('base64url');
+    const access = payload + '.' + crypto.createHmac('sha256', signingKey)
+      .update(payload).digest('base64url');
+    const liveHeaders = { ...jsonHeaders, authorization: 'Bearer ' + access };
+    for (const file of [cancellationStarted, cancellationNotified, cancellationFinished]) {
+      fs.rmSync(file, { force: true });
+    }
+    const inFlight = request('/mcp', { method: 'POST', headers: liveHeaders,
+      body: JSON.stringify({ jsonrpc: '2.0', id: 880, method: 'tools/call',
+        params: { name: 'echo', arguments: { value: '__revoke__' } } }),
+    });
+    for (let i = 0; i < 80 && !fs.existsSync(cancellationStarted); i++) {
+      await new Promise((resolve) => setTimeout(resolve, 25));
+    }
+    assert.ok(fs.existsSync(cancellationStarted),
+      'Tool must already be running when admin revokes its grant');
+    const admin = spawnSync(process.execPath,
+      [adminBundle, action, ...(action === 'revoke' ? [runningGrant.id] : [])], {
+        env: { ...process.env, CHATX_MCP_AUTH_STORE: storeDir,
+          CHATX_MCP_SETTINGS_PATH: settingsFile },
+        encoding: 'utf8', timeout: 10000,
+      });
+    assert.equal(admin.status, 0, admin.stderr);
+    for (let i = 0; i < 90 && !fs.existsSync(cancellationNotified); i++) {
+      await new Promise((resolve) => setTimeout(resolve, 25));
+    }
+    assert.ok(fs.existsSync(cancellationNotified),
+      'Persisted ' + action + ' must propagate MCP cancellation to stdio');
+    const result = await inFlight;
+    assert.equal(result.status, 200);
+    assert.equal((await result.json()).error?.code, -32800,
+      'Revoked in-flight tool must not return a successful MCP response');
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    assert.equal(fs.existsSync(cancellationFinished), false,
+      'Cooperative stdio tool must stop after administrative revocation');
+    const forbidden = await request('/mcp', { method: 'POST',
+      headers: liveHeaders,
+      body: JSON.stringify({ jsonrpc: '2.0', id: 881, method: 'ping' }) });
+    assert.equal(forbidden.status, 401, action + ' must forbid future tool requests');
+  }
+
+  // Revoke between HTTP admission and completing a slow JSON upload. The
+  // immediate recheck must answer with cancellation rather than leaving the
+  // accepted HTTP connection open forever without calling Desktop Commander.
+  const uploadGrant = liveStore.createGrant('revoked-during-upload', 168,
+    Date.now(), liveStore.revocationGeneration());
+  const uploadPayload = Buffer.from(JSON.stringify({
+    ...firstAccess, gid: uploadGrant.id, sub: 'revoked-during-upload',
+    exp: Math.floor(Date.now() / 1000) + 3600,
+  })).toString('base64url');
+  const uploadToken = uploadPayload + '.' + crypto.createHmac('sha256', signingKey)
+    .update(uploadPayload).digest('base64url');
+  const uploadBody = JSON.stringify({ jsonrpc: '2.0', id: 882,
+    method: 'tools/call', params: { name: 'echo', arguments: { value: 'should-not-run' } } });
+  const uploadResult = await new Promise((resolve, reject) => {
+    const outgoing = http.request({
+      hostname: '127.0.0.1', port, path: '/mcp', method: 'POST',
+      headers: { ...jsonHeaders, authorization: 'Bearer ' + uploadToken,
+        'content-length': Buffer.byteLength(uploadBody) },
+    }, (response) => {
+      let data = '';
+      response.setEncoding('utf8');
+      response.on('data', (chunk) => { data += chunk; });
+      response.on('end', () => resolve({ status: response.statusCode, data }));
+      response.on('error', reject);
+    });
+    outgoing.on('error', reject);
+    outgoing.setTimeout(5000, () => outgoing.destroy(new Error('Slow revoke request hung')));
+    outgoing.write(uploadBody.slice(0, 12));
+    setTimeout(() => {
+      const admin = spawnSync(process.execPath,
+        [adminBundle, 'revoke', uploadGrant.id], {
+          env: { ...process.env, CHATX_MCP_AUTH_STORE: storeDir,
+            CHATX_MCP_SETTINGS_PATH: settingsFile },
+          encoding: 'utf8', timeout: 10000,
+        });
+      if (admin.status !== 0) {
+        outgoing.destroy(new Error(admin.stderr || 'Admin revoke failed'));
+      } else {
+        outgoing.end(uploadBody.slice(12));
+      }
+    }, 120);
+  });
+  assert.equal(uploadResult.status, 200);
+  assert.equal(JSON.parse(uploadResult.data).error?.code, -32800,
+    'Revocation while receiving a request must produce bounded cancellation');
+
   // Invalid requests spread across a modest number of IPs must not
   // exhaust the global budget and block a legitimate OAuth login.
   for (let index = 1; index <= 30; index++) {

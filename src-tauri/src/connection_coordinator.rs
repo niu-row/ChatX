@@ -8,6 +8,24 @@ use crate::{
 };
 use std::sync::{Mutex, MutexGuard};
 
+// Persist BOTH durable Stop markers before shutting anything down. When a
+// settings write fails or the process crashes between stop/start, neither the
+// old nor the newly selected mode may reconnect from stale saved intent.
+fn stage_mode_switch(
+    target: Transport,
+    mut mark_stopped: impl FnMut(Transport) -> Result<(), String>,
+    stop_existing: impl FnOnce() -> Result<(), String>,
+    persist_disabled: impl FnOnce() -> Result<(), String>,
+) -> Result<(), String> {
+    mark_stopped(target)?;
+    mark_stopped(match target {
+        Transport::HttpsMcp => Transport::Tunnel,
+        Transport::Tunnel => Transport::HttpsMcp,
+    })?;
+    stop_existing()?;
+    persist_disabled()
+}
+
 #[derive(Default)]
 pub(super) struct ConnectionCoordination {
     pub(super) operation: Mutex<()>,
@@ -41,31 +59,37 @@ impl<'a> ConnectionCoordinator<'a> {
     // precedes process termination; an interrupted settings write must not
     // silently restore the old transport after restarting ChatX.
     pub(super) fn prepare_https(&self) -> Result<(), String> {
-        connection_intent::mark_stopped(self.app, Transport::Tunnel)?;
-        crate::https_mcp::stop_on_exit(self.state);
-        let previous = load_settings(self.app);
-        crate::tunnel_runtime::stop_tunnel_without_saving(
-            self.app, self.state, &previous,
-        )?;
-        update_settings(self.app, |settings| {
-            settings.connection_intent = false;
-            settings.https_mcp.enabled = false;
-            Ok(())
-        })?;
-        Ok(())
+        stage_mode_switch(
+            Transport::HttpsMcp,
+            |mode| connection_intent::mark_stopped(self.app, mode),
+            || {
+                crate::https_mcp::stop_on_exit(self.state);
+                let previous = load_settings(self.app);
+                crate::tunnel_runtime::stop_tunnel_without_saving(
+                    self.app, self.state, &previous,
+                )
+            },
+            || update_settings(self.app, |settings| {
+                settings.connection_intent = false;
+                settings.https_mcp.enabled = false;
+                Ok(())
+            }).map(|_| ()),
+        )
     }
 
     // Called before starting the legacy Secure MCP Tunnel. HTTPS can never
     // resume from stale saved intent while the Tunnel operation is pending.
     pub(super) fn prepare_tunnel(&self) -> Result<(), String> {
-        connection_intent::mark_stopped(self.app, Transport::HttpsMcp)?;
-        crate::https_mcp::stop_on_exit(self.state);
-        update_settings(self.app, |settings| {
-            settings.https_mcp.enabled = false;
-            settings.connection_intent = false;
-            Ok(())
-        })?;
-        Ok(())
+        stage_mode_switch(
+            Transport::Tunnel,
+            |mode| connection_intent::mark_stopped(self.app, mode),
+            || { crate::https_mcp::stop_on_exit(self.state); Ok(()) },
+            || update_settings(self.app, |settings| {
+                settings.https_mcp.enabled = false;
+                settings.connection_intent = false;
+                Ok(())
+            }).map(|_| ()),
+        )
     }
 
     pub(super) fn stop_all(&self) -> Result<(), String> {
@@ -96,5 +120,84 @@ impl<'a> ConnectionCoordinator<'a> {
         }
         crate::push_log(self.state, "已停止全部 MCP 连接");
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::cell::RefCell;
+
+    #[test]
+    fn markers_precede_shutdown_and_persistence_for_both_switches() {
+        for target in [Transport::Tunnel, Transport::HttpsMcp] {
+            let stages = RefCell::new(Vec::new());
+            stage_mode_switch(target,
+                |mode| {
+                    stages.borrow_mut().push(match mode {
+                        Transport::Tunnel => "marker-tunnel",
+                        Transport::HttpsMcp => "marker-https",
+                    });
+                    Ok(())
+                },
+                || { stages.borrow_mut().push("stop"); Ok(()) },
+                || { stages.borrow_mut().push("persist"); Ok(()) },
+            ).unwrap();
+            let expected = if matches!(target, Transport::Tunnel) {
+                vec!["marker-tunnel", "marker-https", "stop", "persist"]
+            } else {
+                vec!["marker-https", "marker-tunnel", "stop", "persist"]
+            };
+            assert_eq!(*stages.borrow(), expected);
+        }
+    }
+
+    #[test]
+    fn marker_failure_never_stops_an_existing_transport() {
+        for failed_at in [0, 1] {
+            let calls = RefCell::new(Vec::new());
+            let result = stage_mode_switch(Transport::HttpsMcp,
+                |_| {
+                    let mut values = calls.borrow_mut();
+                    let index = values.len();
+                    values.push("marker");
+                    if index == failed_at { Err("disk error".into()) }
+                    else { Ok(()) }
+                },
+                || { calls.borrow_mut().push("stop"); Ok(()) },
+                || { calls.borrow_mut().push("persist"); Ok(()) },
+            );
+            assert!(result.is_err());
+            assert_eq!(calls.borrow().len(), failed_at + 1);
+        }
+    }
+
+    #[test]
+    fn stop_or_save_failure_leaves_both_durable_markers() {
+        for failed_stage in ["stop", "persist"] {
+            let stages = RefCell::new(Vec::new());
+            let result = stage_mode_switch(Transport::Tunnel,
+                |mode| {
+                    stages.borrow_mut().push(match mode {
+                        Transport::Tunnel => "marker-tunnel",
+                        Transport::HttpsMcp => "marker-https",
+                    });
+                    Ok(())
+                },
+                || {
+                    stages.borrow_mut().push("stop");
+                    if failed_stage == "stop" { Err("failed to stop".into()) }
+                    else { Ok(()) }
+                },
+                || {
+                    stages.borrow_mut().push("persist");
+                    if failed_stage == "persist" { Err("write denied".into()) }
+                    else { Ok(()) }
+                },
+            );
+            assert!(result.is_err());
+            assert_eq!(&stages.borrow()[..2], ["marker-tunnel", "marker-https"]);
+            assert_eq!(stages.borrow().last(), Some(&failed_stage));
+        }
     }
 }

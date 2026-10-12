@@ -31,7 +31,11 @@ is intentionally not included.
   process shutdown and settings updates. Tunnel and HTTPS workers retain
   their separate transport-specific implementations; manual, automatic,
   Monitor-initiated and network-reconfiguration entry points use the same
-  coordination lock.
+  coordination lock. Before switching modes, the coordinator writes **both**
+  durable Stop markers, then stops the previous transport and persists the
+  disabled state. A failed stop or settings write therefore cannot resurrect
+  either stale mode on app restart; only a successful start clears its own
+  marker. The ordering and failure paths have local Rust regression tests.
 - `connection_health.rs` is the single health predicate shared by desktop
   `get_status`, `get_https_mcp_status` and Android Monitor.
   `status_contract.rs` defines the typed, backward-compatible camelCase
@@ -96,10 +100,18 @@ accounts for up to **80 MiB total buffered incoming wire bytes** and
 bounded JSON-RPC error on saturation. This is **not** a strict V8/SDK heap
 ceiling: Desktop Commander tool results are materialized before serialization.
 The Bridge forwards both HTTP disconnects and explicit stateless MCP
-`notifications/cancelled` messages to the SDK. Explicit cancellations are
-matched by OAuth grant, subject and JSON-RPC request ID, not just the ID.
-Actual tool termination remains **cooperative**: cancellation never guarantees
-rollback of files or shell side effects.
+`notifications/cancelled` messages to the SDK. Concurrent independent
+requests **may reuse the same JSON-RPC ID within one OAuth grant**. Each
+request owns its own cancellation controller; when a client supplies the
+standard `Mcp-Session-Id` header, an explicit cancellation is scoped to
+that session. Without a session ID, an ambiguous cancellation returns HTTP
+409 rather than guessing and stopping the wrong tool. A different OAuth grant
+can never cancel another grant's work.
+A 250 ms in-flight grant/expiry recheck detects durable per-grant and global
+OAuth revocation from the separate administration process, sends a
+cooperative MCP cancellation, and revalidates permission before returning
+successful tool data. This is **not an atomic rollback mechanism**: a tool
+that ignores cancellation may continue making local file or shell changes.
 
 Incoming Node requests have a 600-second timeout; the Relay request/stream
 timeouts are 605 seconds; Nginx MCP timeout is 630 seconds.
