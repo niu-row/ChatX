@@ -84,6 +84,13 @@ class MonitorService : Service() {
 
     private fun restartConnection() {
         connectionGeneration += 1 // Invalidate callbacks from the old worker first.
+        val previous = activePairing
+        val replacement = store.loadPairing()
+        if (previous != null &&
+            (replacement == null || !previous.sameCredentialIdentity(replacement))
+        ) {
+            synchronized(alertDispatchLock) { alertEngine.resetForNewPairing() }
+        }
         connection?.stop()
         connection = null
         activePairing = null
@@ -146,15 +153,13 @@ class MonitorService : Service() {
     ) {
         if (!isActivePairing(config, generation)) return
         val json = StatusCodec.snapshot(snapshot)
-        if (!store.setLastSnapshotJson(
-                config.desktopId,
-                config.deviceId,
-                json,
-            )
-        ) {
+        if (!store.setLastSnapshotJson(config, json)) {
             return
         }
-        connection?.updateRoutes(snapshot.endpoints)
+        // Bind this route update to the snapshot's original credentials.
+        // The manager field may already reference a NEW pairing after reload.
+        store.updateDirectEndpoints(config, snapshot.endpoints)
+        if (!isActivePairing(config, generation)) return
         updateForegroundStatus(StatusCodec.foregroundText(snapshot))
         synchronized(alertDispatchLock) {
             val thresholds = store.getAlertThresholds()
@@ -170,9 +175,8 @@ class MonitorService : Service() {
     private fun isActivePairing(config: PairingConfig, generation: Long): Boolean {
         if (generation != connectionGeneration) return false
         val active = activePairing ?: return false
-        return active.desktopId == config.desktopId &&
-            active.deviceId == config.deviceId &&
-            store.hasPairing(config.desktopId, config.deviceId)
+        return active.sameCredentialIdentity(config) &&
+            store.hasPairing(config)
     }
 
     private fun handleTransportState(
@@ -203,12 +207,7 @@ class MonitorService : Service() {
             state.phase in setOf("desktop_offline", "reconnecting", "degraded")
         ) {
             val json = StatusCodec.transportError(state)
-            if (!store.setLastSnapshotJson(
-                    config.desktopId,
-                    config.deviceId,
-                    json,
-                )
-            ) {
+            if (!store.setLastSnapshotJson(config, json)) {
                 return
             }
             broadcast(json)
@@ -248,7 +247,9 @@ class MonitorService : Service() {
                 }.onFailure { Log.e(TAG, "Failed to restore Monitor polling", it) }
             }
         }
-        if (!transportReachable) checkOfflineAlerts()
+        if (!transportReachable &&
+            activePairing?.let(store::hasPairing) == true
+        ) checkOfflineAlerts()
     }
 
     private fun checkOfflineAlerts() = synchronized(alertDispatchLock) {

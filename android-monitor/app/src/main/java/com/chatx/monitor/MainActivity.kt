@@ -133,6 +133,9 @@ class MainActivity : Activity() {
             store,
             object : PairingActionController.Listener {
                 override fun onPairingSucceeded(config: PairingConfig) {
+                    // An existing foreground monitor must stop using old
+                    // credentials as soon as this pairing replaces them.
+                    if (store.isMonitorServiceRunning()) MonitorService.reload(this@MainActivity)
                     pairingInput?.setText("")
                     latestStatusJson = null
                     endpointHealth = null
@@ -140,6 +143,10 @@ class MainActivity : Activity() {
                     currentPage = Page.OVERVIEW
                     toast("ChatX 已安全配对。")
                     renderApp()
+                    // The old action controller may still have an in-flight
+                    // refresh or reconnect for the previous credentials.
+                    actions.close()
+                    actions = buildActionController()
                     actions.refresh(config)
                 }
 
@@ -147,13 +154,20 @@ class MainActivity : Activity() {
                     toast(message)
                 }
 
-                override fun onRevokeSucceeded() {
-                    clearLocalPairing()
-                    toast("此设备已删除。")
+                override fun onRevokeSucceeded(removedCurrentPairing: Boolean) {
+                    latestStatusJson = store.getLastSnapshotJson()
+                    endpointHealth = null
+                    currentPage = Page.OVERVIEW
+                    renderApp()
+                    toast(
+                        if (removedCurrentPairing) "此设备已删除。"
+                        else "旧设备已撤销，当前新配对已保留。",
+                    )
                 }
 
-                override fun onRevokeFailed(message: String) {
-                    confirmLocalOnlyDelete(message)
+                override fun onRevokeFailed(config: PairingConfig, message: String) {
+                    if (store.hasPairing(config)) confirmLocalOnlyDelete(config, message)
+                    else toast("旧设备撤销未完成，当前新配对保持不变。")
                 }
             },
         )
@@ -1287,7 +1301,7 @@ class MainActivity : Activity() {
             .show()
     }
 
-    private fun confirmLocalOnlyDelete(reason: String) {
+    private fun confirmLocalOnlyDelete(config: PairingConfig, reason: String) {
         AlertDialog.Builder(this)
             .setTitle("远端撤销未完成")
             .setMessage(
@@ -1296,15 +1310,17 @@ class MainActivity : Activity() {
             )
             .setNegativeButton("保留配对", null)
             .setPositiveButton("仅清除此手机") { _, _ ->
-                clearLocalPairing()
+                clearLocalPairing(config)
             }
             .show()
     }
 
-    private fun clearLocalPairing() {
+    private fun clearLocalPairing(config: PairingConfig) {
+        if (!store.clearPairingIfMatches(config)) {
+            toast("配对已更换，新设备未删除。")
+            return
+        }
         MonitorService.stop(this)
-        store.clearPairing()
-        store.setContinuousMode(false)
         latestStatusJson = null
         endpointHealth = null
         currentPage = Page.OVERVIEW

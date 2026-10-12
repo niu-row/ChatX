@@ -1,6 +1,7 @@
 package com.chatx.monitor
 
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -88,6 +89,54 @@ class MonitorRoutePlannerTest {
                 "?desktopId=$desktopId&deviceId=$deviceId",
             relay.controlUrl,
         )
+    }
+
+
+    @Test
+    fun replacementPairingCannotLendRoutesOrRelayTokenToOldManager() {
+        val current = config()
+        val replaced = current.copy(
+            // Some re-pairing and token-rotation paths can reuse IDs.
+            directToken = "ff".repeat(32),
+            relay = current.relay!!.copy(deviceToken = "ee".repeat(32)),
+        )
+        assertFalse(current.sameCredentialIdentity(replaced))
+        assertTrue(MonitorRoutePlanner.candidates(current, replaced).isEmpty())
+
+        val rotatedKey = current.copy(deviceKey = "different-e2ee-key")
+        assertFalse(current.sameCredentialIdentity(rotatedKey))
+        assertTrue(MonitorRoutePlanner.candidates(current, rotatedKey).isEmpty())
+
+        val rotatedTls = current.copy(fingerprintSha256 = "aa".repeat(32))
+        assertFalse(current.sameCredentialIdentity(rotatedTls))
+        assertTrue(MonitorRoutePlanner.candidates(current, rotatedTls).isEmpty())
+    }
+
+    @Test
+    fun endpointDiscoveryCanRefreshRoutesWithoutChangingPairingIdentity() {
+        val current = config()
+        val updatedRoutes = current.copy(
+            directEndpoints = current.directEndpoints.filter { it.kind == "ipv6" },
+        )
+        assertTrue(current.sameCredentialIdentity(updatedRoutes))
+        val candidates = MonitorRoutePlanner.candidates(current, updatedRoutes)
+        assertEquals(2, candidates.size)
+        assertEquals(1, candidates.count { it.relay })
+        assertEquals(1, candidates.count { it.kind == "ipv6" })
+    }
+
+    @Test
+    fun directEndpointsAcceptNumericIpsWithoutLookingUpArbitraryDns() {
+        val lan = config().directEndpoints.first { it.kind == "lan" && it.interfaceName == "Wi-Fi" }
+        val ipv6 = config().directEndpoints.first { it.kind == "ipv6" }
+        assertTrue(lan.isSupportedDirectRoute())
+        assertTrue(ipv6.isSupportedDirectRoute())
+        assertFalse(lan.copy(url = "wss://internal-host.example:18432/v1/ws/monitor")
+            .isSupportedDirectRoute())
+        assertFalse(lan.copy(url = "wss://999.168.1.4:18432/v1/ws/monitor")
+            .isSupportedDirectRoute())
+        assertFalse(ipv6.copy(url = "wss://[fe80::1]:18432/v1/ws/monitor")
+            .isSupportedDirectRoute())
     }
 
     @Test

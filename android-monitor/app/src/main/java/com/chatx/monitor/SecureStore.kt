@@ -21,16 +21,16 @@ class SecureStore(context: Context) {
         val editor = prefs.edit()
             .putString("pairing_iv", Base64.encodeToString(cipher.iv, Base64.NO_WRAP))
             .putString("pairing_data", Base64.encodeToString(encrypted, Base64.NO_WRAP))
-        if (previous == null ||
-            previous.desktopId != config.desktopId ||
-            previous.deviceId != config.deviceId ||
-            previous.deviceKey != config.deviceKey ||
-            previous.directToken != config.directToken
-        ) {
+        if (previous == null || !previous.sameCredentialIdentity(config)) {
             editor.remove("last_snapshot")
                 .remove("last_good_server_time")
                 .remove("last_good_received_at")
                 .remove("last_endpoint")
+            // Continuous monitoring is a user preference, but its elapsed
+            // gap window must begin anew for a different pairing identity.
+            if (prefs.getBoolean("continuous_mode", false)) {
+                editor.putLong("continuous_mode_started_at", System.currentTimeMillis())
+            }
         }
         editor.apply()
     }
@@ -49,13 +49,19 @@ class SecureStore(context: Context) {
         }.getOrNull()
     }
 
-    fun hasPairing(
-        expectedDesktopId: String,
-        expectedDeviceId: String,
-    ): Boolean = synchronized(PAIRING_LOCK) {
-        val current = loadPairing() ?: return@synchronized false
-        current.desktopId == expectedDesktopId &&
-            current.deviceId == expectedDeviceId
+    fun hasPairing(expected: PairingConfig): Boolean = synchronized(PAIRING_LOCK) {
+        loadPairing()?.sameCredentialIdentity(expected) == true
+    }
+
+    /**
+     * A revoke belongs to the credentials captured when it started.
+     * Never delete a newly imported/re-paired identity on an old async result.
+     */
+    fun clearPairingIfMatches(expected: PairingConfig): Boolean = synchronized(PAIRING_LOCK) {
+        if (!hasPairing(expected)) return@synchronized false
+        clearPairing()
+        setContinuousMode(false)
+        true
     }
 
     fun clearPairing() = synchronized(PAIRING_LOCK) {
@@ -74,18 +80,12 @@ class SecureStore(context: Context) {
     }
 
     fun updateDirectEndpoints(
-        expectedDesktopId: String,
-        expectedDeviceId: String,
+        expected: PairingConfig,
         endpoints: List<MonitorEndpoint>,
     ): Boolean = synchronized(PAIRING_LOCK) {
         if (endpoints.isEmpty()) return@synchronized false
         val current = loadPairing() ?: return@synchronized false
-        if (
-            current.desktopId != expectedDesktopId ||
-            current.deviceId != expectedDeviceId
-        ) {
-            return@synchronized false
-        }
+        if (!current.sameCredentialIdentity(expected)) return@synchronized false
         val normalized = endpoints
             .filter {
                 it.isSupportedDirectRoute() &&
@@ -105,17 +105,11 @@ class SecureStore(context: Context) {
     fun getLastEndpoint(): String? = prefs.getString("last_endpoint", null)
 
     fun setLastEndpoint(
-        expectedDesktopId: String,
-        expectedDeviceId: String,
+        expected: PairingConfig,
         url: String,
     ): Boolean = synchronized(PAIRING_LOCK) {
         val current = loadPairing() ?: return@synchronized false
-        if (
-            current.desktopId != expectedDesktopId ||
-            current.deviceId != expectedDeviceId
-        ) {
-            return@synchronized false
-        }
+        if (!current.sameCredentialIdentity(expected)) return@synchronized false
         prefs.edit().putString("last_endpoint", url).apply()
         true
     }
@@ -174,17 +168,11 @@ class SecureStore(context: Context) {
     }
 
     fun setLastSnapshotJson(
-        expectedDesktopId: String,
-        expectedDeviceId: String,
+        expected: PairingConfig,
         value: String,
     ): Boolean = synchronized(PAIRING_LOCK) {
         val current = loadPairing() ?: return@synchronized false
-        if (
-            current.desktopId != expectedDesktopId ||
-            current.deviceId != expectedDeviceId
-        ) {
-            return@synchronized false
-        }
+        if (!current.sameCredentialIdentity(expected)) return@synchronized false
         val incoming = runCatching { org.json.JSONObject(value) }.getOrNull()
         val now = System.currentTimeMillis()
         val editor = prefs.edit().putString("last_snapshot", value)

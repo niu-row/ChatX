@@ -16,11 +16,7 @@ class MonitorRepository(context: Context) {
             context = appContext,
             config = config,
         )
-        store.updateDirectEndpoints(
-            config.desktopId,
-            config.deviceId,
-            snapshot.endpoints,
-        )
+        store.updateDirectEndpoints(config, snapshot.endpoints)
         return snapshot
     }
 

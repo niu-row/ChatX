@@ -95,14 +95,6 @@ class MonitorConnectionManager(
 
     override fun close() = stop()
 
-    fun updateRoutes(endpoints: List<MonitorEndpoint>) {
-        store.updateDirectEndpoints(
-            config.desktopId,
-            config.deviceId,
-            endpoints,
-        )
-    }
-
     fun reevaluatePolicy() {
         if (!stopped.get()) scheduler.execute { pollCycle() }
     }
@@ -303,11 +295,7 @@ class MonitorConnectionManager(
             preferredRecoverySuccesses = 0
         }
         if (persistActiveRoute) {
-            store.setLastEndpoint(
-                config.desktopId,
-                config.deviceId,
-                candidate.snapshotUrl,
-            )
+            store.setLastEndpoint(config, candidate.snapshotUrl)
         }
         listener.onTransportState(
             MonitorTransportState(
@@ -412,7 +400,7 @@ class MonitorConnectionManager(
 
     private fun candidates(): List<MonitorRouteCandidate> {
         val latest = if (dynamicRoutes) {
-            store.loadPairing() ?: config
+            store.loadPairing() ?: return emptyList()
         } else {
             config
         }
@@ -467,6 +455,8 @@ class MonitorConnectionManager(
                     override fun onSnapshot(snapshot: MonitorSnapshot) = Unit
                     override fun onRevoked() { latch.countDown() }
                 },
+                dynamicRoutes = false,
+                persistActiveRoute = false,
             )
             manager.requestSelfRevoke()
             val completed = try {

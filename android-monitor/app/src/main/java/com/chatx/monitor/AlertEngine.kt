@@ -25,6 +25,18 @@ class AlertEngine {
     private var httpsDownSince: Long? = null
     private var stalledNotified = false
 
+    /** Forget alert state from an old desktop when credentials are replaced. */
+    @Synchronized
+    fun resetForNewPairing() {
+        offlineSince = null
+        offlineThresholdsSent.clear()
+        gapThresholdsSent.clear()
+        tunnelDownNotified = false
+        httpsDownNotified = false
+        httpsDownSince = null
+        stalledNotified = false
+    }
+
     @Synchronized
     fun onUnreachable(now: Long, thresholds: Set<Long>): List<AlertEvent> {
         val startedAt = offlineSince ?: now.also { offlineSince = it }

@@ -16,6 +16,9 @@ object MonitorRoutePlanner {
         identity: PairingConfig,
         routes: PairingConfig = identity,
     ): List<MonitorRouteCandidate> = buildList {
+        // A running manager may reload endpoints, but it must not borrow a
+        // replacement pairing's Relay token or direct routes.
+        if (!identity.sameCredentialIdentity(routes)) return@buildList
         routes.directEndpoints
             .filter(MonitorEndpoint::isSupportedDirectRoute)
             .forEach { endpoint ->

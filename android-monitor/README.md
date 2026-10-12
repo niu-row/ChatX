@@ -18,6 +18,8 @@ ChatX Monitor 是以只读监控为主的 ChatX Desktop 手机客户端，并提
 - Relay 设备撤销使用 `revoke.sync`，只有 Desktop 本地凭据撤销确认后 Relay 才删除远端凭据并向手机返回成功；已撤销的 Direct/Relay 会话会停止接收新 Snapshot。
 - Android release 仅接受 HTTPS/WSS Relay URL；LAN Direct 继续使用证书指纹固定的 HTTPS/WSS。
 - 配对、撤销和手动控制使用生命周期绑定的 controller；旧配对产生的异步 endpoint/Snapshot 结果不能覆盖或复活已删除/已替换的 pairing。
+- 同一 Desktop / Device ID 重新配对、轮换 TLS 指纹或 Token 后，旧配对的延迟撤销、手动刷新、轮询和路由缓存都不能删除或污染新的凭据。判断依据包含实际设备密钥、令牌和 TLS 指纹。重配对也会重置旧设备的离线与 MCP 中断告警计时，而不影响普通网络重连的告警连续性。
+- Direct 端点只接受本地网络的数字 IPv4 / 全局 IPv6 地址，解析已保存的配对资料不会在 UI 线程触发 DNS 查询。配对响应也执行与本地保存资料相同的身份和令牌校验。
 - 区分 Host Offline、Tunnel Down、MCP GAP、MCP STALLED。
 - 支持 1 / 2 / 3 / 5 分钟中断告警与恢复通知。
 

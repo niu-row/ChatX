@@ -50,10 +50,14 @@ class MonitorActionController(
                 selector.complete(fresh, json)
             } ?: return
             choice.json?.let { selected ->
-                store.setLastSnapshotJson(config.desktopId, config.deviceId, selected)
+                store.setLastSnapshotJson(config, selected)
             }
             post {
                 refreshing.set(false)
+                if (!store.hasPairing(config)) {
+                    listener.onStateChanged()
+                    return@post
+                }
                 if (choice.json != null) {
                     listener.onSnapshot(store.getLastSnapshotJson() ?: choice.json)
                 } else {
@@ -107,11 +111,7 @@ class MonitorActionController(
                 ).execute("reconnect_tunnel", timeoutSeconds = 5L)
                 val initialJson = controlSnapshotJson(config, result)
                 if (initialJson != null) {
-                    store.setLastSnapshotJson(
-                        config.desktopId,
-                        config.deviceId,
-                        initialJson,
-                    )
+                    store.setLastSnapshotJson(config, initialJson)
                 }
                 if (!result.ok) {
                     initialJson to (
@@ -123,6 +123,10 @@ class MonitorActionController(
             }
             post {
                 reconnecting.set(false)
+                if (!store.hasPairing(config)) {
+                    listener.onStateChanged()
+                    return@post
+                }
                 val outcome = attempt.getOrNull()
                 val json = outcome?.first
                 if (json != null) listener.onSnapshot(store.getLastSnapshotJson() ?: json)
@@ -182,11 +186,7 @@ class MonitorActionController(
             endpointUrl = result.endpointUrl,
             transportKind = result.transportKind,
         )
-        store.updateDirectEndpoints(
-            config.desktopId,
-            config.deviceId,
-            snapshot.endpoints,
-        )
+        store.updateDirectEndpoints(config, snapshot.endpoints)
         return StatusCodec.snapshot(snapshot)
     }
 
@@ -202,11 +202,7 @@ class MonitorActionController(
                 MonitorRepository(appContext).fetchSnapshot()
             }.getOrNull() ?: continue
             latestJson = StatusCodec.snapshot(snapshot)
-            store.setLastSnapshotJson(
-                config.desktopId,
-                config.deviceId,
-                latestJson,
-            )
+            store.setLastSnapshotJson(config, latestJson)
             if (snapshot.tunnel.active && snapshot.tunnel.health == "healthy") {
                 return latestJson to "Tunnel 已恢复 Ready。"
             }

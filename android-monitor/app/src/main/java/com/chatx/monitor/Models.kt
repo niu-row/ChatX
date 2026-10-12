@@ -125,6 +125,19 @@ data class PairingConfig(
     }
 }
 
+/**
+ * Identity for asynchronous work. Endpoint discovery may change routes, but
+ * changed device keys, bearer tokens or TLS pins are a NEW pairing even when
+ * the desktop/device IDs are reused.
+ */
+fun PairingConfig.sameCredentialIdentity(other: PairingConfig): Boolean =
+    desktopId == other.desktopId &&
+        deviceId == other.deviceId &&
+        fingerprintSha256 == other.fingerprintSha256 &&
+        directToken == other.directToken &&
+        deviceKey == other.deviceKey &&
+        relay == other.relay
+
 data class RelayPairingRoute(
     val baseUrl: String,
     val url: String,
@@ -250,6 +263,15 @@ fun MonitorEndpoint.isSupportedDirectRoute(): Boolean {
     if (!url.startsWith("wss://") || isVirtualInterfaceName(interfaceName)) return false
     val address = runCatching {
         val host = URI(url).host ?: return@runCatching null
+        // Direct Monitor endpoints advertised by Desktop are numeric LAN /
+        // global IPv6 addresses. Reject DNS names *before* getByName: this
+        // predicate is also reached by MainActivity's Keystore read path.
+        // A DNS lookup here can block the UI and resolve to a new IP later.
+        val literal = host.removePrefix("[").removeSuffix("]")
+        val ipv4 = Regex("""[0-9]{1,3}(\.[0-9]{1,3}){3}""").matches(literal) &&
+            literal.split('.').all { (it.toIntOrNull() ?: 256) in 0..255 }
+        val ipv6 = ':' in literal && literal.matches(Regex("[0-9a-fA-F:.]+"))
+        if (!ipv4 && !ipv6) return@runCatching null
         InetAddress.getByName(host)
     }.getOrNull() ?: return false
 

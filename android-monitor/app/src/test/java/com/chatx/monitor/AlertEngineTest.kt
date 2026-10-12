@@ -166,6 +166,26 @@ class AlertEngineTest {
     }
 
     @Test
+    fun replacingPairingDropsOldOfflineRecoveryAndAlertDedupe() {
+        val engine = AlertEngine()
+        val thresholds = setOf(60_000L)
+        assertTrue(engine.onUnreachable(1_000_000L, thresholds).isEmpty())
+        assertEquals(1, engine.onUnreachable(1_061_000L, thresholds)
+            .count { it.type == AlertType.HOST_OFFLINE })
+
+        engine.resetForNewPairing()
+        assertTrue(engine.onSnapshot(snapshot(receivedAt = 1_070_000L), thresholds)
+            .none { it.type == AlertType.RECOVERED })
+
+        val oldGap = snapshot(mcpState = "gap", gapMs = 65_000L)
+        assertEquals(1, engine.onSnapshot(oldGap, thresholds)
+            .count { it.type == AlertType.MCP_GAP })
+        engine.resetForNewPairing()
+        assertEquals(1, engine.onSnapshot(oldGap, thresholds)
+            .count { it.type == AlertType.MCP_GAP })
+    }
+
+    @Test
     fun continuousModeTurnsIdleIntoGapWatch() {
         val engine = AlertEngine()
         val snapshot = snapshot(

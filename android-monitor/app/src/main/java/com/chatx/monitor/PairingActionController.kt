@@ -15,8 +15,8 @@ class PairingActionController(
     interface Listener {
         fun onPairingSucceeded(config: PairingConfig)
         fun onPairingFailed(message: String)
-        fun onRevokeSucceeded()
-        fun onRevokeFailed(message: String)
+        fun onRevokeSucceeded(removedCurrentPairing: Boolean)
+        fun onRevokeFailed(config: PairingConfig, message: String)
     }
 
     private val appContext = context.applicationContext
@@ -55,15 +55,15 @@ class PairingActionController(
                     appContext,
                     config,
                 )
-                store.clearPairing()
-                store.setContinuousMode(false)
+                store.clearPairingIfMatches(config)
             }
             post {
                 revoking.set(false)
                 result.fold(
-                    onSuccess = { listener.onRevokeSucceeded() },
+                    onSuccess = listener::onRevokeSucceeded,
                     onFailure = { error ->
                         listener.onRevokeFailed(
+                            config,
                             error.message ?: "无法连接 ChatX 撤销设备。",
                         )
                     },

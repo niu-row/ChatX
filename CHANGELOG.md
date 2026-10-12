@@ -2,6 +2,9 @@
 
 ## Unreleased — source refactor (not packaged or deployed)
 
+- Android Monitor: prevent late revoke/poll/refresh callbacks from deleting or overwriting a replacement pairing even if Desktop/Device IDs are reused. Guard secure-store writes with the full credential identity and refresh the monitoring service/controller after pairing changes. Reset per-device offline/MCP alerts and continuous-gap timing on a true credential replacement, while preserving continuity across ordinary reconnects.
+- Android Monitor: only allow numeric LAN/global IPv6 Direct endpoints before address parsing, avoiding potentially blocking DNS on the UI read path; validate encrypted pairing response credentials using the persisted pairing contract. Added route/credential regression tests. No Android APK was packaged or installed.
+
 - Fixed concurrent stateless HTTP MCP calls sharing an OAuth grant and JSON-RPC request ID. Each call now owns an independent cancellation target; ambiguous unscoped cancellation safely returns 409, while `Mcp-Session-Id` identifies an individual session.
 - Added active OAuth grant and access-token expiry checks during tool execution and before results are returned; grant and global revocation now cooperatively cancel in-flight tools. Non-cooperative tool side effects remain non-reversible.
 - Hardened connection mode switching: write both durable Stop markers before transport shutdown and settings persistence to prevent stale reconnect after interrupted or failed switches. Added targeted success, stop/write-failure, and marker-failure Rust tests.

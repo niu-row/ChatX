@@ -288,7 +288,7 @@ class PairingManager {
         require(directRuntimeEndpoints.isNotEmpty() || relay != null) {
             "Desktop 未返回可用的 WSS 路径。"
         }
-        return PairingConfig(
+        val received = PairingConfig(
             desktopId = invite.desktopId,
             port = invite.port,
             fingerprintSha256 = invite.fingerprintSha256,
@@ -298,6 +298,10 @@ class PairingManager {
             directEndpoints = directRuntimeEndpoints,
             relay = relay,
         )
+        // Apply exactly the same identity and token validation as persisted
+        // pairings before a network response can become trusted credentials.
+        // In particular, the response Relay must belong to the invited Desktop.
+        return PairingConfig.parse(received.toJson())
     }
 
     private fun androidDeviceName(): String = buildString {
