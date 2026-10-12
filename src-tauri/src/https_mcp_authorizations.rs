@@ -70,7 +70,13 @@ fn administer(
     }
     let result: Value = serde_json::from_slice(&output)
         .map_err(|_| "OAuth 授权管理返回无效数据".to_string())?;
-    if !result["grants"].is_array() {
+    let valid = match action {
+        "list" => result["grants"].is_array(),
+        "revoke" => result["revokedId"].as_str() == grant_id,
+        "revoke-all" => result["revokedAll"] == true,
+        _ => false,
+    };
+    if !valid {
         return Err("OAuth 授权管理返回无效格式".into());
     }
     Ok(result)

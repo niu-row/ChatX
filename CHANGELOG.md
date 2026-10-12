@@ -11,7 +11,10 @@
 - Unified Linux installer Desktop ID validation with UI/Node/Rust and tested the real preflight validation in isolation.
 - Forwarded HTTP disconnects as MCP SDK cancellation notifications; tested cooperative cancellation with a disposable fake stdio tool. Non-cooperative tools are not guaranteed to stop or undo side effects.
 - Unified pre-generation OAuth revocation validity between token checks and UI; bounded the local OAuth administration child process to 10 seconds and 1 MiB output.
-- Introduced separate eight-tool and four-control request budgets plus 80 MiB aggregate inbound payload accounting, with HTTP 429 on saturation.
+- Introduced separate ordinary-body and control-request admission lanes (8 + 4), 80 MiB aggregate inbound payload accounting, and 128 MiB serialized-response credits. Control-lane requests have a 4 KiB / 10-second body guard; overflow returns 413/429 as appropriate.
+- Added stateless JSON-RPC `notifications/cancelled` routing by OAuth grant, subject and request ID. Other grants cannot cancel in-flight tools; cancellation remains cooperative and cannot undo side effects.
+- Made OAuth revoke/revoke-all acknowledge durable mutation independently of grant listing. Changed password rotation to an off-UI-thread recovery workflow: revoke before stopping, and attempt reconnect even when secret storage fails.
+- Added isolated corrupted-grant, OAuth rotation failure recovery, cross-grant cancellation, slow-upload control admission and concurrent large-result regression tests.
 - Deferred Desktop identity creation until deployment panel expansion, fixed offline HTTPS transport labels and removed stale UI examples.
 - Updated architecture docs, local tests and runtime resource manifests. **No installer or server deployment in this change.**
 

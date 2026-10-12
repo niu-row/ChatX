@@ -95,7 +95,7 @@ const context = vm.createContext({
     if (command === 'revoke_https_mcp_authorization') {
       lastRevocation = args.grantId;
       authorizationRows[0].revoked = true;
-      return { grants: authorizationRows };
+      return { revokedId: args.grantId };
     }
     if (command === 'rotate_https_mcp_login_password') {
       passwordRotations++;
@@ -104,7 +104,7 @@ const context = vm.createContext({
     if (command === 'revoke_all_https_mcp_authorizations') {
       lastRevocation = 'all';
       for (const row of authorizationRows) row.revoked = true;
-      return { grants: authorizationRows };
+      return { revokedAll: true };
     }
     if (command === 'stop_all_connections') {
       stopAllCalls++;

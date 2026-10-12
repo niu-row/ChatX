@@ -193,7 +193,9 @@ export function authorizationStore({ directory, settingsPath, createLegacyIfMiss
     const file = id === 'legacy' ? legacyPath : path.join(grantsDir, id + '.json');
     if (!fs.existsSync(file)) throw new Error('OAuth grant does not exist');
     fs.writeFileSync(path.join(revokedDir, id), 'revoked', { mode: 0o600 });
-    return listGrants();
+    // Confirm the mutation independently of listGrants(): unrelated damaged
+    // records must not turn a successful revocation into a reported failure.
+    return { revokedId: id };
   }
   function revokeAll() {
     // A new generation invalidates existing grants and pending OAuth codes
@@ -208,7 +210,7 @@ export function authorizationStore({ directory, settingsPath, createLegacyIfMiss
     } finally {
       try { fs.unlinkSync(next); } catch (e) { if (e.code !== 'ENOENT') throw e; }
     }
-    return listGrants();
+    return { revokedAll: true };
   }
   return {
     lifetimeHours, createGrant, activeGrant, expiresAt, revocationGeneration,

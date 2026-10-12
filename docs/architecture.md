@@ -41,9 +41,14 @@ is intentionally not included.
   OAuth grant schema, rotation, listing and revocation. Rust never edits
   grant JSON: `https_mcp_authorizations.rs` invokes the bundled local-only
   `https-mcp-authorizations-admin.mjs` for administrative operations.
-  The admin process is bounded to 10 seconds and 1 MiB output; normal
-  listing/revocation runs via Tauri's blocking worker pool, not the UI thread.
-  Legacy grants use the same revocation predicate for token checks and UI.
+  The admin process is bounded to 10 seconds and 1 MiB output; listing,
+  revocation, and password-rotation orchestration use Tauri's blocking pool,
+  not the UI thread. Revocation commands acknowledge the durable mutation
+  without depending on a full list read (which may fail on unrelated corrupted
+  data); the UI refreshes the list separately. Password rotation revokes
+  before stopping the Bridge and attempts connection recovery even if updating
+  the protected platform key fails. Legacy grants use the same revocation
+  predicate for token checks and UI.
 - The frontend has independent controllers:
   `pages/https-mcp.js` (connection),
   `pages/oauth-security.js` (OAuth settings),
@@ -60,15 +65,21 @@ The WSS v2 protocol uses 64 KiB frames, 64 MiB requests, 128 MiB responses,
 and up to 64 concurrent *transport* requests. Relay and desktop use bounded
 per-stream queues. The Node Bridge still materializes MCP JSON-RPC requests
 and SDK tool results; it is not zero-copy/end-to-end streaming.
-The Bridge admits up to **eight running tool calls** with **four reserved
-slots for lightweight/control requests** (12 total). It also accounts for
-up to **80 MiB total buffered incoming request bytes** and returns HTTP 429
-plus Retry-After on saturation. These counters do not measure actual V8 heap
-usage or tool-result memory; one tool can still allocate a large result.
-The Bridge passes HTTP disconnects to the MCP SDK as cancellation signals,
-which sends `notifications/cancelled` to Desktop Commander. Actual tool
-termination is **cooperative**: canceling or disconnecting never guarantees
-rollback of file writes or shell side effects.
+The Bridge separates eight ordinary request readers from four lightweight
+control-request slots (12 total). Small-body candidates are checked after
+JSON parsing and cannot remain in a control slot if they are actually tools;
+control bodies are capped at 4 KiB and 10 seconds. Control slots are not an
+absolute availability guarantee against four simultaneous slow control
+candidates, but ordinary slow uploads cannot exhaust them. The Bridge
+accounts for up to **80 MiB total buffered incoming wire bytes** and
+**128 MiB of serialized HTTP response buffers**, returning 413/429 or a
+bounded JSON-RPC error on saturation. This is **not** a strict V8/SDK heap
+ceiling: Desktop Commander tool results are materialized before serialization.
+The Bridge forwards both HTTP disconnects and explicit stateless MCP
+`notifications/cancelled` messages to the SDK. Explicit cancellations are
+matched by OAuth grant, subject and JSON-RPC request ID, not just the ID.
+Actual tool termination remains **cooperative**: cancellation never guarantees
+rollback of files or shell side effects.
 
 Incoming Node requests have a 600-second timeout; the Relay request/stream
 timeouts are 605 seconds; Nginx MCP timeout is 630 seconds.

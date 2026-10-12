@@ -18,7 +18,7 @@ use std::{
     thread::{self, JoinHandle},
     time::{Duration, Instant},
 };
-use tauri::State;
+use tauri::{Manager, State};
 #[derive(Default, Clone)]
 struct Snapshot {
     local_ready: bool,
@@ -650,24 +650,70 @@ pub(super) fn set_https_mcp_auto_reconnect(
     Ok(get_https_mcp_status(app, state))
 }
 
-#[tauri::command]
-pub(super) fn rotate_https_mcp_login_password(
-    app: tauri::AppHandle, state: State<'_, AppState>,
-) -> Result<String, String> {
-    let _connection = state.connection_operation.lock()
-        .map_err(|_| "连接操作锁已损坏".to_string())?;
-    if state.quitting.load(Ordering::SeqCst) { return Err("ChatX 正在退出".into()); }
-    // Fail closed: terminate the active remote bridge before changing secrets.
-    stop_inner(state.inner());
-    // Invalidate grants/codes before installing the new signing key.
-    crate::https_mcp_authorizations::revoke_all_sync(&app)?;
-    let master = rotate_https_oauth_master_key(&app)?;
-    let settings = load_settings(&app).https_mcp;
-    if settings.enabled && connection_intent::restore_allowed(&app, Transport::HttpsMcp)? {
-        start_inner(&app, state.inner(), settings)?;
+// Revoke *before* stopping the transport: if authorization storage is
+// unavailable, the existing Bridge must remain running. Once stopped, always
+// attempt recovery, even if writing the new platform secret fails.
+fn rotate_with_recovery<T>(
+    revoke: impl FnOnce() -> Result<(), String>,
+    stop: impl FnOnce(),
+    rotate: impl FnOnce() -> Result<T, String>,
+    reconnect: impl FnOnce() -> Result<(), String>,
+) -> Result<T, String> {
+    revoke()?;
+    stop();
+    let rotated = rotate();
+    let recovery = reconnect();
+    match (rotated, recovery) {
+        (Ok(secret), Ok(())) => Ok(secret),
+        (Err(error), Ok(())) => Err(format!(
+            "OAuth 密钥更新失败，已尝试恢复原有连接：{error}"
+        )),
+        (Ok(_), Err(error)) => Err(format!(
+            "OAuth 密钥已更新，但 HTTPS MCP 未能恢复，请重新启动连接：{error}"
+        )),
+        (Err(error), Err(recovery)) => Err(format!(
+            "OAuth 密钥更新失败且连接恢复失败：{error}；{recovery}"
+        )),
     }
-    push_log(state.inner(), "HTTPS OAuth 密码已独立轮换；原有授权全部失效，请重新授权");
-    Ok(derive_secret(&master, "login"))
+}
+
+#[tauri::command]
+pub(super) async fn rotate_https_mcp_login_password(
+    app: tauri::AppHandle,
+) -> Result<String, String> {
+    // The supervisor join and the 10-second local OAuth admin command both
+    // block. Run the full transaction off Tauri's async/UI executor while
+    // holding the existing connection-operation lock.
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<AppState>();
+        let _connection = state.connection_operation.lock()
+            .map_err(|_| "连接操作锁已损坏".to_string())?;
+        if state.quitting.load(Ordering::SeqCst) {
+            return Err("ChatX 正在退出".into());
+        }
+        let settings = load_settings(&app).https_mcp;
+        let should_reconnect = settings.enabled
+            && connection_intent::restore_allowed(&app, Transport::HttpsMcp)?;
+        let outcome = rotate_with_recovery(
+            || crate::https_mcp_authorizations::revoke_all_sync(&app).map(|_| ()),
+            || stop_inner(state.inner()),
+            || rotate_https_oauth_master_key(&app),
+            || {
+                if should_reconnect { start_inner(&app, state.inner(), settings)?; }
+                Ok(())
+            },
+        );
+        match outcome {
+            Ok(master) => {
+                push_log(state.inner(), "HTTPS OAuth 密码已轮换；原有授权全部失效，请重新授权");
+                Ok(derive_secret(&master, "login"))
+            }
+            Err(error) => {
+                push_log(state.inner(), format!("HTTPS OAuth 密码轮换未完成：{error}"));
+                Err(error)
+            }
+        }
+    }).await.map_err(|_| "OAuth 密码轮换任务中断".to_string())?
 }
 
 #[tauri::command]
@@ -680,6 +726,43 @@ pub(super) fn get_https_mcp_login_password(app: tauri::AppHandle)
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::cell::RefCell;
+
+    #[test]
+    fn oauth_rotation_preserves_the_bridge_on_revoke_failure() {
+        let calls = RefCell::new(Vec::new());
+        let result = rotate_with_recovery(
+            || { calls.borrow_mut().push("revoke"); Err("disk damaged".into()) },
+            || calls.borrow_mut().push("stop"),
+            || { calls.borrow_mut().push("rotate"); Ok(5u8) },
+            || { calls.borrow_mut().push("reconnect"); Ok(()) },
+        );
+        assert!(result.is_err());
+        assert_eq!(*calls.borrow(), ["revoke"]);
+    }
+
+    #[test]
+    fn oauth_rotation_attempts_recovery_after_secret_write_failure() {
+        let calls = RefCell::new(Vec::new());
+        let result = rotate_with_recovery(
+            || { calls.borrow_mut().push("revoke"); Ok(()) },
+            || calls.borrow_mut().push("stop"),
+            || { calls.borrow_mut().push("rotate"); Err::<u8, String>("keychain".into()) },
+            || { calls.borrow_mut().push("reconnect"); Ok(()) },
+        );
+        assert!(result.unwrap_err().contains("已尝试恢复"));
+        assert_eq!(*calls.borrow(), ["revoke", "stop", "rotate", "reconnect"]);
+    }
+
+    #[test]
+    fn oauth_rotation_reports_partial_success_when_restart_fails() {
+        let result = rotate_with_recovery(
+            || Ok(()), || {}, || Ok(7u8),
+            || Err("Bridge could not start".into()),
+        );
+        assert!(result.unwrap_err().contains("密钥已更新"));
+    }
+
     #[test]
     fn rejects_insecure_or_malformed_destinations() {
         let mut cfg = HttpsMcpSettings::default();

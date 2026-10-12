@@ -39,8 +39,8 @@ import { createMcpRequestBudget } from './mcp-request-budget.mjs';
 // Byte budgets are shared across requests; tool slots remain independent
 // from control slots. Test exact admission behavior without huge allocations.
 {
-  const budget = createMcpRequestBudget({ maxRequests: 3, maxTools: 1,
-    maxPayloadBytes: 6 });
+  const budget = createMcpRequestBudget({ maxRequests: 3, maxControl: 0,
+    maxTools: 1, maxPayloadBytes: 6 });
   const first = budget.open(), control = budget.open(), third = budget.open();
   assert.ok(first && control && third);
   assert.equal(budget.open(), null, 'Total request concurrency must be bounded');
@@ -49,12 +49,44 @@ import { createMcpRequestBudget } from './mcp-request-budget.mjs';
   assert.equal(control.reserve(2), true);
   assert.equal(first.admitTool(), true);
   assert.equal(third.admitTool(), false, 'Long tool slots must be separately bounded');
-  assert.deepEqual(budget.snapshot(), { requests: 3, tools: 1, payloadBytes: 6 });
+  assert.equal(budget.snapshot().requests, 3);
+  assert.equal(budget.snapshot().tools, 1);
+  assert.equal(budget.snapshot().payloadBytes, 6);
   first.close(); first.close(); // Idempotent release.
   assert.equal(third.admitTool(), true);
   assert.equal(third.reserve(4), true);
   control.close(); third.close();
-  assert.deepEqual(budget.snapshot(), { requests: 0, tools: 0, payloadBytes: 0 });
+  assert.equal(budget.snapshot().requests, 0);
+  assert.equal(budget.snapshot().payloadBytes, 0);
+  // Eight slow ordinary bodies cannot take the four reserved control lanes.
+  const guarded = createMcpRequestBudget();
+  const slow = Array.from({ length: 8 }, () => guarded.open());
+  assert.ok(slow.every(Boolean));
+  assert.equal(guarded.open(), null);
+  const ping = guarded.open({ controlCandidate: true });
+  assert.ok(ping && ping.admit('ping'));
+  const smallTool = guarded.open({ controlCandidate: true });
+  assert.ok(smallTool);
+  assert.equal(smallTool.admit('tools/call'), false,
+    'Small tool calls may not occupy reserved control slots');
+  assert.equal(smallTool.reserve(4097), false,
+    'Reserved control bodies must have a tight size limit');
+  smallTool.close(); ping.close();
+  slow.forEach((lease) => lease.close());
+
+  const outputs = createMcpRequestBudget({
+    maxRequests: 3, maxControl: 0, maxSingleResponseBytes: 100,
+    maxBufferedResponseBytes: 120,
+  });
+  const a = outputs.open(), b = outputs.open();
+  assert.equal(a.reserveResponse(80), true);
+  assert.equal(b.reserveResponse(50), false, 'Aggregate output buffers must be bounded');
+  assert.equal(b.reserveResponse(30), true);
+  a.close();
+  assert.equal(outputs.snapshot().responseBytes, 110,
+    'Response credits remain held until HTTP response completion');
+  a.releaseResponse(); b.releaseResponse(); b.close();
+  assert.equal(outputs.snapshot().responseBytes, 0);
 }
 
 const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'chatx-https-mcp-'));
@@ -152,15 +184,27 @@ try {
   const managed = adminStore.createGrant('client-a', 168, Date.now(),
     adminStore.revocationGeneration());
   assert.ok(cli('list').grants.some((row) => row.id === managed.id && !row.revoked));
-  assert.equal(cli('revoke', managed.id).grants.find((row) => row.id === managed.id).revoked, true);
+  assert.deepEqual(cli('revoke', managed.id), { revokedId: managed.id });
+  assert.equal(cli('list').grants.find((row) => row.id === managed.id).revoked, true);
   const second = adminStore.createGrant('client-b', 168, Date.now(),
     adminStore.revocationGeneration());
-  assert.equal(cli('revoke-all').grants.find((row) => row.id === second.id).revoked, true);
+  assert.deepEqual(cli('revoke-all'), { revokedAll: true });
+  assert.equal(cli('list').grants.find((row) => row.id === second.id).revoked, true);
   assert.equal(adminStore.activeGrant(second.id), null);
   const after = adminStore.createGrant('client-c', 168, Date.now(),
     adminStore.revocationGeneration());
   assert.ok(adminStore.activeGrant(after.id), 'A grant issued after revocation remains valid');
   assert.equal(cli('list').grants.find((row) => row.id === after.id).revoked, false);
+
+  // An unrelated invalid record must NOT convert a durable revocation into
+  // a false failure. The read-only list command may still report corruption.
+  const damaged = path.join(adminDir, 'grants', 'unrelated.json');
+  fs.writeFileSync(damaged, '{broken');
+  assert.deepEqual(cli('revoke', after.id), { revokedId: after.id });
+  assert.equal(adminStore.activeGrant(after.id), null);
+  assert.deepEqual(cli('revoke-all'), { revokedAll: true });
+  assert.throws(() => adminStore.listGrants());
+  fs.unlinkSync(damaged);
 
   fs.writeFileSync(fixture, `
 import readline from 'node:readline';
@@ -201,7 +245,9 @@ for await (const line of rl) {
     if (req.params.arguments?.value === '__hold__') {
       await new Promise((resolve) => setTimeout(resolve, 300));
     }
-    result = { content: [{ type: 'text', text: req.params.arguments.value }] };
+    result = { content: [{ type: 'text',
+      text: req.params.arguments.value === '__large__'
+        ? 'x'.repeat(1024 * 1024) : req.params.arguments.value }] };
   } else {
     result = {};
   }
@@ -374,6 +420,55 @@ for await (const line of rl) {
   await new Promise((resolve) => setTimeout(resolve, 930));
   assert.equal(fs.existsSync(cancellationFinished), false,
     'A cooperative Desktop Commander fixture must stop when notified');
+
+  // Explicit JSON-RPC cancellation can arrive on a separate stateless HTTP
+  // request. Bind it to the same authorization, not merely to its request ID.
+  for (const file of [cancellationStarted, cancellationNotified, cancellationFinished]) {
+    fs.rmSync(file, { force: true });
+  }
+  const explicitlyCancelled = request('/mcp', { method: 'POST', headers: authHeaders,
+    body: JSON.stringify({ jsonrpc: '2.0', id: 334, method: 'tools/call',
+      params: { name: 'echo', arguments: { value: '__cancel__' } } }),
+  });
+  for (let i = 0; i < 60 && !fs.existsSync(cancellationStarted); i++) {
+    await new Promise((resolve) => setTimeout(resolve, 25));
+  }
+  assert.ok(fs.existsSync(cancellationStarted));
+
+  const storeForIsolation = authorizationStore({ directory: storeDir,
+    settingsPath: settingsFile, createLegacyIfMissing: false });
+  const otherGrant = storeForIsolation.createGrant('unrelated-client', 168,
+    Date.now(), storeForIsolation.revocationGeneration());
+  const otherPayload = Buffer.from(JSON.stringify({
+    ...firstAccess, gid: otherGrant.id, sub: 'unrelated-client',
+  })).toString('base64url');
+  const otherAccess = otherPayload + '.' + crypto.createHmac('sha256', signingKey)
+    .update(otherPayload).digest('base64url');
+  const cancelNotice = { jsonrpc: '2.0', method: 'notifications/cancelled',
+    params: { requestId: 334, reason: 'user stopped' } };
+  const unrelatedCancel = await request('/mcp', { method: 'POST',
+    headers: { ...jsonHeaders, authorization: 'Bearer ' + otherAccess },
+    body: JSON.stringify(cancelNotice),
+  });
+  assert.equal(unrelatedCancel.status, 202);
+  await new Promise((resolve) => setTimeout(resolve, 60));
+  assert.equal(fs.existsSync(cancellationNotified), false,
+    'A different OAuth grant must never cancel another grant tool');
+  const ownCancel = await request('/mcp', { method: 'POST', headers: authHeaders,
+    body: JSON.stringify(cancelNotice),
+  });
+  assert.equal(ownCancel.status, 202);
+  const canceledResult = await explicitlyCancelled;
+  assert.equal(canceledResult.status, 200);
+  assert.equal((await canceledResult.json()).error.code, -32800);
+  for (let i = 0; i < 60 && !fs.existsSync(cancellationNotified); i++) {
+    await new Promise((resolve) => setTimeout(resolve, 25));
+  }
+  assert.ok(fs.existsSync(cancellationNotified),
+    'Explicit notification must propagate to cooperative stdio tools');
+  await new Promise((resolve) => setTimeout(resolve, 930));
+  assert.equal(fs.existsSync(cancellationFinished), false);
+
   // Streaming transport supports 64 requests, but Node's JSON-RPC materializes
   // results. The local Bridge must refuse excess work instead of buffering
   // 64 * 64 MiB in the same process.
@@ -392,6 +487,41 @@ for await (const line of rl) {
   const statuses = concurrent.map((response) => response.status);
   assert.ok(statuses.includes(429), 'Excess MCP JSON requests must get bounded 429');
   assert.ok(statuses.includes(200), 'Accepted MCP requests must continue normally');
+
+  // Deliberately leave eight large-body HTTP uploads incomplete. Previously
+  // they consumed all twelve admission slots, preventing a new ping.
+  const heldSockets = await Promise.all(Array.from({ length: 8 }, () =>
+    new Promise((resolve, reject) => {
+      const socket = net.createConnection({ host: '127.0.0.1', port });
+      socket.once('error', reject);
+      socket.once('connect', () => {
+        socket.off('error', reject);
+        socket.on('error', () => {});
+        socket.write('POST /mcp HTTP/1.1\r\nHost: 127.0.0.1:' + port +
+          '\r\nAuthorization: Bearer ' + tokens.access_token +
+          '\r\nContent-Type: application/json\r\nContent-Length: 8192' +
+          '\r\nConnection: keep-alive\r\n\r\n{');
+        resolve(socket);
+      });
+    })
+  ));
+  try {
+    await new Promise((resolve) => setTimeout(resolve, 120));
+    assert.deepEqual((await rpc(501, 'ping')).result, {},
+      'Slow ordinary uploads must not consume reserved control request slots');
+  } finally {
+    heldSockets.forEach((socket) => socket.destroy());
+  }
+  await new Promise((resolve) => setTimeout(resolve, 60));
+
+  // Large SDK tool results must still round-trip without a second
+  // JSON.stringify copy, and simultaneous result buffering is budgeted.
+  const largeResults = await Promise.all(Array.from({ length: 6 }, (_, i) =>
+    rpc(600 + i, 'tools/call', { name: 'echo', arguments: { value: '__large__' } })
+  ));
+  assert.ok(largeResults.every((result) =>
+    result.result.content[0].text.length === 1024 * 1024));
+
   assert.equal(called.result.content[0].text, 'https-mcp-ok');
   const forbiddenOrigin = await request('/mcp', { method: 'POST',
     headers: { ...authHeaders, origin: 'https://untrusted.example' }, body: '{}' });

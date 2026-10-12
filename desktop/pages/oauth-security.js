@@ -120,7 +120,9 @@
       try {
         const command = all ? 'revoke_all_https_mcp_authorizations'
           : 'revoke_https_mcp_authorization';
-        renderGrants(await invoke(command, all ? {} : { grantId: id }));
+        // Mutation success and refreshing the listing are separate. A damaged
+        // unrelated grant must not make a successful revoke look unsuccessful.
+        await invoke(command, all ? {} : { grantId: id });
       } catch (error) { showError(normalizeError(error)); }
       finally { setBusy(false); await refreshSecurity(); }
     }

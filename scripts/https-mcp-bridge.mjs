@@ -27,6 +27,18 @@ const rateBuckets = new Map();
 // also bounds buffered incoming body bytes across all active JSON requests.
 // This is not a cap on Desktop Commander output or V8 heap usage.
 const requestBudget = createMcpRequestBudget();
+// Stateless MCP JSON-RPC IDs are unique only within an authorization. Never
+// allow a different grant to cancel another grant's in-flight request.
+const activeOperations = new Map();
+function operationKey(claim, id) {
+  if (typeof id === 'string' && id.length > 0 && id.length <= 128) {
+    return JSON.stringify([claim.gid ?? 'legacy', claim.sub ?? '', 'string', id]);
+  }
+  if (typeof id === 'number' && Number.isSafeInteger(id)) {
+    return JSON.stringify([claim.gid ?? 'legacy', claim.sub ?? '', 'number', id]);
+  }
+  return null;
+}
 let authStore;
 let client;
 let transport;
@@ -339,13 +351,25 @@ async function handleMcp(req, res) {
   if (req.method === 'GET') return text(res, 405, 'SSE not supported', { Allow: 'POST' });
   if (req.method === 'DELETE') return text(res, 405, 'Stateless MCP has no sessions', { Allow: 'POST' });
   if (req.method !== 'POST') return text(res, 405, 'Method Not Allowed', { Allow: 'POST' });
-  const budget = requestBudget.open();
+  const lengthHeader = req.headers['content-length'];
+  const declared = lengthHeader === undefined ? null : Number(lengthHeader);
+  const shortBody = Number.isSafeInteger(declared) && declared >= 0 && declared <= 4096;
+  let budget = requestBudget.open({ controlCandidate: shortBody });
+  // Chunked ping/cancel requests can use the control lane when ordinary body
+  // readers are full, but receive a strict 4 KiB / 10-second body limit.
+  if (!budget && lengthHeader === undefined) {
+    budget = requestBudget.open({ controlCandidate: true });
+  }
   if (!budget) {
     return text(res, 429, 'MCP Bridge busy', { 'Retry-After': '1' });
   }
   // HTTP cancellation does not automatically abort a stdio MCP request.
   // Forward it through the MCP SDK so cooperative tools can stop early.
   const upstreamAbort = new AbortController();
+  let registeredKey = null;
+  let bodyDeadline = budget.controlCandidate
+    ? setTimeout(() => req.destroy(), 10_000) : null;
+  bodyDeadline?.unref();
   const disconnected = () => {
     if (!res.writableFinished && !upstreamAbort.signal.aborted) {
       upstreamAbort.abort(new Error('MCP HTTP client disconnected'));
@@ -360,7 +384,7 @@ async function handleMcp(req, res) {
   }
   let request;
   try {
-    request = JSON.parse(await readBody(req, 64 * 1024 * 1024, (bytes) => {
+    request = JSON.parse(await readBody(req, budget.bodyLimit, (bytes) => {
       if (!budget.reserve(bytes)) {
         const error = new Error('MCP incoming payload budget exhausted');
         error.statusCode = 429;
@@ -380,9 +404,28 @@ async function handleMcp(req, res) {
     return json(res, 400, { jsonrpc: '2.0', id: request?.id ?? null,
       error: { code: -32600, message: 'Invalid Request' } });
   }
-  if (!Object.hasOwn(request, 'id')) { res.writeHead(202); res.end(); return; }
-  if (request.method === 'tools/call' && !budget.admitTool()) {
-    return text(res, 429, 'MCP tool concurrency limit reached', { 'Retry-After': '1' });
+  if (bodyDeadline) { clearTimeout(bodyDeadline); bodyDeadline = null; }
+  if (!budget.admit(request.method)) {
+    return text(res, 429, 'MCP Bridge execution slots busy', { 'Retry-After': '1' });
+  }
+  if (!Object.hasOwn(request, 'id')) {
+    if (request.method === 'notifications/cancelled') {
+      const key = operationKey(claim, request.params?.requestId);
+      if (key) activeOperations.get(key)?.abort(
+        new Error('MCP client sent notifications/cancelled'));
+    }
+    res.writeHead(202); res.end(); return;
+  }
+  if (!operationKey(claim, request.id)) {
+    return json(res, 400, { jsonrpc: '2.0', id: null,
+      error: { code: -32600, message: 'Invalid request ID' } });
+  }
+  if (request.method === 'tools/call' || request.method === 'tools/list') {
+    registeredKey = operationKey(claim, request.id);
+    if (activeOperations.has(registeredKey)) {
+      return text(res, 409, 'Duplicate in-flight MCP request ID');
+    }
+    activeOperations.set(registeredKey, upstreamAbort);
   }
   if (upstreamAbort.signal.aborted || res.destroyed) return;
   try {
@@ -418,15 +461,34 @@ async function handleMcp(req, res) {
       default: throw Object.assign(new Error('Method not found'), { code: -32601 });
     }
     if (upstreamAbort.signal.aborted || res.destroyed) return;
-    json(res, 200, { jsonrpc: '2.0', id: request.id, result });
+    const payload = JSON.stringify({ jsonrpc: '2.0', id: request.id, result });
+    if (!budget.reserveResponse(Buffer.byteLength(payload))) {
+      return json(res, 200, { jsonrpc: '2.0', id: request.id,
+        error: { code: -32603, message: 'MCP response exceeds local buffering budget' } });
+    }
+    // Keep serialized-response bytes accounted until Node has flushed them,
+    // rather than releasing memory credits as soon as res.end() is called.
+    res.once('finish', () => budget.releaseResponse());
+    res.once('close', () => budget.releaseResponse());
+    res.writeHead(200, { 'content-type': 'application/json; charset=utf-8',
+      'cache-control': 'no-store', 'x-content-type-options': 'nosniff' });
+    res.end(payload);
   } catch (error) {
-    if (upstreamAbort.signal.aborted || res.destroyed) return;
+    if (res.destroyed) return;
+    if (upstreamAbort.signal.aborted) {
+      return json(res, 200, { jsonrpc: '2.0', id: request.id,
+        error: { code: -32800, message: 'MCP request cancelled' } });
+    }
     const code = Number.isInteger(error.code) && error.code < 0 ? error.code : -32603;
     json(res, 200, { jsonrpc: '2.0', id: request.id, error: { code, message: code === -32603
       ? 'Desktop Commander unavailable or failed' : String(error.message) } });
     if (code === -32603) console.error('MCP backend request failed:', error.message);
   }
   } finally {
+    if (bodyDeadline) clearTimeout(bodyDeadline);
+    if (registeredKey && activeOperations.get(registeredKey) === upstreamAbort) {
+      activeOperations.delete(registeredKey);
+    }
     res.off('close', disconnected);
     req.off('aborted', disconnected);
     budget.close();
