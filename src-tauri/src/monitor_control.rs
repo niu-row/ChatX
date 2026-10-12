@@ -3,6 +3,7 @@ use super::{
     monitor_crypto, monitor_manager, monitor_status, push_log, runtime_paths, set_recovery_status,
     start_runtime_connection, timestamp_ms, wait_for_runtime_recovery, AppState,
 };
+use crate::connection_coordinator::ConnectionCoordinator;
 use chatx_relay_protocol::EncryptedControlPayload;
 use serde_json::{json, Value};
 use std::{
@@ -169,7 +170,7 @@ fn trigger_tunnel_reconnect(
         );
         // Remote reconnect must never race the desktop's manual mode
         // switch. Re-check *after* acquiring the cross-transport mutex.
-        let result = match state.connection_operation.lock() {
+        let result = match ConnectionCoordinator::acquire(&app, state.inner()) {
             Err(_) => Err("连接操作锁已损坏".to_string()),
             Ok(_guard) => {
                 let current = load_settings(&app);

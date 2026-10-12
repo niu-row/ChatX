@@ -1,13 +1,15 @@
 // Optional HTTPS MCP mode: local stdio bridge + WSS Relay or legacy SSH.
 // It is independent of the legacy OpenAI Secure MCP Tunnel.
 use crate::{
+    connection_coordinator::ConnectionCoordinator,
+    status_contract::HttpsMcpStatus,
     app_state::AppState, load_settings, push_log, runtime_paths,
     connection_health::{self, HttpsConnectionHealth},
     connection_intent::{self, Transport},
     secrets::{ensure_https_oauth_master_key, rotate_https_oauth_master_key},
     settings::{update_settings, HttpsMcpSettings}, state_dir,
 };
-use serde_json::{json, Value};
+use serde_json::Value;
 use sha2::{Digest, Sha256};
 use std::{
     fs::{self, OpenOptions},
@@ -441,17 +443,23 @@ pub(super) fn local_bridge_alive(state: &AppState) -> bool {
     state.https_mcp.status.lock().is_ok_and(|status| status.local_ready)
 }
 
+fn health_from_snapshot(
+    app: &tauri::AppHandle, settings: &HttpsMcpSettings, snapshot: &Snapshot,
+) -> HttpsConnectionHealth {
+    let allowed = connection_intent::restore_allowed(app, Transport::HttpsMcp)
+        .unwrap_or(false);
+    connection_health::https_connection_health(
+        settings.enabled, allowed, snapshot.local_ready, snapshot.transport_connected,
+        snapshot.remote_ready, snapshot.last_public_probe_at, crate::timestamp_ms(),
+    )
+}
+
 pub(super) fn monitor_public_connection(
     app: &tauri::AppHandle, settings: &HttpsMcpSettings, state: &AppState,
 ) -> (HttpsConnectionHealth, u64, u32) {
     let snapshot = state.https_mcp.status.lock()
         .map(|value| value.clone()).unwrap_or_default();
-    let allowed = connection_intent::restore_allowed(app, Transport::HttpsMcp)
-        .unwrap_or(false);
-    let health = connection_health::https_connection_health(
-        settings.enabled, allowed, snapshot.local_ready, snapshot.transport_connected,
-        snapshot.remote_ready, snapshot.last_public_probe_at, crate::timestamp_ms(),
-    );
+    let health = health_from_snapshot(app, settings, &snapshot);
     (health, snapshot.last_public_probe_at, snapshot.restarts)
 }
 
@@ -525,28 +533,44 @@ pub(super) fn restore(app: &tauri::AppHandle, state: &AppState) {
     }
 }
 
-pub(super) fn status_summary(app: &tauri::AppHandle, settings: &HttpsMcpSettings, state: &AppState) -> Value {
+pub(super) fn status_view(
+    app: &tauri::AppHandle, settings: &HttpsMcpSettings, state: &AppState,
+) -> HttpsMcpStatus {
     let snapshot = state.https_mcp.status.lock().map(|v| v.clone()).unwrap_or_default();
-    let (health, _, _) = monitor_public_connection(app, settings, state);
-    json!({
-        "enabled": health.enabled,
-        "connected": health.connected,
-        "state": health.state,
-        "autoReconnect": settings.auto_reconnect,
-        "manualStopBlocked": health.manual_stop_blocked,
-        "baseUrl": settings.base_url,
-        "endpoint": format!("{}/mcp", settings.base_url.trim_end_matches('/')),
-        "sshHost": settings.ssh_host, "sshUser": settings.ssh_user, "sshPort": settings.ssh_port,
-        "localPort": settings.local_port, "remotePort": settings.remote_port,
-        "authorizationTtlHours": settings.authorization_ttl_hours,
-        "transport": settings.transport,
-        "localReady": health.local_ready, "sshConnected": snapshot.ssh_connected,
-        "transportConnected": health.transport_connected,
-        "remoteReady": health.remote_ready,
-        "lastPublicProbeAt": snapshot.last_public_probe_at,
-        "remoteLastError": snapshot.remote_last_error,
-        "restarts": snapshot.restarts, "lastError": snapshot.last_error,
-    })
+    // Calculate the verdict from the SAME snapshot used for diagnostics:
+    // no status fields can contradict each other during a reconnect.
+    let health = health_from_snapshot(app, settings, &snapshot);
+    HttpsMcpStatus {
+        enabled: health.enabled,
+        connected: health.connected,
+        state: health.state,
+        auto_reconnect: settings.auto_reconnect,
+        manual_stop_blocked: health.manual_stop_blocked,
+        base_url: settings.base_url.clone(),
+        endpoint: format!("{}/mcp", settings.base_url.trim_end_matches('/')),
+        ssh_host: settings.ssh_host.clone(),
+        ssh_user: settings.ssh_user.clone(),
+        ssh_port: settings.ssh_port,
+        local_port: settings.local_port,
+        remote_port: settings.remote_port,
+        authorization_ttl_hours: settings.authorization_ttl_hours,
+        transport: settings.transport.clone(),
+        local_ready: health.local_ready,
+        ssh_connected: snapshot.ssh_connected,
+        transport_connected: health.transport_connected,
+        remote_ready: health.remote_ready,
+        last_public_probe_at: snapshot.last_public_probe_at,
+        remote_last_error: snapshot.remote_last_error,
+        restarts: snapshot.restarts,
+        last_error: snapshot.last_error,
+    }
+}
+
+pub(super) fn status_summary(
+    app: &tauri::AppHandle, settings: &HttpsMcpSettings, state: &AppState,
+) -> Value {
+    // The stable external command still returns JSON to old clients.
+    serde_json::to_value(status_view(app, settings, state)).unwrap_or(Value::Null)
 }
 
 #[tauri::command]
@@ -558,9 +582,8 @@ pub(super) fn get_https_mcp_status(app: tauri::AppHandle, state: State<'_, AppSt
 pub(super) fn start_https_mcp(
     app: tauri::AppHandle, state: State<'_, AppState>, config: HttpsMcpSettings,
 ) -> Result<Value, String> {
-    let _connection = state.connection_operation.lock()
-        .map_err(|_| "连接操作锁已损坏".to_string())?;
-    if state.quitting.load(Ordering::SeqCst) { return Err("ChatX 正在退出，拒绝启动 HTTPS MCP".into()); }
+    let coordinator = ConnectionCoordinator::acquire(&app, state.inner())?;
+    coordinator.ensure_available("ChatX 正在退出，拒绝启动 HTTPS MCP")?;
     // Connection startup may never commit unsaved OAuth policy/auto-reconnect
     // UI changes. Those preferences have independent settings commands.
     let mut config = config;
@@ -570,15 +593,7 @@ pub(super) fn start_https_mcp(
     validate(&config)?;
     // Switching modes is fail-closed: persist the old transport's Stop
     // before its runtime is stopped, and never start HTTPS until it is gone.
-    connection_intent::mark_stopped(&app, Transport::Tunnel)?;
-    stop_inner(state.inner());
-    let previous = load_settings(&app);
-    crate::connection_commands::stop_tunnel_without_saving(&app, state.inner(), &previous)?;
-    update_settings(&app, |settings| {
-        settings.connection_intent = false;
-        settings.https_mcp.enabled = false;
-        Ok(())
-    })?;
+    coordinator.prepare_https()?;
     start_inner(&app, state.inner(), config.clone())?;
     if let Err(error) = update_settings(&app, |settings| {
         settings.connection_intent = false;
@@ -596,13 +611,12 @@ pub(super) fn start_https_mcp(
         });
         return Err(error);
     }
-    drop(_connection);
+    drop(coordinator);
     Ok(get_https_mcp_status(app, state))
 }
 
 pub(super) fn stop_requested(app: &tauri::AppHandle, state: &AppState) -> Result<(), String> {
-    let _connection = state.connection_operation.lock()
-        .map_err(|_| "连接操作锁已损坏".to_string())?;
+    let _connection = ConnectionCoordinator::acquire(app, state)?;
     let marker = connection_intent::mark_stopped(app, Transport::HttpsMcp);
     stop_inner(state);
     let saved = update_settings(app, |settings| {
@@ -634,8 +648,7 @@ pub(super) fn stop_https_mcp(
 pub(super) fn set_https_mcp_auto_reconnect(
     app: tauri::AppHandle, state: State<'_, AppState>, enabled: bool,
 ) -> Result<Value, String> {
-    let _connection = state.connection_operation.lock()
-        .map_err(|_| "连接操作锁已损坏".to_string())?;
+    let _connection = ConnectionCoordinator::acquire(&app, state.inner())?;
     update_settings(&app, |settings| {
         settings.https_mcp.auto_reconnect = enabled;
         Ok(())
@@ -686,8 +699,7 @@ pub(super) async fn rotate_https_mcp_login_password(
     // holding the existing connection-operation lock.
     tauri::async_runtime::spawn_blocking(move || {
         let state = app.state::<AppState>();
-        let _connection = state.connection_operation.lock()
-            .map_err(|_| "连接操作锁已损坏".to_string())?;
+        let _connection = ConnectionCoordinator::acquire(&app, state.inner())?;
         if state.quitting.load(Ordering::SeqCst) {
             return Err("ChatX 正在退出".into());
         }

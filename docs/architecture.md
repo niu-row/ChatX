@@ -26,9 +26,16 @@ is intentionally not included.
 
 - `src-tauri/src/settings.rs` holds persisted transport settings and
   effective mode selection. `connection_intent.rs` holds durable Stop markers
-  that override saved intent.
+  that override saved intent. `connection_coordinator.rs` serializes
+  cross-mode operations and centralizes the ordering of Stop markers,
+  process shutdown and settings updates. Tunnel and HTTPS workers retain
+  their separate transport-specific implementations; manual, automatic,
+  Monitor-initiated and network-reconfiguration entry points use the same
+  coordination lock.
 - `connection_health.rs` is the single health predicate shared by desktop
   `get_status`, `get_https_mcp_status` and Android Monitor.
+  `status_contract.rs` defines the typed, backward-compatible camelCase
+  HTTPS status DTO, constructed from one consistent runtime snapshot.
   It checks local readiness, transport connection, public OAuth readiness,
   explicit Stop and a 45-second public-probe freshness window.
   UI should display `connected` rather than recomputing it from
@@ -37,6 +44,19 @@ is intentionally not included.
   `transportConnected`.
 - `https_mcp.rs` owns Bridge/transport lifecycle and public probes.
   `https_mcp_wss.rs` implements the WSS transport and per-stream queues.
+  `relay-protocol/src/mcp_http.rs` supplies the single path/header
+  allowlist and legacy limits for Relay and Desktop. `mcp_control.rs`
+  defines shared WSS v1/v2 JSON message kind names; binary framing stays
+  in `mcp_stream.rs`.
+- `src-tauri/src/app_state.rs` groups Relay connection, status and
+  deployment-admission fields under `relay`, while `connection` owns the
+  shared operation lock. `proxy_utils.rs` owns system proxy parsing and
+  environment injection, separately from the desktop main entry point.
+- `scripts/https-mcp-bridge.mjs` is HTTP/OAuth routing and assembly.
+  `https-mcp-handler.mjs` owns MCP JSON-RPC admission, cancellation and
+  request execution; `https-mcp-upstream.mjs` owns the singleton Desktop
+  Commander stdio session, bootstrap and close behavior. The existing
+  esbuild Bridge bundling automatically includes both internal modules.
 - `scripts/https-mcp-authorizations.mjs` exclusively owns persistent
   OAuth grant schema, rotation, listing and revocation. Rust never edits
   grant JSON: `https_mcp_authorizations.rs` invokes the bundled local-only

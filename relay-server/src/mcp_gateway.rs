@@ -11,6 +11,8 @@ use axum::{
 };
 use base64::{engine::general_purpose::STANDARD, Engine as _};
 use futures_util::{stream, StreamExt};
+use chatx_relay_protocol::mcp_control::ControlKind;
+use chatx_relay_protocol::mcp_http::{self, allowed_path, allowed_request_header, allowed_response_header};
 use chatx_relay_protocol::mcp_stream::{self, Kind};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -22,7 +24,7 @@ use std::{
 };
 use tokio::sync::{mpsc, watch, RwLock};
 
-const LEGACY_MAX_REQUEST: usize = 5 * 1024 * 1024;
+const LEGACY_MAX_REQUEST: usize = mcp_http::LEGACY_MAX_REQUEST_BYTES;
 const MAX_CHUNK: usize = mcp_stream::MAX_FRAME_BODY;
 const MAX_RESPONSE: usize = mcp_stream::MAX_RESPONSE_BYTES;
 const MAX_PENDING: usize = mcp_stream::MAX_INFLIGHT;
@@ -182,8 +184,8 @@ impl Gateway {
             }
         } else {
             let Some(packet) = packet else { return };
-            match packet.get("type").and_then(Value::as_str) {
-                Some("head") => {
+            match packet.get("type").and_then(Value::as_str).and_then(ControlKind::parse) {
+                Some(ControlKind::Head) => {
                     let Some(status) = packet.get("status").and_then(Value::as_u64) else { return };
                     if !(200..=599).contains(&status) { return; }
                     let headers = packet.get("headers").and_then(Value::as_object)
@@ -193,19 +195,19 @@ impl Gateway {
                         }).collect()).unwrap_or_default();
                     Reply::Head(status as u16, headers)
                 }
-                Some("chunk") if version == 1 => {
+                Some(ControlKind::Chunk) if version == mcp_http::WSS_PROTOCOL_V1 => {
                     let Some(encoded) = packet.get("data").and_then(Value::as_str) else { return };
                     if encoded.len() > MAX_CHUNK * 4 / 3 + 8 { return; }
                     let Ok(bytes) = STANDARD.decode(encoded) else { return };
-                    if bytes.len() > MAX_CHUNK || item.bytes + bytes.len() > 16 * 1024 * 1024 {
+                    if bytes.len() > MAX_CHUNK || item.bytes + bytes.len() > mcp_http::LEGACY_MAX_RESPONSE_BYTES {
                         Reply::Error
                     } else {
                         item.bytes += bytes.len();
                         Reply::Chunk(Bytes::from(bytes))
                     }
                 }
-                Some("end") => Reply::End,
-                Some("error") => Reply::Error,
+                Some(ControlKind::End) => Reply::End,
+                Some(ControlKind::Error) => Reply::Error,
                 _ => return,
             }
         };
@@ -234,29 +236,6 @@ impl Gateway {
 fn valid_desktop_id(id: &str) -> bool {
     id.starts_with("d_") && (18..=80).contains(&id.len()) &&
         id[2..].bytes().all(|b| b.is_ascii_hexdigit())
-}
-fn allowed_path(path: &str) -> bool {
-    matches!(path,
-        "/mcp" |
-        "/chatx-oauth/authorize" | "/chatx-oauth/approve" |
-        "/chatx-oauth/token" | "/chatx-oauth/register" |
-        "/.well-known/oauth-authorization-server" |
-        "/.well-known/oauth-protected-resource" |
-        "/.well-known/oauth-protected-resource/mcp")
-}
-fn allowed_request_header(key: &str) -> bool {
-    matches!(key, "content-type" | "accept" | "authorization" |
-        "mcp-session-id" | "mcp-protocol-version" | "last-event-id" |
-        "x-forwarded-for" | "user-agent" | "origin" | "accept-language")
-}
-fn allowed_response_header(key: &str) -> bool {
-    matches!(key, "content-type" | "cache-control" | "www-authenticate" |
-        "location" | "mcp-session-id" | "retry-after" |
-        "x-content-type-options" | "content-security-policy" |
-        "x-frame-options" | "referrer-policy" | "allow" |
-        "access-control-allow-origin" | "access-control-allow-methods" |
-        "access-control-allow-headers" | "access-control-expose-headers" |
-        "vary")
 }
 fn fail(status: StatusCode, message: &'static str) -> Response {
     (status, [("cache-control", "no-store")], message).into_response()
@@ -292,7 +271,8 @@ async fn socket_loop(state: AppState, mut socket: WebSocket, credential_hash: St
     let hello = tokio::time::timeout(Duration::from_secs(5), socket.recv()).await;
     let Ok(Some(Ok(Message::Text(text)))) = hello else { return; };
     let Ok(data) = serde_json::from_str::<Value>(&text) else { return; };
-    if data["type"] != "hello" || data["protocolVersion"] != 1 { return; }
+    if ControlKind::parse(data["type"].as_str().unwrap_or("")) != Some(ControlKind::Hello)
+        || data["protocolVersion"] != 1 { return; }
     let version: u8 = if data["supportedVersions"].as_array()
         .is_some_and(|versions| versions.contains(&json!(2))) { 2 } else { 1 };
     let Ok(session_id) = random_hex(16) else { return; };
@@ -318,7 +298,7 @@ async fn socket_loop(state: AppState, mut socket: WebSocket, credential_hash: St
     }
     eprintln!("[chatx-mcp] session online protocol=v{version}");
     if socket.send(Message::Text(json!({
-        "type": "hello_ack", "sessionId": session_id, "serverTime": now_ms(),
+        "type": ControlKind::HelloAck.as_str(), "sessionId": session_id, "serverTime": now_ms(),
         "protocolVersion": version
     }).to_string().into())).await.is_err() {
         disconnect(&gateway, &session_id).await;
@@ -347,9 +327,9 @@ async fn socket_loop(state: AppState, mut socket: WebSocket, credential_hash: St
                 match message {
                     Message::Text(text) => {
                         if let Ok(packet) = serde_json::from_str::<Value>(&text) {
-                            if packet["type"] == "ping" {
+                            if packet["type"] == ControlKind::Ping.as_str() {
                                 let _ = socket.send(Message::Text(
-                                    json!({"type":"pong"}).to_string().into())).await;
+                                    json!({"type":ControlKind::Pong.as_str()}).to_string().into())).await;
                             } else {
                                 gateway.receive(&session_id, version, Some(&packet), None).await;
                             }

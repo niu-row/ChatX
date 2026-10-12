@@ -1,6 +1,8 @@
 // Dedicated native outbound WSS transport for the loopback HTTPS/OAuth MCP Bridge.
 // Reuses the encrypted Relay desktop credential, not Android Monitor permissions.
 use crate::relay::RelayCredentials;
+use chatx_relay_protocol::mcp_control::ControlKind;
+use chatx_relay_protocol::mcp_http::{self, allowed_path, allowed_request_header as allowed_header, allowed_response_header};
 use chatx_relay_protocol::mcp_stream::{self, Kind};
 use futures_util::stream;
 use reqwest::Body;
@@ -26,7 +28,7 @@ use tokio_tungstenite::{
     },
 };
 
-const LEGACY_MAX_REQUEST: usize = 5 * 1024 * 1024;
+const LEGACY_MAX_REQUEST: usize = mcp_http::LEGACY_MAX_REQUEST_BYTES;
 const CHUNK_BYTES: usize = mcp_stream::MAX_FRAME_BODY;
 const SESSION_TIMEOUT: Duration = Duration::from_secs(45);
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
@@ -96,29 +98,6 @@ async fn stopped(stop: Arc<AtomicBool>) {
     while !stop.load(Ordering::SeqCst) {
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
-}
-
-fn allowed_path(path: &str) -> bool {
-    matches!(path,
-        "/mcp" |
-        "/chatx-oauth/authorize" | "/chatx-oauth/approve" |
-        "/chatx-oauth/token" | "/chatx-oauth/register" |
-        "/.well-known/oauth-authorization-server" |
-        "/.well-known/oauth-protected-resource" |
-        "/.well-known/oauth-protected-resource/mcp")
-}
-fn allowed_header(name: &str) -> bool {
-    matches!(name, "content-type" | "accept" | "authorization" | "mcp-session-id" |
-        "mcp-protocol-version" | "last-event-id" | "user-agent" |
-        "x-forwarded-for" | "origin" | "accept-language")
-}
-fn allowed_response_header(name: &str) -> bool {
-    matches!(name, "content-type" | "cache-control" | "www-authenticate" |
-        "location" | "mcp-session-id" | "retry-after" | "x-content-type-options" |
-        "content-security-policy" | "x-frame-options" | "referrer-policy" |
-        "allow" | "access-control-allow-origin" |
-        "access-control-allow-methods" | "access-control-allow-headers" |
-        "access-control-expose-headers" | "vary")
 }
 
 enum Outgoing {
@@ -237,7 +216,7 @@ async fn local_request(
         while let Some(chunk) = response.chunk().await.map_err(|_| "Local MCP stream error")? {
             sent = sent.saturating_add(chunk.len());
             let limit = if version == 2 { mcp_stream::MAX_RESPONSE_BYTES }
-                else { 16 * 1024 * 1024 };
+                else { mcp_http::LEGACY_MAX_RESPONSE_BYTES };
             if sent > limit { return Err("MCP response too large"); }
             for piece in chunk.chunks(CHUNK_BYTES) {
                 let frame = if version == 2 {
@@ -279,7 +258,7 @@ async fn session(
     };
     let (mut sink, mut stream) = socket.split();
     sink.send(Message::Text(json!({
-        "type":"hello", "protocolVersion":1, "supportedVersions":[1,2]
+        "type":ControlKind::Hello.as_str(), "protocolVersion":1, "supportedVersions":[1,2]
     }).to_string().into())).await.map_err(|e| e.to_string())?;
     let (tx, mut rx) = mpsc::channel::<Outgoing>(32);
     let limit = Arc::new(Semaphore::new(mcp_stream::MAX_INFLIGHT));
@@ -300,7 +279,7 @@ async fn session(
                 if last_seen.elapsed() > SESSION_TIMEOUT {
                     return Err("WSS heartbeat timeout".into());
                 }
-                sink.send(Message::Text(json!({"type":"ping"})
+                sink.send(Message::Text(json!({"type":ControlKind::Ping.as_str()})
                     .to_string().into())).await.map_err(|e| e.to_string())?;
             }
             outbound = rx.recv() => {
@@ -319,15 +298,15 @@ async fn session(
                 match message {
                     Message::Text(text) => {
                         let Ok(packet) = serde_json::from_str::<Value>(&text) else { continue; };
-                        match packet["type"].as_str() {
-                            Some("hello_ack") => {
+                        match packet["type"].as_str().and_then(ControlKind::parse) {
+                            Some(ControlKind::HelloAck) => {
                                 if !packet["sessionId"].is_string() { return Err("Invalid WSS ack".into()); }
                                 version = if packet["protocolVersion"] == 2 { 2 } else { 1 };
                                 accepted = true;
                                 connected.store(true, Ordering::SeqCst);
                                 eprintln!("[chatx-mcp] WSS connected, protocol=v{version}");
                             }
-                            Some("request") if accepted => {
+                            Some(ControlKind::Request) if accepted => {
                                 let Some(id) = packet["requestId"].as_str().map(str::to_string)
                                     else { continue };
                                 if id.len() != 32 || !id.bytes().all(|b| b.is_ascii_hexdigit()) {
@@ -352,18 +331,18 @@ async fn session(
                                         .await.map_err(|e| e.to_string())?;
                                 }
                             }
-                            Some("request_end") if version == 2 => {
+                            Some(ControlKind::RequestEnd) if version == mcp_http::WSS_PROTOCOL_V2 => {
                                 if let Some(id) = packet["requestId"].as_str() {
                                     uploads.remove(id);
                                 }
                             }
-                            Some("request_cancel") if version == 2 => {
+                            Some(ControlKind::RequestCancel) if version == mcp_http::WSS_PROTOCOL_V2 => {
                                 if let Some(id) = packet["requestId"].as_str() {
                                     uploads.remove(id);
                                     if let Some(task) = jobs.0.remove(id) { task.abort(); }
                                 }
                             }
-                            Some("pong") => {},
+                            Some(ControlKind::Pong) => {},
                             _ => {},
                         }
                     }

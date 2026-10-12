@@ -152,12 +152,12 @@ pub(super) async fn manage_relay_server(
     apply: bool,
 ) -> Result<Value, String> {
     config.validate()?;
-    if state.relay_deploy_busy.swap(true, Ordering::SeqCst) {
+    if state.relay.deploy_busy.swap(true, Ordering::SeqCst) {
         return Err("已有服务器部署或预检操作进行中".into());
     }
     let cloned = app.clone();
     let outcome = tauri::async_runtime::spawn_blocking(move || run(cloned, config, apply)).await;
-    state.relay_deploy_busy.store(false, Ordering::SeqCst);
+    state.relay.deploy_busy.store(false, Ordering::SeqCst);
     outcome.map_err(|e| format!("部署任务异常退出：{e}"))?
 }
 

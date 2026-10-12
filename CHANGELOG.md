@@ -2,6 +2,12 @@
 
 ## Unreleased — source refactor (not packaged or deployed)
 
+- Added a cross-transport Connection Coordinator for mode switching, durable stop intent, auto/Monitor reconnect serialization, and network settings changes.
+- Centralized Relay/Desktop WSS path/header forwarding policy, protocol versions, legacy limits and v1/v2 control message kinds in the existing relay-protocol crate.
+- Defined a typed HTTPS status DTO while preserving all existing JSON field names and Android compatibility aliases; health and diagnostics use the same snapshot.
+- Split Node HTTPS Bridge into OAuth/HTTP assembly, isolated MCP request handling, and a separately owned Desktop Commander stdio client. Existing bundling resolves both modules.
+- Grouped Relay runtime state and deployment admission in AppState; moved system proxy infrastructure out of the desktop entry point.
+
 - Centralized HTTPS MCP connection health and freshness across desktop and Android.
 - Split frontend HTTPS settings, OAuth security UI, and server deployment wizard.
 - Moved OAuth grant administration to the same bundled Node store used by the Bridge; Rust acts only as a local CLI adapter.

@@ -6,6 +6,7 @@ use super::{
 #[cfg(target_os = "macos")]
 use super::macos_account_home;
 use crate::{
+    connection_coordinator::ConnectionCoordinator,
     app_state::AppState,
     monitor_control, monitor_manager, monitor_status, relay,
     secrets::{
@@ -92,12 +93,12 @@ pub(super) fn relay_credentials_for_settings(
 }
 
 pub(super) fn stop_relay_client(state: &AppState) {
-    if let Ok(mut slot) = state.relay_client.lock() {
+    if let Ok(mut slot) = state.relay.client.lock() {
         let previous = slot.take();
         drop(slot);
         drop(previous);
     }
-    if let Ok(mut status) = state.relay_status.lock() {
+    if let Ok(mut status) = state.relay.status.lock() {
         status.connected = false;
         status.connecting = false;
         status.session_id = None;
@@ -109,7 +110,7 @@ fn relay_status_snapshot(
     state: &AppState,
     settings: &Settings,
 ) -> relay::RelayStatus {
-    let mut status = state.relay_status.lock()
+    let mut status = state.relay.status.lock()
         .map(|value| value.clone())
         .unwrap_or_default();
     status.enabled = settings.relay.enabled;
@@ -130,7 +131,7 @@ pub(super) fn start_relay_client_for_settings(
     stop_relay_client(state);
     let settings = load_settings(app);
     if !settings.relay.enabled {
-        if let Ok(mut status) = state.relay_status.lock() {
+        if let Ok(mut status) = state.relay.status.lock() {
             *status = relay::RelayStatus {
                 enabled: false,
                 configured: relay_credentials_for_settings(app, &settings).is_some(),
@@ -142,7 +143,7 @@ pub(super) fn start_relay_client_for_settings(
 
     relay::validate(&settings.relay)?;
     let Some(credentials) = relay_credentials_for_settings(app, &settings) else {
-        if let Ok(mut status) = state.relay_status.lock() {
+        if let Ok(mut status) = state.relay.status.lock() {
             *status = relay::RelayStatus {
                 enabled: true,
                 configured: false,
@@ -217,10 +218,10 @@ pub(super) fn start_relay_client_for_settings(
         settings.relay.clone(),
         credentials,
         master_key,
-        state.relay_status.clone(),
+        state.relay.status.clone(),
         handlers,
     )?;
-    let mut slot = state.relay_client.lock()
+    let mut slot = state.relay.client.lock()
         .map_err(|_| "Relay Client 状态锁已损坏。".to_string())?;
     *slot = Some(handle);
     Ok(())
@@ -486,8 +487,7 @@ pub(super) fn set_network_settings(
     payload: Value,
 ) -> Result<Value, String> {
     // Proxy updates may restart Tunnel; serialize against MCP mode switches.
-    let _connection = state.connection_operation.lock()
-        .map_err(|_| "连接操作锁已损坏".to_string())?;
+    let _connection = ConnectionCoordinator::acquire(&app, state.inner())?;
     let update_proxy = payload.get("proxy").is_some();
     let update_relay = payload.get("relay").is_some();
     if !update_proxy && !update_relay {

@@ -4,12 +4,13 @@ use super::{
     runtime_paths, state_dir, timestamp_ms, AppState, RuntimePaths, RUNTIME_ALIAS,
 };
 use crate::settings::{load_settings_checked, Settings};
+use crate::connection_coordinator::ConnectionCoordinator;
 use crate::connection_intent::{self, Transport};
 use crate::tunnel_recovery::{
     ensure_runtime_start_intent, reconnect_delay_secs, restore_desired_connection_intent,
     set_recovery_status, update_runtime_snapshot,
 };
-use crate::tunnel_status::runtime_status;
+use crate::tunnel_status::{runtime_status, ControlPlaneObservation, RuntimeObservation};
 use serde_json::{json, Value};
 use std::{
     fs,
@@ -18,6 +19,35 @@ use std::{
     time::{Duration, Instant},
 };
 use tauri::Manager;
+
+pub(super) fn cancel_connection_intent(state: &AppState) {
+    state.desired_connected.store(false, Ordering::SeqCst);
+    state.reconnecting.store(false, Ordering::SeqCst);
+    state.reconnect_attempt.store(0, Ordering::SeqCst);
+    set_recovery_status(state, "stopped", 0, "");
+    if let Ok(mut key) = state.session_runtime_key.lock() { *key = None; }
+}
+
+pub(super) fn stop_tunnel_without_saving(
+    app: &tauri::AppHandle,
+    state: &AppState,
+    settings: &crate::settings::Settings,
+) -> Result<(), String> {
+    cancel_connection_intent(state);
+    let _operation = state.runtime_operation.lock().map_err(|_| "Tunnel 操作锁已损坏。".to_string())?;
+    stop_runtime(app, Some(state))?;
+    let stopped = RuntimeObservation {
+        state: "stopped".into(),
+        active: false,
+        runtime_alive: false,
+        payload: None,
+        error: String::new(),
+        control_plane: ControlPlaneObservation::default(),
+        proxy_source: String::new(),
+    };
+    update_runtime_snapshot(state, &stopped, false, settings);
+    Ok(())
+}
 
 pub(super) fn stop_runtime(
     app: &tauri::AppHandle,
@@ -447,7 +477,7 @@ pub(super) fn start_reconnect_monitor(app: tauri::AppHandle) {
             // lock as manual start/stop, otherwise it could bring Tunnel back
             // after HTTPS MCP completed a mode switch.
             let reconnect_result = {
-                let guard = state.connection_operation.lock();
+                let guard = ConnectionCoordinator::acquire(&app, state.inner());
                 match guard {
                     Err(_) => Err("连接操作锁不可用，拒绝 Tunnel 自动重连".to_string()),
                     Ok(_guard) => {

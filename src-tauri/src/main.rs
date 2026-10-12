@@ -3,6 +3,7 @@
 mod app_state;
 mod call_history;
 mod connection_commands;
+mod connection_coordinator;
 mod connection_health;
 mod connection_intent;
 mod diagnostics_commands;
@@ -21,10 +22,12 @@ mod monitor_server;
 mod network_commands;
 mod platform_commands;
 mod process_utils;
+mod proxy_utils;
 mod relay;
 mod relay_deploy;
 mod secrets;
 mod settings;
+mod status_contract;
 mod tunnel_recovery;
 mod tunnel_runtime;
 mod tunnel_status;
@@ -32,9 +35,10 @@ mod tunnel_status;
 mod windows_process_job;
 
 use app_state::{AppState, RuntimePaths, TunnelRecoveryStatus};
+use connection_coordinator::ConnectionCoordinator;
 use call_history::{clear_call_history, get_call_history};
 use connection_commands::{
-    cancel_connection_intent, clear_saved_key, connect_tunnel, get_status,
+    clear_saved_key, connect_tunnel, get_status,
     set_auto_reconnect, stop_all_connections, stop_tunnel,
 };
 use diagnostics_commands::{
@@ -64,12 +68,16 @@ use platform_commands::{
     request_all_permissions, set_clamshell_awake,
 };
 use process_utils::{command_output, command_output_with_timeout};
+use proxy_utils::{
+    apply_proxy_env, effective_proxy_url, proxy_host_port, system_proxy_url,
+    tcp_probe, validate_proxy_url,
+};
 use relay_deploy::manage_relay_server;
 use secrets::{ensure_monitor_master_key, load_runtime_key, read_relay_credentials, runtime_key_saved};
 use settings::{load_settings, Settings};
 use tunnel_recovery::{reconnect_capability, recovery_status, set_recovery_status};
 use tunnel_runtime::{
-    restore_persisted_connection_state, start_reconnect_monitor, start_runtime_connection,
+    cancel_connection_intent, restore_persisted_connection_state, start_reconnect_monitor, start_runtime_connection,
     stop_runtime, wait_for_runtime_recovery,
 };
 use tunnel_status::{runtime_status, RuntimeObservation};
@@ -180,158 +188,6 @@ fn timestamp_ms() -> u64 {
 fn command_text(mut command: Command) -> Option<String> {
     let output = command_output(&mut command).ok()?;
     output.status.success().then(|| String::from_utf8_lossy(&output.stdout).trim().to_string())
-}
-
-fn validate_proxy_url(value: &str) -> Result<String, String> {
-    let value = value.trim();
-    if value.is_empty() {
-        return Err("代理地址不能为空。".into());
-    }
-    if value.chars().any(char::is_whitespace) || value.contains('@') {
-        return Err("代理地址不能包含空格或账号密码；当前版本仅支持无认证代理。".into());
-    }
-    if !["http://", "https://", "socks5://", "socks5h://"]
-        .iter()
-        .any(|prefix| value.starts_with(prefix))
-    {
-        return Err("代理地址必须以 http://、https://、socks5:// 或 socks5h:// 开头。".into());
-    }
-    let rest = value.split_once("://").map(|(_, rest)| rest).unwrap_or("");
-    if rest.is_empty() || rest.contains('/') {
-        return Err("代理地址仅支持 host:port，不支持路径。".into());
-    }
-    Ok(value.to_string())
-}
-
-fn proxy_host_port(value: &str) -> Option<(String, u16)> {
-    let value = validate_proxy_url(value).ok()?;
-    let (scheme, authority) = value.split_once("://")?;
-    if authority.starts_with('[') {
-        let end = authority.find(']')?;
-        let host = authority[1..end].to_string();
-        let port = authority.get(end + 1..)?.strip_prefix(':')?.parse().ok()?;
-        return Some((host, port));
-    }
-    if let Some((host, port)) = authority.rsplit_once(':') {
-        if !host.is_empty() {
-            return Some((host.to_string(), port.parse().ok()?));
-        }
-    }
-    let port = match scheme {
-        "http" => 80,
-        "https" => 443,
-        "socks5" | "socks5h" => 1080,
-        _ => return None,
-    };
-    Some((authority.to_string(), port))
-}
-
-fn tcp_probe(host: &str, port: u16) -> bool {
-    use std::net::{TcpStream, ToSocketAddrs};
-    let Ok(addresses) = (host, port).to_socket_addrs() else { return false; };
-    addresses.into_iter().take(4).any(|address| {
-        TcpStream::connect_timeout(&address, Duration::from_millis(800)).is_ok()
-    })
-}
-
-#[cfg(target_os = "macos")]
-fn proxy_value(text: &str, key: &str) -> Option<String> {
-    let prefix = format!("{key} : ");
-    text.lines()
-        .map(str::trim)
-        .find_map(|line| line.strip_prefix(&prefix).map(str::trim))
-        .filter(|value| !value.is_empty())
-        .map(str::to_string)
-}
-
-#[cfg(target_os = "macos")]
-fn system_proxy_url() -> Result<Option<String>, String> {
-    let mut command = Command::new("/usr/sbin/scutil");
-    command.arg("--proxy");
-    let output = command_output(&mut command)?;
-    if !output.status.success() {
-        return Err(format!("读取 macOS 系统代理失败：{}", output_text(&output)));
-    }
-    let text = String::from_utf8_lossy(&output.stdout);
-    let enabled = |key: &str| proxy_value(&text, key).as_deref() == Some("1");
-    let explicit = [
-        ("HTTPSEnable", "HTTPSProxy", "HTTPSPort", "http"),
-        ("HTTPEnable", "HTTPProxy", "HTTPPort", "http"),
-        ("SOCKSEnable", "SOCKSProxy", "SOCKSPort", "socks5"),
-    ];
-    for (flag, host_key, port_key, scheme) in explicit {
-        if !enabled(flag) { continue; }
-        if let (Some(host), Some(port)) = (proxy_value(&text, host_key), proxy_value(&text, port_key)) {
-            return Ok(Some(validate_proxy_url(&format!("{scheme}://{host}:{port}"))?));
-        }
-    }
-    if enabled("ProxyAutoConfigEnable") {
-        return Err("检测到 macOS PAC 自动代理；Tunnel 当前只支持明确的 HTTP/HTTPS/SOCKS 代理地址。".into());
-    }
-    Ok(None)
-}
-
-#[cfg(windows)]
-fn system_proxy_url() -> Result<Option<String>, String> {
-    let mut command = Command::new("powershell.exe");
-    command.args([
-        "-NoProfile", "-NonInteractive", "-Command",
-        "$p=Get-ItemProperty 'HKCU:\\Software\\Microsoft\\Windows\\CurrentVersion\\Internet Settings'; if($p.ProxyEnable -eq 1){$p.ProxyServer}",
-    ]);
-    let Some(raw) = command_text(command) else { return Ok(None); };
-    let selected = raw.split(';')
-        .find_map(|part| part.strip_prefix("https=").or_else(|| part.strip_prefix("http=")))
-        .unwrap_or(raw.as_str())
-        .trim();
-    if selected.is_empty() { return Ok(None); }
-    let url = if selected.contains("://") { selected.to_string() } else { format!("http://{selected}") };
-    Ok(Some(validate_proxy_url(&url)?))
-}
-
-#[cfg(not(any(target_os = "macos", windows)))]
-fn system_proxy_url() -> Result<Option<String>, String> {
-    for key in ["HTTPS_PROXY", "https_proxy", "HTTP_PROXY", "http_proxy"] {
-        if let Ok(value) = std::env::var(key) {
-            if !value.trim().is_empty() {
-                return Ok(Some(validate_proxy_url(&value)?));
-            }
-        }
-    }
-    Ok(None)
-}
-
-fn effective_proxy_url(settings: &Settings) -> Result<Option<String>, String> {
-    match settings.proxy.mode.as_str() {
-        "direct" => Ok(None),
-        "system" => {
-            if settings.proxy.applied_url.trim().is_empty() {
-                Ok(None)
-            } else {
-                Ok(Some(validate_proxy_url(&settings.proxy.applied_url)?))
-            }
-        }
-        "manual" => Ok(Some(validate_proxy_url(&settings.proxy.url)?)),
-        _ => Err("未知 Tunnel 代理模式。".into()),
-    }
-}
-
-fn apply_proxy_env(command: &mut Command, settings: &Settings) -> Result<Option<String>, String> {
-    for key in [
-        "HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "NO_PROXY",
-        "http_proxy", "https_proxy", "all_proxy", "no_proxy",
-    ] {
-        command.env_remove(key);
-    }
-    let proxy = effective_proxy_url(settings)?;
-    if let Some(value) = proxy.as_ref() {
-        for key in ["HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy"] {
-            command.env(key, value);
-        }
-        if value.starts_with("socks5") {
-            command.env("ALL_PROXY", value).env("all_proxy", value);
-        }
-    }
-    Ok(proxy)
 }
 
 fn host_device_name() -> String {
@@ -916,7 +772,7 @@ fn schedule_main_window_reclaim(app: tauri::AppHandle) {
 fn stop_on_exit(app: &tauri::AppHandle) {
     let state = app.state::<AppState>();
     state.quitting.store(true, Ordering::SeqCst);
-    let _connections = state.connection_operation.lock();
+    let _connections = ConnectionCoordinator::acquire(app, state.inner()).ok();
     stop_relay_client(state.inner());
     https_mcp::stop_on_exit(state.inner());
     let _ = monitor_manager::stop_monitor_service(state.inner());

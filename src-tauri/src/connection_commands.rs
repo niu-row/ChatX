@@ -3,6 +3,7 @@ use super::{
     runtime_paths, secret_path, timestamp_ms, APP_VERSION,
 };
 use crate::{
+    connection_coordinator::ConnectionCoordinator,
     app_state::{AppState, RuntimePaths},
     connection_intent::{self, Transport},
     mcp_sources, monitor,
@@ -15,10 +16,8 @@ use crate::{
         reconnect_capability, recovery_status, set_recovery_status,
         update_runtime_snapshot,
     },
-    tunnel_runtime::{start_runtime_connection, stop_runtime},
-    tunnel_status::{
-        runtime_status, ControlPlaneObservation, RuntimeObservation,
-    },
+    tunnel_runtime::{cancel_connection_intent, stop_tunnel_without_saving, start_runtime_connection, stop_runtime},
+    tunnel_status::runtime_status,
 };
 use serde_json::{json, Value};
 use std::{fs, sync::atomic::Ordering};
@@ -40,9 +39,9 @@ pub(super) fn get_status(app: tauri::AppHandle, state: State<'_, AppState>) -> R
     let recovery = recovery_status(state.inner());
     let tray_stop_error = state.tray_stop_error.lock()
         .map(|value| value.clone()).unwrap_or_default();
-    let https_mcp_status = crate::https_mcp::status_summary(&app, &settings.https_mcp, state.inner());
+    let https_mcp_status = crate::https_mcp::status_view(&app, &settings.https_mcp, state.inner());
     let active_mcp_mode = crate::settings::effective_mcp_mode(
-        &settings, https_mcp_status["enabled"] == true,
+        &settings, https_mcp_status.enabled,
         state.desired_connected.load(Ordering::SeqCst),
     );
     let (reconnect_available, reconnect_unavailable_reason) =
@@ -154,17 +153,8 @@ pub(super) fn set_auto_reconnect(app: tauri::AppHandle, state: State<'_, AppStat
     get_status(app, state)
 }
 
-pub(super) fn cancel_connection_intent(state: &AppState) {
-    state.desired_connected.store(false, Ordering::SeqCst);
-    state.reconnecting.store(false, Ordering::SeqCst);
-    state.reconnect_attempt.store(0, Ordering::SeqCst);
-    set_recovery_status(state, "stopped", 0, "");
-    if let Ok(mut key) = state.session_runtime_key.lock() { *key = None; }
-}
-
 pub(super) fn stop_requested(app: &tauri::AppHandle, state: &AppState) -> Result<(), String> {
-    let _connection = state.connection_operation.lock()
-        .map_err(|_| "连接操作锁已损坏".to_string())?;
+    let _connection = ConnectionCoordinator::acquire(app, state)?;
     let marker = connection_intent::mark_stopped(app, Transport::Tunnel);
     let settings = load_settings(app);
     let stopped = stop_tunnel_without_saving(app, state, &settings);
@@ -180,57 +170,11 @@ pub(super) fn stop_requested(app: &tauri::AppHandle, state: &AppState) -> Result
     marker
 }
 
-pub(super) fn stop_tunnel_without_saving(
-    app: &tauri::AppHandle,
-    state: &AppState,
-    settings: &crate::settings::Settings,
-) -> Result<(), String> {
-    cancel_connection_intent(state);
-    let _operation = state.runtime_operation.lock().map_err(|_| "Tunnel 操作锁已损坏。".to_string())?;
-    stop_runtime(app, Some(state))?;
-    let stopped = RuntimeObservation {
-        state: "stopped".into(),
-        active: false,
-        runtime_alive: false,
-        payload: None,
-        error: String::new(),
-        control_plane: ControlPlaneObservation::default(),
-        proxy_source: String::new(),
-    };
-    update_runtime_snapshot(state, &stopped, false, settings);
-    Ok(())
-}
-
 /// Stop both transports after one settings write, so concurrent UI calls cannot
 /// restore the other transport's connection intent from a stale settings copy.
 pub(super) fn stop_all_requested(app: &tauri::AppHandle, state: &AppState) -> Result<(), String> {
-    let _connection = state.connection_operation.lock()
-        .map_err(|_| "连接操作锁已损坏".to_string())?;
-    // Persist an independent stop marker *before* closing processes, so an
-    // interrupted settings write cannot re-enable them on the next launch.
-    let https_marker = connection_intent::mark_stopped(app, Transport::HttpsMcp);
-    let tunnel_marker = connection_intent::mark_stopped(app, Transport::Tunnel);
-    // An I/O error must not prevent disconnecting the remote command interface.
-    crate::https_mcp::stop_on_exit(state);
-    let settings = load_settings(app);
-    let stopped = stop_tunnel_without_saving(app, state, &settings);
-    let saved = update_settings(app, |settings| {
-        settings.connection_intent = false;
-        settings.https_mcp.enabled = false;
-        Ok(())
-    });
-    if let Err(error) = &saved {
-        push_log(state, format!("连接已停止，但保存停止状态失败：{error}"));
-    }
-    stopped?;
-    saved?;
-    https_marker?;
-    tunnel_marker?;
-    if let Ok(mut pending) = state.tray_stop_error.lock() { *pending = None; }
-    push_log(state, "已停止全部 MCP 连接");
-    Ok(())
+    ConnectionCoordinator::acquire(app, state)?.stop_all()
 }
-
 #[tauri::command]
 pub(super) fn stop_all_connections(
     app: tauri::AppHandle, state: State<'_, AppState>,
@@ -252,19 +196,12 @@ pub(super) fn connect_tunnel(
         return Err("Tunnel ID 应以 tunnel_ 开头。".into());
     }
     let key = load_runtime_key(&app, &runtime_key)?;
-    let _connection = state.connection_operation.lock()
-        .map_err(|_| "连接操作锁已损坏".to_string())?;
-    if state.quitting.load(Ordering::SeqCst) { return Err("ChatX 正在退出，拒绝连接 Tunnel".into()); }
+    let coordinator = ConnectionCoordinator::acquire(&app, state.inner())?;
+    coordinator.ensure_available("ChatX 正在退出，拒绝连接 Tunnel")?;
     // The user chose Tunnel. Stop the HTTPS bridge and its SSH forward
     // before starting the Tunnel runtime; preserve a durable stop marker so
     // the HTTPS transport cannot silently resume after an interrupted save.
-    connection_intent::mark_stopped(&app, Transport::HttpsMcp)?;
-    crate::https_mcp::stop_on_exit(state.inner());
-    update_settings(&app, |settings| {
-        settings.https_mcp.enabled = false;
-        settings.connection_intent = false;
-        Ok(())
-    })?;
+    coordinator.prepare_tunnel()?;
     let previous_settings = load_settings(&app);
 
     state.desired_connected.store(false, Ordering::SeqCst);
@@ -378,7 +315,7 @@ pub(super) fn connect_tunnel(
             if observation.active { "" } else { "等待 Tunnel Ready。" },
         );
     }
-    drop(_connection);
+    drop(coordinator);
     get_status(app, state)
 }
 
