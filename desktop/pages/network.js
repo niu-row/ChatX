@@ -13,6 +13,7 @@
     let busy = false;
     let proxyDirty = false;
     let relayDirty = false;
+    let latestPayload = null;
 
     const markProxyDirty = () => { proxyDirty = true; };
     const markRelayDirty = () => { relayDirty = true; };
@@ -37,6 +38,7 @@
     }
 
     function render(payload) {
+      latestPayload = payload;
       const proxy = payload?.proxy || {};
       const relay = payload?.relay || {};
       const relayState = relay.status || {};
@@ -130,15 +132,26 @@
         ? '已注册 · 安全存储'
         : setupProvisioned
           ? '未注册 · 可注册'
-          : '未注册 · 等待管理员预配';
+          : '未注册 · 请粘贴宝塔注册码';
 
       const registerRelay = $('registerRelay');
+      const hasCode = Boolean($('relayRegistrationCode').value.trim());
       registerRelay.textContent =
-        registered ? '已注册' : '注册此电脑';
+        registered ? (hasCode ? '重新注册此电脑' : '已注册')
+          : !hasCode && !setupProvisioned ? '先从宝塔获取注册码' : '注册此电脑';
       registerRelay.disabled =
         busy
-        || registered
-        || !$('relayBaseUrl').value.trim();
+        || (registered && !hasCode)
+        || (!hasCode && (!setupProvisioned || !$('relayBaseUrl').value.trim()));
+      $('relayRegistrationCode').disabled = busy;
+      $('relayNextStep').textContent = !registered
+        ? setupProvisioned ? '已预配注册凭据，点击“注册此电脑”即可。'
+          : '等待注册码：在宝塔 ChatX Relay 插件中生成后粘贴到这里。'
+        : !payload?.monitorEnabled
+          ? '电脑已注册。现在可以启动 ChatGPT MCP；需要手机监控时，请先在“手机连接”开启监控。'
+          : !enabled ? '电脑已注册。可以启动 ChatGPT MCP；打开本页开关并应用后，手机可通过公网监控。'
+            : connected ? '手机 Relay 已连接。ChatGPT MCP 请在连接页单独启动。'
+              : '电脑已注册，手机 Relay 正在恢复连接；最近错误会显示在下方。';
 
       $('relaySessionFact').textContent = connected
         ? `CONNECTED${relayState.sessionId ? ` · ${String(relayState.sessionId).slice(0, 12)}…` : ''}`
@@ -230,18 +243,23 @@
       $('relayTestResult').textContent =
         '正在注册此电脑…';
       try {
-        const saved = await invoke(
-          'set_network_settings',
-          { payload: collectPayload('relay') },
-        );
-        relayDirty = false;
-        render(saved);
+        const registrationCode = $('relayRegistrationCode').value.trim();
+        // Registration is shared with MCP and must work before Monitor is
+        // enabled. An unsaved Monitor switch is not part of this operation.
+        if (!registrationCode) {
+          await invoke('set_network_settings', {
+            payload: { relay: { baseUrl: $('relayBaseUrl').value.trim() } },
+          });
+        }
         const result = await invoke(
           'register_relay_desktop',
+          registrationCode ? { registrationCode } : {},
         );
+        $('relayRegistrationCode').value = '';
+        relayDirty = false;
         render(result);
         $('relayTestResult').textContent =
-          '此电脑已注册；后续公网连接只使用设备自己的安全凭据。';
+          '注册成功。下一步：在宝塔选定 MCP 主机，然后在连接页启动 HTTPS MCP；手机监控可单独启用。';
       } catch (error) {
         $('relayTestResult').textContent = '注册失败';
         showError(normalizeError(error));
@@ -311,6 +329,7 @@
       testRelay,
       markProxyDirty,
       markRelayDirty,
+      registrationCodeChanged: () => { if (latestPayload) render(latestPayload); },
       proxyModeChanged,
     });
   };

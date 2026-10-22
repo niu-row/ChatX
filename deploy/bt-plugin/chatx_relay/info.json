@@ -1,0 +1,14 @@
+{
+  "title": "ChatX Relay",
+  "name": "chatx_relay",
+  "type": "扩展",
+  "ps": "Relay 状态、一次性电脑注册与 ChatGPT MCP 主机管理",
+  "versions": "1.0.0",
+  "shell": "install.sh",
+  "checks": "/www/server/panel/plugin/chatx_relay/chatx_relay_main.py",
+  "author": "ChatX",
+  "home": "https://www.bt.cn/bbs/",
+  "date": "2026-10-16",
+  "default": false,
+  "display": 1
+}

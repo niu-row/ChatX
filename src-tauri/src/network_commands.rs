@@ -283,6 +283,7 @@ fn network_settings_payload(app: &tauri::AppHandle, state: &AppState) -> Value {
         .unwrap_or_default();
 
     json!({
+        "monitorEnabled": settings.monitor_enabled,
         "proxy": {
             "mode": settings.proxy.mode,
             "url": settings.proxy.url,
@@ -331,16 +332,33 @@ pub(super) fn prepare_relay_deploy_desktop_id(app: tauri::AppHandle) -> Result<S
 pub(super) fn register_relay_desktop(
     app: tauri::AppHandle,
     state: State<'_, AppState>,
+    registration_code: Option<String>,
 ) -> Result<Value, String> {
+    let _connection = ConnectionCoordinator::acquire(&app, state.inner())?;
     let settings = load_settings(&app);
-    if settings.relay.base_url.trim().is_empty() {
+    if settings.https_mcp.enabled {
+        return Err("请先在连接页停止 HTTPS MCP，再重新注册电脑；注册后可重新启动。".into());
+    }
+    let code = registration_code.as_deref().unwrap_or("").trim();
+    let mut target = settings.relay.clone();
+    let setup_token = if code.is_empty() {
+        read_relay_setup_token(&app)?
+    } else {
+        let (invite, _, _) = chatx_relay_protocol::registration::parse_code(code)
+            .map_err(str::to_string)?;
+        if invite.expires_at <= crate::timestamp_ms() {
+            return Err("注册码已过期，请在宝塔 ChatX Relay 插件中重新生成。".into());
+        }
+        target.base_url = invite.base_url;
+        code.to_string()
+    };
+    if target.base_url.trim().is_empty() {
         return Err("请先配置 Relay URL。".into());
     }
-    relay::normalized_base_url(&settings.relay.base_url)?;
-    let setup_token = read_relay_setup_token(&app)?;
+    relay::normalized_base_url(&target.base_url)?;
     let desktop_id = ensure_monitor_desktop_id(&app)?;
     let credentials = relay::register_desktop(
-        &settings.relay,
+        &target,
         &setup_token,
         &desktop_id,
         &host_device_name(),
@@ -348,12 +366,19 @@ pub(super) fn register_relay_desktop(
         &format!("{}-{}", std::env::consts::OS, std::env::consts::ARCH),
     )?;
     save_relay_credentials(&app, &credentials)?;
+    update_settings(&app, |current| {
+        current.relay.base_url.clone_from(&target.base_url);
+        if !current.https_mcp.enabled && current.https_mcp.transport == "wss" {
+            current.https_mcp.base_url.clone_from(&target.base_url);
+        }
+        Ok(())
+    })?;
     if settings.relay.enabled {
         start_relay_client_for_settings(&app, state.inner())?;
     }
     push_log(
         state.inner(),
-        format!("ChatX Relay Desktop 注册完成：{}", settings.relay.base_url),
+        format!("ChatX Relay Desktop 注册完成：{}", target.base_url),
     );
     Ok(network_settings_payload(&app, state.inner()))
 }

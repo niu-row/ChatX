@@ -20,6 +20,7 @@ const status = {
   keyStorage: 'session only', logs: [],
 };
 let networkInfo = {
+  monitorEnabled: false,
   proxy: {
     mode: 'direct', url: '', systemUrl: null, effectiveUrl: null,
     systemError: null, effectiveError: null,
@@ -45,6 +46,7 @@ let networkInfo = {
 let savedPayload;
 let testedPayload;
 let registrationCalls = 0;
+let registrationArgs;
 let deferNetworkRefresh = false;
 const networkRefreshRequests = [];
 const context = vm.createContext({
@@ -74,6 +76,7 @@ const context = vm.createContext({
         savedPayload = args.payload;
         const proxy = args.payload.proxy;
         const relay = args.payload.relay;
+        const domainChanged = relay?.baseUrl !== undefined && relay.baseUrl !== networkInfo.relay.baseUrl;
         networkInfo = {
           ...networkInfo,
           proxy: proxy ? {
@@ -81,11 +84,13 @@ const context = vm.createContext({
           } : networkInfo.proxy,
           relay: relay ? {
             ...networkInfo.relay, ...relay,
-            registered: false, credentialSaved: false,
+            registered: domainChanged ? false : networkInfo.relay.registered,
+            credentialSaved: domainChanged ? false : networkInfo.relay.credentialSaved,
             status: {
               ...networkInfo.relay.status,
-              enabled: relay.enabled, configured: false, connected: false,
-              desktopId: null, sessionId: null, lastHeartbeatAt: null,
+              enabled: relay.enabled ?? networkInfo.relay.enabled,
+              ...(domainChanged ? {configured: false, connected: false,
+                desktopId: null, sessionId: null, lastHeartbeatAt: null} : {}),
             },
           } : networkInfo.relay,
           tunnel: proxy ? {
@@ -97,10 +102,12 @@ const context = vm.createContext({
       }
       if (command === 'register_relay_desktop') {
         registrationCalls += 1;
+        registrationArgs = args;
         networkInfo = {
           ...networkInfo,
           relay: {
             ...networkInfo.relay,
+            baseUrl: args.registrationCode ? 'https://from-code.example.com' : networkInfo.relay.baseUrl,
             registered: true,
             credentialSaved: true,
             status: {
@@ -166,6 +173,8 @@ assert.equal(element('registerRelay').textContent, '注册此电脑');
 
 await vm.runInContext('registerRelayDesktop()', context);
 assert.equal(registrationCalls, 1);
+assert.equal(savedPayload.relay.enabled, undefined,
+  'Registering shared MCP credentials must not apply the unsaved Monitor switch');
 assert.equal(element('relayStatus').textContent, '已连接');
 assert.equal(element('relayRegistrationFact').textContent, '已注册 · 安全存储');
 assert.equal(element('registerRelay').textContent, '已注册');
@@ -214,5 +223,23 @@ await testedRefresh;
 
 assert.match(element('networkStatus').textContent, /HEALTHY/);
 assert.equal(element('controlPlaneReason').textContent, 'newest');
+
+deferNetworkRefresh = false;
+networkInfo.relay = {...networkInfo.relay, registered: false, credentialSaved: false,
+  enabled: false, setupProvisioned: false, baseUrl: '', status: {configured: false}};
+await vm.runInContext('refreshNetworkSettings()', context);
+assert.equal(element('registerRelay').disabled, true);
+assert.match(element('relayNextStep').textContent, /宝塔/);
+element('relayRegistrationCode').value = 'cxr1.test-invitation';
+vm.runInContext('networkPage.registrationCodeChanged()', context);
+assert.equal(element('registerRelay').disabled, false,
+  'A panel code includes its server URL and works before Monitor is enabled');
+savedPayload = null;
+await vm.runInContext('registerRelayDesktop()', context);
+assert.equal(registrationArgs.registrationCode, 'cxr1.test-invitation');
+assert.equal(savedPayload, null, 'Code registration must not save unrelated form switches first');
+assert.equal(element('relayRegistrationCode').value, '', 'Do not retain an enrollment credential after success');
+assert.equal(element('relayBaseUrl').value, 'https://from-code.example.com');
+assert.match(element('relayNextStep').textContent, /启动 ChatGPT MCP/);
 
 console.log('network UI checks passed: proxy, relay registration, WSS settings and stale refresh protection');

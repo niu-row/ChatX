@@ -1,0 +1,139 @@
+<div id="chatx-relay-panel">
+  <style>
+    #chatx-relay-panel{padding:24px;max-width:940px;font:14px/1.6 -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;color:#26344a;background:#f5f7fb}
+    #chatx-relay-panel *{box-sizing:border-box}
+    #chatx-relay-panel h2{font-size:24px;margin:0 0 5px;font-weight:650}
+    #chatx-relay-panel h3{font-size:17px;margin:0 0 10px;font-weight:650}
+    #chatx-relay-panel p{margin:0 0 12px}
+    #chatx-relay-panel .cx-subtle{color:#64748b;font-size:13px}
+    #chatx-relay-panel .cx-card{padding:20px;margin-top:16px;background:#fff;border:1px solid #dfe5ee;border-radius:12px}
+    #chatx-relay-panel .cx-toolbar{display:flex;gap:10px;align-items:center;flex-wrap:wrap}
+    #chatx-relay-panel .cx-toolbar h3{flex:1;margin:0}
+    #chatx-relay-panel .cx-status-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:12px}
+    #chatx-relay-panel .cx-stat{padding:14px;border:1px solid #e5eaf2;border-radius:9px}
+    #chatx-relay-panel .cx-stat span{display:block;font-size:12px;color:#64748b}
+    #chatx-relay-panel .cx-stat strong{display:block;margin-top:4px;font-size:18px}
+    #chatx-relay-panel button{padding:8px 13px;border:1px solid #cbd5e1;border-radius:7px;background:#fff;cursor:pointer;font:inherit}
+    #chatx-relay-panel button.cx-primary{background:#2563eb;border-color:#2563eb;color:white}
+    #chatx-relay-panel button:disabled{opacity:.55;cursor:default}
+    #chatx-relay-panel input,#chatx-relay-panel textarea{width:100%;padding:10px 12px;border:1px solid #cbd5e1;border-radius:7px;background:white;font:inherit;margin:7px 0 10px}
+    #chatx-relay-panel textarea{font:12px/1.6 ui-monospace,monospace;resize:vertical;word-break:break-all}
+    #chatx-relay-panel label{display:block;margin-top:12px;font-weight:600}
+    #chatx-relay-panel ol{margin:10px 0 0;padding-left:22px}
+    #chatx-relay-panel li{padding:3px 0}
+    #chatx-relay-panel .cx-message{padding:11px 14px;border-radius:8px;background:#eff6ff;color:#1e40af;margin:14px 0;white-space:pre-wrap}
+    #chatx-relay-panel .cx-message.cx-error{background:#fff1f2;color:#be123c}
+    #chatx-relay-panel table{width:100%;border-collapse:collapse;margin-top:14px;font-size:13px}
+    #chatx-relay-panel th,#chatx-relay-panel td{text-align:left;padding:11px 8px;border-bottom:1px solid #e5eaf2;vertical-align:top}
+    #chatx-relay-panel th{font-size:12px;color:#64748b;background:#f8fafc}
+    #chatx-relay-panel code{font:11px ui-monospace,monospace;overflow-wrap:anywhere}
+    #chatx-relay-panel .cx-badge{display:inline-block;padding:2px 7px;border-radius:5px;background:#dbeafe;color:#1d4ed8;font-size:12px}
+    #chatx-relay-panel [hidden]{display:none!important}
+    @media(max-width:700px){#chatx-relay-panel{padding:16px}#chatx-relay-panel .cx-status-grid{grid-template-columns:1fr}}
+  </style>
+  <h2>ChatX Relay</h2>
+  <p class="cx-subtle">注册电脑、选择 ChatGPT 主机，并查看两种连接是否就绪。</p>
+  <div class="cx-toolbar"><button data-cx="refresh">刷新状态</button><button data-cx="restart">启动 / 重启 Relay</button></div>
+  <p class="cx-message" data-cx="message" role="status">正在读取服务器状态…</p>
+  <div class="cx-status-grid">
+    <div class="cx-stat"><span>Relay 服务</span><strong data-cx="service">—</strong></div>
+    <div class="cx-stat"><span>ChatGPT MCP 转发</span><strong data-cx="mcp">—</strong></div>
+    <div class="cx-stat"><span>手机监控在线电脑</span><strong data-cx="monitor">—</strong></div>
+  </div>
+  <section class="cx-card">
+    <h3>1 · 注册一台电脑</h3>
+    <p class="cx-subtle">生成注册码后，在电脑打开 ChatX → 设置 → Relay 与电脑注册，粘贴并注册。无需填写 Desktop ID 或传递管理密钥。</p>
+    <label>Relay 的 HTTPS 地址<input data-cx="url" type="url" placeholder="https://relay.example.com" autocomplete="off"></label>
+    <button class="cx-primary" data-cx="invite">生成一次性注册码</button>
+    <div data-cx="invitation" hidden>
+      <label>复制到 ChatX<textarea data-cx="code" readonly rows="3" spellcheck="false" aria-label="一次性注册码"></textarea></label>
+      <div class="cx-toolbar"><button data-cx="copy">复制注册码</button><span class="cx-subtle" data-cx="expires"></span></div>
+      <p class="cx-subtle">10 分钟有效，仅能使用一次。注册完成后可关闭此页面。</p>
+    </div>
+  </section>
+  <section class="cx-card">
+    <div class="cx-toolbar"><h3>2 · 选择 ChatGPT MCP 主机</h3><button data-cx="refresh">刷新电脑列表</button></div>
+    <p class="cx-subtle">电脑注册后会出现在这里。一个域名同时转发到一台 MCP 主机；手机监控可以连接多台电脑。</p>
+    <table><thead><tr><th>电脑</th><th>版本 / 已配对手机</th><th>ChatGPT MCP</th></tr></thead><tbody data-cx="computers"></tbody></table>
+  </section>
+  <section class="cx-card">
+    <h3>3 · 在 ChatX 启动需要的连接</h3>
+    <ol>
+      <li><strong>ChatGPT：</strong>连接 → HTTPS MCP → 原生 WSS Relay → 启动 HTTPS MCP。然后将域名的 <code>/mcp</code> 地址添加到 ChatGPT。</li>
+      <li><strong>手机：</strong>手机连接 → 开启手机监控；再到设置 → Relay 与电脑注册，打开手机公网 Relay 并应用。</li>
+      <li>回到本页刷新。MCP 显示“已连接”、手机在线电脑数大于 0，即可分别确认对应通道。</li>
+    </ol>
+  </section>
+</div>
+<script>
+(function () {
+  var root = $('#chatx-relay-panel');
+  var find = function (name) { return root.find('[data-cx="' + name + '"]'); };
+  var busy = false, urlDirty = false;
+  function message(text, error) { find('message').text(text).toggleClass('cx-error', !!error); }
+  function request(method, data, callback) {
+    if (busy) return;
+    busy = true; root.find('button').prop('disabled', true);
+    $.ajax({url: '/plugin?action=a&name=chatx_relay&s=' + method, type: 'POST',
+      data: data || {}, dataType: 'json', timeout: 18000})
+      .done(function (result) {
+        if (!result || result.status !== true) { message(result && result.msg || '操作未完成，请检查面板登录状态。', true); return; }
+        callback(result);
+      }).fail(function () { message('无法连接宝塔插件，请重新登录面板后重试。', true); })
+      .always(function () { busy = false; root.find('button').prop('disabled', false); });
+  }
+  function render(data) {
+    if (!urlDirty) find('url').val(data.publicUrl || '');
+    find('service').text(data.healthy ? '正常' : data.installed ? '未就绪' : '尚未部署');
+    find('mcp').text(data.mcpConnected ? '已连接' : data.mcpDesktopId ? '等待电脑启动' : '尚未选择主机');
+    find('monitor').text(data.monitorDesktops || 0);
+    var body = find('computers').empty();
+    if (!data.desktops || !data.desktops.length) {
+      $('<tr>').append($('<td colspan="3">').text('暂无注册电脑，请先完成上方第 1 步。')).appendTo(body);
+    }
+    (data.desktops || []).forEach(function (computer) {
+      var row = $('<tr>');
+      $('<td>').append($('<strong>').text(computer.deviceName || '未命名电脑'), '<br>',
+        $('<code>').text(computer.desktopId), '<br>', $('<span class="cx-subtle">').text(computer.platform)).appendTo(row);
+      $('<td>').text((computer.appVersion || '—') + ' / ' + computer.pairedDevices + ' 台手机').appendTo(row);
+      var action = $('<td>').appendTo(row);
+      if (computer.selected) $('<span class="cx-badge">').text('当前主机').appendTo(action);
+      else $('<button>').text('设为 MCP 主机').attr('data-desktop', computer.desktopId).appendTo(action);
+      body.append(row);
+    });
+    if (!data.installed) message('请先通过 ChatX 的服务器部署向导安装 Relay 服务。', true);
+    else if (!data.healthy) message(data.healthError || 'Relay 未就绪，请启动服务后刷新。', true);
+    else if (!data.registrationCodesSupported) message('服务运行正常，但版本尚不支持注册码。请更新 Relay 服务后再注册电脑。', true);
+    else if (data.mcpConnected && data.monitorDesktops > 0) message('MCP 和手机监控通道均已连接。');
+    else message('服务器已就绪。请按下面 3 步完成电脑注册与连接。');
+  }
+  function refresh() { request('get_status', {}, function (result) { render(result.data); }); }
+  root.on('input', '[data-cx="url"]', function () { urlDirty = true; });
+  root.on('click', '[data-cx="refresh"]', refresh);
+  root.on('click', '[data-cx="invite"]', function () {
+    find('invitation').prop('hidden', true); find('code').val('');
+    request('create_invite', {public_url: find('url').val()}, function (result) {
+      find('code').val(result.data.code); find('invitation').prop('hidden', false);
+      find('expires').text('有效期至 ' + new Date(result.data.expiresAt).toLocaleTimeString());
+      message('注册码已生成。下一步：复制到 ChatX → 设置 → Relay 与电脑注册。');
+    });
+  });
+  root.on('click', '[data-cx="copy"]', function () {
+    var input = find('code')[0]; input.focus(); input.select();
+    if (document.execCommand('copy')) message('已复制，请在 ChatX 粘贴注册码。');
+    else message('请按 Ctrl+C 复制已选中的注册码。');
+  });
+  root.on('click', '[data-desktop]', function () {
+    var desktopId = $(this).attr('data-desktop');
+    layer.confirm('切换后 Relay 会短暂重启，桌面会自动重连。将这台电脑设为 ChatGPT MCP 主机？', {title:'选择 MCP 主机'}, function (index) {
+      layer.close(index); request('select_desktop', {desktop_id: desktopId}, function (result) { message(result.msg); });
+    });
+  });
+  root.on('click', '[data-cx="restart"]', function () {
+    layer.confirm('启动或重启 ChatX Relay？现有连接会短暂中断并自动恢复。', {title:'Relay 服务'}, function (index) {
+      layer.close(index); request('restart_relay', {}, function (result) { message(result.msg); });
+    });
+  });
+  refresh();
+})();
+</script>

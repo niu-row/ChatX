@@ -563,6 +563,15 @@ function bind() {
     setSettingsTab('relay');
     setPage('settings');
   });
+  $('openHttpsRelayRegistration').addEventListener('click', () => {
+    setSettingsTab('relay');
+    setPage('settings');
+  });
+  $('relayOpenMcp').addEventListener('click', () => {
+    showConnectionMode('https', true);
+    setPage('connection');
+  });
+  $('relayOpenMonitor').addEventListener('click', () => setPage('monitor'));
   for (const button of document.querySelectorAll('[data-connection-choice]')) {
     button.addEventListener('click', () => showConnectionMode(button.dataset.connectionChoice, true));
   }
@@ -598,6 +607,7 @@ function bind() {
   );
   $('proxyUrl').addEventListener('input', networkPage.markProxyDirty);
   $('relayBaseUrl').addEventListener('input', networkPage.markRelayDirty);
+  $('relayRegistrationCode').addEventListener('input', networkPage.registrationCodeChanged);
   $('relayEnabled').addEventListener('change', networkPage.markRelayDirty);
   $('saveNetwork').addEventListener('click', saveNetworkSettings);
   $('testNetwork').addEventListener('click', testNetworkSettings);

@@ -374,6 +374,7 @@ async fn health(State(state): State<AppState>) -> impl IntoResponse {
     Json(json!({
         "ok": true,
         "protocolVersion": PROTOCOL_VERSION,
+        "registrationCodesSupported": true,
         "onlineDesktops": state.online_desktops.read().await.len(),
         "mcpGateway": state.mcp_gateway.status().await,
         "serverTime": now_ms()

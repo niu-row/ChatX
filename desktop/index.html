@@ -116,7 +116,7 @@
           </details>
           <p id="httpsMcpEndpoint" class="mono-block">尚未配置 HTTPS MCP 地址</p>
           <p id="httpsMcpHint" class="muted">公网服务器须提供 HTTPS /mcp 与 OAuth 路径。授权密码和授权管理请前往“设置 → 安全与授权”。</p>
-          <div class="actions"><button id="openHttpsSecurity" class="ghost" type="button">管理 OAuth 授权 →</button></div>
+          <div class="actions"><button id="openHttpsSecurity" class="ghost" type="button">管理 OAuth 授权 →</button><button id="openHttpsRelayRegistration" class="ghost" type="button">首次使用？注册 Relay 电脑 →</button></div>
         </div>
         <details id="relayDeployPanel" class="card form-card relay-deploy-card">
           <summary>服务器一键部署 · 原生 WSS Relay</summary>
@@ -211,7 +211,7 @@
             <button class="settings-tab active" data-settings-tab="connection" role="tab" aria-selected="true" type="button">连接策略</button>
             <button class="settings-tab" data-settings-tab="security" role="tab" aria-selected="false" type="button">安全与授权</button>
             <button class="settings-tab" data-settings-tab="network" role="tab" aria-selected="false" type="button">网络与代理</button>
-            <button class="settings-tab" data-settings-tab="relay" role="tab" aria-selected="false" type="button">手机与 Relay</button>
+            <button class="settings-tab" data-settings-tab="relay" role="tab" aria-selected="false" type="button">Relay 与电脑注册</button>
             <button class="settings-tab platform-macos-only" data-settings-tab="system" role="tab" aria-selected="false" type="button" hidden>系统</button>
           </div>
           <div class="settings-panel" data-settings-panel="connection" role="tabpanel">
@@ -339,11 +339,22 @@
         </div>
           </div>
           <div class="settings-panel" data-settings-panel="relay" role="tabpanel" hidden>
-            <p class="settings-description">这里管理手机监控使用的公网 Relay。手机配对和设备移除继续在“手机连接”页面进行。</p>
+            <p class="settings-description">先将这台电脑注册到 Relay，再分别启动 ChatGPT MCP 和手机监控。两项共用电脑凭据，可以单独启停。</p>
             <div class="card settings-card relay-card">
           <div class="section-head">
-            <div><span class="eyebrow">CHATX RELAY</span><h2>公网连接</h2></div>
+            <div><span class="eyebrow">CHATX RELAY</span><h2>服务器与电脑注册</h2></div>
             <span id="relayStatus" class="setting-status">正在读取…</span>
+          </div>
+          <div class="relay-onboarding" aria-label="Relay 配置步骤">
+            <ol>
+              <li>在宝塔打开 <strong>软件商店 → 第三方应用 → ChatX Relay</strong>，确认服务器正常，生成 10 分钟有效的一次性注册码。</li>
+              <li>将注册码粘贴到下方，点击“注册此电脑”。服务器地址会自动填入，无需手动处理密钥。</li>
+              <li>在宝塔电脑列表选定 ChatGPT MCP 主机，再回到连接页启动 HTTPS MCP。手机监控按下方提示单独启用。</li>
+            </ol>
+            <p id="relayNextStep" role="status">正在读取配置进度…</p>
+            <label>宝塔一次性注册码<input id="relayRegistrationCode" type="password" autocomplete="off" spellcheck="false" placeholder="粘贴 cxr1. 开头的注册码"></label>
+            <div class="actions"><button id="registerRelay" class="primary" type="button">注册此电脑</button></div>
+            <small>注册码仅用于本次注册，不保存到设置或日志。已有管理员预配凭据时可留空。</small>
           </div>
           <div class="setting-row">
             <div class="setting-copy">
@@ -368,12 +379,15 @@
             <article><span>最近心跳</span><strong id="relayHeartbeatFact">—</strong></article>
             <article><span>最近错误</span><code id="relayErrorFact">—</code></article>
           </div>
-          <p class="network-note muted">一次性注册凭据属于 Relay 部署层，不在日常界面中显示。首次注册时由 ChatX 从管理员预配的受限存储中读取一次，注册成功后仅使用保存在系统安全存储中的 Desktop Credential。</p>
+          <p class="network-note muted">注册完成后，电脑凭据保存在系统安全存储中。上方注册同时服务于 MCP 与手机监控；本页的公网开关只控制手机监控 Relay。</p>
           <div class="network-actions">
             <button id="testRelay" class="secondary">测试 Relay</button>
-            <button id="registerRelay" class="secondary">注册此电脑</button>
             <button id="saveRelay" class="primary">应用 Relay 设置</button>
             <span id="relayTestResult" class="muted"></span>
+          </div>
+          <div class="network-actions relay-next-actions">
+            <button id="relayOpenMcp" class="ghost" type="button">下一步：启动 ChatGPT MCP →</button>
+            <button id="relayOpenMonitor" class="ghost" type="button">下一步：开启手机监控 →</button>
           </div>
         </div>
           </div>

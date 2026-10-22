@@ -14,6 +14,7 @@ release/
 release-local/
 
 android-monitor/.gradle/
+android-monitor/.kotlin/
 android-monitor/.idea/
 android-monitor/local.properties
 android-monitor/**/build/
@@ -24,3 +25,4 @@ relay-server/target/
 .chatx-ui*.xml
 .phone-now.*
 .install-switch.xml
+__pycache__/

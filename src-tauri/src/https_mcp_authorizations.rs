@@ -3,6 +3,10 @@
 use crate::{resource_candidates, runtime_paths, state_dir};
 use serde_json::{json, Value};
 use crate::settings::update_settings;
+#[cfg(windows)]
+use std::os::windows::process::CommandExt;
+#[cfg(windows)]
+use windows_sys::Win32::System::Threading::CREATE_NO_WINDOW;
 use std::{
     io::Read,
     process::{Command, Stdio},
@@ -33,6 +37,10 @@ fn administer(
     let mut command = Command::new(&paths.node);
     command.arg(script).arg(action);
     if let Some(id) = grant_id { command.arg(id); }
+    // OAuth grants are polled while the security settings tab is open.
+    // A console-subsystem Node child must not flash a window on Windows.
+    #[cfg(windows)]
+    command.creation_flags(CREATE_NO_WINDOW);
     let mut child = command
         .env("CHATX_MCP_AUTH_STORE", state.join("https-oauth-authorizations"))
         .env("CHATX_MCP_SETTINGS_PATH", state.join("settings.json"))

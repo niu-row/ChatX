@@ -137,6 +137,14 @@ html,body{height:100%;overflow:hidden}.shell{height:100vh;min-height:0;overflow:
 @media(max-width:700px){.settings-tabs{display:grid;grid-template-columns:repeat(2,minmax(0,1fr))}.settings-tab{text-align:center;white-space:normal}.oauth-settings-card .https-mcp-auth-options{display:grid;grid-template-columns:1fr}.oauth-settings-card .https-mcp-auth-options label{min-width:0}.secret-control{display:grid;grid-template-columns:1fr}.connection-advanced .https-mcp-fields{grid-template-columns:1fr}}
 
 /* Hidden inputs and inactive cards must stay hidden despite form-grid rules. */
+.relay-onboarding{margin:0 24px 18px;padding:18px;border:1px solid #cbdcf7;border-radius:12px;background:#f5f9ff;color:#334155}
+.relay-onboarding ol{padding-left:20px;margin:0 0 12px;line-height:1.8}
+.relay-onboarding li+li{margin-top:5px}
+.relay-onboarding label{display:grid;gap:8px;font-weight:600;margin:12px 0 8px}
+.relay-onboarding input{width:100%;min-width:0;padding:11px 12px;border:1px solid #cbd5e1;border-radius:8px;font:inherit;background:#fff}
+.relay-onboarding small{display:block;color:#64748b;line-height:1.6}
+.relay-onboarding #relayNextStep{margin:10px 0;font-weight:600;color:#1d4ed8;line-height:1.6}
+.relay-next-actions{padding-top:0}
 [hidden]{display:none!important}
 
 /* Small-window hierarchy: mode choice and main action remain above the fold. */

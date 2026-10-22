@@ -203,6 +203,10 @@ pub fn register_desktop(
         .send()
         .map_err(|error| format!("Relay 注册失败：{error}"))?;
     if !response.status().is_success() {
+        if response.status() == reqwest::StatusCode::UNAUTHORIZED
+            && token.starts_with("cxr1.") {
+            return Err("注册码无效、已过期或已使用，请在宝塔 ChatX Relay 插件中重新生成。".into());
+        }
         return Err(format!("Relay 注册失败：HTTP {}", response.status()));
     }
     let registered = response.json::<DesktopRegisterResponse>()

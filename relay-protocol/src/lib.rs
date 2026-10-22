@@ -1,6 +1,7 @@
 pub mod mcp_control;
 pub mod mcp_http;
 pub mod mcp_stream;
+pub mod registration;
 
 use serde::{Deserialize, Serialize};
 

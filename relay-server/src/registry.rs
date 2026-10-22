@@ -29,6 +29,8 @@ pub(crate) struct DesktopRecord {
 pub(crate) struct Registry {
     #[serde(default)]
     pub(crate) desktops: HashMap<String, DesktopRecord>,
+    #[serde(default, rename = "usedRegistrationInvites", skip_serializing_if = "HashMap::is_empty")]
+    pub(crate) used_registration_invites: HashMap<String, u64>,
 }
 
 pub(crate) fn token_hash(token: &str) -> String {

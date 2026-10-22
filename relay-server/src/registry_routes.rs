@@ -12,6 +12,22 @@ use axum::{
 use chatx_relay_protocol::{
     DesktopRegisterRequest, DesktopRegisterResponse, DeviceAuthorizeRequest,
 };
+use chatx_relay_protocol::registration::{parse_code, MAX_INVITE_LIFETIME_MS};
+use ring::hmac;
+
+fn registration_invite(token: &str, expected: &str, now: u64)
+    -> Result<Option<(String, u64)>, &'static str> {
+    if hash_matches(token, expected) { return Ok(None); }
+    let (invite, signed, signature) = parse_code(token)
+        .map_err(|_| "invalid registration code")?;
+    hmac::verify(&hmac::Key::new(hmac::HMAC_SHA256, expected.as_bytes()),
+        signed.as_bytes(), &signature).map_err(|_| "invalid registration code")?;
+    if invite.expires_at <= now
+        || invite.expires_at > now.saturating_add(MAX_INVITE_LIFETIME_MS) {
+        return Err("registration code expired; generate a new code in the Relay panel");
+    }
+    Ok(Some((token_hash(&invite.nonce), invite.expires_at)))
+}
 
 pub(super) fn desktop_registration_record(
     existing: Option<&DesktopRecord>,
@@ -43,9 +59,10 @@ pub(super) async fn register_desktop(
     let Some(token) = bearer(&headers) else {
         return json_error(StatusCode::UNAUTHORIZED, "missing bearer token");
     };
-    if !hash_matches(token, expected) {
-        return json_error(StatusCode::UNAUTHORIZED, "invalid bootstrap token");
-    }
+    let invite = match registration_invite(token, expected, now_ms()) {
+        Ok(invite) => invite,
+        Err(error) => return json_error(StatusCode::UNAUTHORIZED, error),
+    };
 
     let desktop_id = payload.desktop_id.trim().to_string();
     if !desktop_id.starts_with("d_")
@@ -66,9 +83,18 @@ pub(super) async fn register_desktop(
         Err(_) => return json_error(StatusCode::INTERNAL_SERVER_ERROR, "registry lock poisoned"),
     };
     let previous = registry.desktops.get(&desktop_id).cloned();
+    let previous_invites = registry.used_registration_invites.clone();
+    if let Some((id, expires_at)) = invite {
+        if registry.used_registration_invites.contains_key(&id) {
+            return json_error(StatusCode::UNAUTHORIZED, "registration code already used; generate a new code");
+        }
+        registry.used_registration_invites.retain(|_, expiry| *expiry > now_ms());
+        registry.used_registration_invites.insert(id, expires_at);
+    }
     let replacement = desktop_registration_record(previous.as_ref(), &desktop_token, &payload);
     registry.desktops.insert(desktop_id.clone(), replacement);
     if let Err(error) = state.save_registry(&registry) {
+        registry.used_registration_invites = previous_invites;
         if let Some(record) = previous {
             registry.desktops.insert(desktop_id.clone(), record);
         } else {
@@ -152,4 +178,86 @@ pub(super) async fn revoke_device(
     state.snapshots.write().await.remove(&(desktop_id.clone(), device_id.clone()));
     state.device_channels.write().await.remove(&(desktop_id, device_id));
     StatusCode::NO_CONTENT.into_response()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use chatx_relay_protocol::registration::{RegistrationInvite, SIGNING_CONTEXT};
+
+    fn invite_code(secret: &str, expires_at: u64) -> String {
+        let invite = RegistrationInvite {
+            base_url: "https://relay.example.com".into(), expires_at,
+            nonce: "ab".repeat(16),
+        };
+        let body: String = serde_json::to_vec(&invite).unwrap().iter()
+            .map(|byte| format!("{byte:02x}")).collect();
+        let key = hmac::Key::new(hmac::HMAC_SHA256, token_hash(secret).as_bytes());
+        let signature: String = hmac::sign(&key, format!("{SIGNING_CONTEXT}{body}").as_bytes())
+            .as_ref().iter().map(|byte| format!("{byte:02x}")).collect();
+        format!("cxr1.{body}.{signature}")
+    }
+
+    fn headers(code: &str) -> HeaderMap {
+        let mut headers = HeaderMap::new();
+        headers.insert("authorization", format!("Bearer {code}").parse().unwrap());
+        headers
+    }
+
+    fn payload(digit: &str) -> Json<DesktopRegisterRequest> {
+        Json(DesktopRegisterRequest {
+            desktop_id: format!("d_{}", digit.repeat(32)), device_name: "Test desktop".into(),
+            app_version: "test".into(), platform: "test".into(),
+        })
+    }
+
+    #[test]
+    fn invitation_signature_and_lifetime_are_checked() {
+        let hash = token_hash("admin-secret");
+        assert!(registration_invite("admin-secret", &hash, 10).unwrap().is_none());
+        let code = invite_code("admin-secret", 1000);
+        assert!(registration_invite(&code, &hash, 100).unwrap().is_some());
+        assert!(registration_invite(&code, &hash, 1000).is_err());
+        assert!(registration_invite(&code, &token_hash("wrong-server"), 100).is_err());
+        assert!(registration_invite(&invite_code("admin-secret", MAX_INVITE_LIFETIME_MS + 101),
+            &hash, 100).is_err());
+        let tampered = code.replacen("6874747073", "6874747072", 1);
+        assert!(registration_invite(&tampered, &hash, 100).is_err());
+    }
+
+    #[tokio::test]
+    async fn invitation_is_consumed_once_under_concurrency_and_after_restart() {
+        let path = std::env::temp_dir().join(format!("chatx-invite-{}.json", random_hex(8).unwrap()));
+        let state = AppState::load(path.clone(), Some("admin-secret".into())).unwrap();
+        let code = invite_code("admin-secret", now_ms() + MAX_INVITE_LIFETIME_MS);
+        let (a, b) = tokio::join!(
+            register_desktop(State(state.clone()), headers(&code), payload("a")),
+            register_desktop(State(state.clone()), headers(&code), payload("b")),
+        );
+        let statuses = [a.status(), b.status()];
+        assert_eq!(statuses.iter().filter(|s| **s == StatusCode::OK).count(), 1);
+        assert_eq!(statuses.iter().filter(|s| **s == StatusCode::UNAUTHORIZED).count(), 1);
+        let restored = AppState::load(path.clone(), Some("admin-secret".into())).unwrap();
+        assert_eq!(register_desktop(State(restored), headers(&code), payload("c")).await.status(),
+            StatusCode::UNAUTHORIZED);
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(!text.contains(&code));
+        assert!(!text.contains("admin-secret"));
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[tokio::test]
+    async fn failed_save_does_not_consume_invitation_or_replace_desktop() {
+        let path = std::env::temp_dir().join(format!("chatx-invite-fail-{}", random_hex(8).unwrap()));
+        let mut state = AppState::load(path.clone(), Some("admin-secret".into())).unwrap();
+        std::fs::write(&path, b"a file cannot be a parent directory").unwrap();
+        state.registry_path = path.join("registry.json");
+        let code = invite_code("admin-secret", now_ms() + MAX_INVITE_LIFETIME_MS);
+        assert_eq!(register_desktop(State(state.clone()), headers(&code), payload("a")).await.status(),
+            StatusCode::INTERNAL_SERVER_ERROR);
+        let registry = state.registry.lock().unwrap();
+        assert!(registry.desktops.is_empty());
+        assert!(registry.used_registration_invites.is_empty());
+        std::fs::remove_file(path).unwrap();
+    }
 }
